@@ -16,22 +16,23 @@ package integration
 //   1.  "start returns sessionId and status"
 //   2.  "wait returns result"
 //   3.  "info shows session details"
-//   4.  "wait on already-idle returns immediately"
-//   5.  "capture while idle — jsonl-short (default)"
-//   6.  "capture — jsonl-last"
-//   7.  "capture — jsonl-long"
-//   8.  "capture — jsonl-full"
-//   9.  "capture — buffer-last"
-//   10. "capture — buffer-full"
-//   11. "followup to idle session"
-//   12. "followup on processing errors without force"
-//   13. "followup with force on processing"
-//   14. "wait on offloaded session errors"
-//   15. "wait with no sessionId — returns first idle"
-//   16. "wait with no sessionId — errors if none busy"
-//   17. "wait with timeout"
-//   18. "input sends raw bytes and verifiable text"
-//   19. "session prefix resolution"
+//   4.  "cwd updates on directory change"
+//   5.  "wait on already-idle returns immediately"
+//   6.  "capture while idle — jsonl-short (default)"
+//   7.  "capture — jsonl-last"
+//   8.  "capture — jsonl-long"
+//   9.  "capture — jsonl-full"
+//   10. "capture — buffer-last"
+//   11. "capture — buffer-full"
+//   12. "followup to idle session"
+//   13. "followup on processing errors without force"
+//   14. "followup with force on processing"
+//   15. "wait on offloaded session errors"
+//   16. "wait with no sessionId — returns first idle"
+//   17. "wait with no sessionId — errors if none busy"
+//   18. "wait with timeout"
+//   19. "input sends raw bytes and verifiable text"
+//   20. "session prefix resolution"
 
 import (
 	"strings"
@@ -101,6 +102,33 @@ func TestSession(t *testing.T) {
 		assertNonEmpty(t, "createdAt", info.CreatedAt)
 		if len(info.Children) != 0 {
 			t.Fatalf("expected no children, got %d", len(info.Children))
+		}
+	})
+
+	t.Run("cwd updates on directory change", func(t *testing.T) {
+		// Record initial cwd
+		info := pool.send(Msg{"type": "info", "sessionId": s1})
+		before := parseSession(t, info["session"])
+		initialCwd := before.Cwd
+
+		// Create a subdirectory and ask Claude to cd into it
+		// (Claude sessions can only access local dirs, not system dirs like /tmp)
+		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "run these bash commands: mkdir -p cwd_test_dir && cd cwd_test_dir"})
+		pool.sendLong(
+			Msg{"type": "wait", "sessionId": s1, "timeout": 120000},
+			150*time.Second,
+		)
+
+		info = pool.send(Msg{"type": "info", "sessionId": s1})
+		after := parseSession(t, info["session"])
+		if after.Cwd == initialCwd {
+			t.Fatalf("cwd should have changed after cd, still %q", after.Cwd)
+		}
+		assertContains(t, after.Cwd, "cwd_test_dir")
+
+		// spawnCwd must NOT change — it's immutable
+		if after.SpawnCwd != before.SpawnCwd {
+			t.Fatalf("spawnCwd should be immutable: was %q, now %q", before.SpawnCwd, after.SpawnCwd)
 		}
 	})
 

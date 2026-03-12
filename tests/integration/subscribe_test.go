@@ -19,9 +19,10 @@ package integration
 //   8.  "re-subscribe replaces filters"
 //   9.  "updated event — priority change"
 //  10.  "updated event — pin/unpin"
-//  11.  "updated event — fields filter"
-//  12.  "archived and unarchived events"
-//  13.  "multiple concurrent subscribers"
+//  11.  "updated event — cwd change"
+//  12.  "updated event — fields filter"
+//  13.  "archived and unarchived events"
+//  14.  "multiple concurrent subscribers"
 
 import (
 	"testing"
@@ -328,6 +329,26 @@ func TestSubscribe(t *testing.T) {
 		if boolVal(changes, "pinned") {
 			t.Fatal("expected pinned=false in changes")
 		}
+	})
+
+	t.Run("updated event — cwd change", func(t *testing.T) {
+		sub := pool.subscribe(Msg{"events": []string{"updated"}, "fields": []string{"cwd"}})
+
+		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "run these bash commands: mkdir -p cwd_sub_test && cd cwd_sub_test"})
+		pool.sendLong(
+			Msg{"type": "wait", "sessionId": s1, "timeout": 120000},
+			150*time.Second,
+		)
+
+		ev, ok := sub.nextWithin(10 * time.Second)
+		if !ok {
+			t.Fatal("expected updated event for cwd change")
+		}
+		if strVal(ev, "event") != "updated" {
+			t.Fatalf("expected updated event, got %q", strVal(ev, "event"))
+		}
+		changes, _ := ev["changes"].(map[string]any)
+		assertContains(t, strVal(changes, "cwd"), "cwd_sub_test")
 	})
 
 	t.Run("updated event — fields filter", func(t *testing.T) {

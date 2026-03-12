@@ -70,6 +70,14 @@ func TestSlots(t *testing.T) {
 		session := parseSession(t, info["session"])
 		assertStatus(t, session, "queued")
 
+		// Queued session has no process yet — claudeUUID and PID should be empty
+		if session.ClaudeUUID != "" {
+			t.Fatalf("queued session should have no claudeUUID, got %q", session.ClaudeUUID)
+		}
+		if session.PID != 0 {
+			t.Fatalf("queued session should have no PID, got %v", session.PID)
+		}
+
 		healthResp := pool.send(Msg{"type": "health"})
 		health, _ := healthResp["health"].(map[string]any)
 		if numVal(health, "queueDepth") != 1 {
@@ -109,6 +117,14 @@ func TestSlots(t *testing.T) {
 
 		// s4 should dequeue into the freed slot
 		pool.awaitStatus(s4, "idle", 120*time.Second)
+
+		// After spawning, claudeUUID and PID should be populated
+		info := pool.send(Msg{"type": "info", "sessionId": s4})
+		session := parseSession(t, info["session"])
+		assertNonEmpty(t, "claudeUUID after dequeue", session.ClaudeUUID)
+		if session.PID <= 0 {
+			t.Fatalf("expected positive PID after dequeue, got %v", session.PID)
+		}
 
 		healthResp := pool.send(Msg{"type": "health"})
 		health, _ := healthResp["health"].(map[string]any)

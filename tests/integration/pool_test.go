@@ -21,7 +21,7 @@ package integration
 //   9.  "resize respects pins"
 //  10.  "destroy without confirm errors"
 //  11.  "destroy"
-//  12.  "re-init restores sessions"
+//  12.  "re-init restores sessions and config"
 //  13.  "re-init with noRestore"
 
 import (
@@ -211,9 +211,17 @@ func TestPool(t *testing.T) {
 		assertType(t, resp, "ok")
 	})
 
-	t.Run("re-init restores sessions", func(t *testing.T) {
+	t.Run("re-init restores sessions and config", func(t *testing.T) {
 		pool.awaitSocketGone(10 * time.Second)
 		pool.startDaemon()
+
+		// Config should survive daemon restart
+		cfgResp := pool.send(Msg{"type": "config"})
+		cfg, _ := cfgResp["config"].(map[string]any)
+		if numVal(cfg, "size") != 2 {
+			t.Fatalf("config size not persisted across restart: expected 2, got %v", numVal(cfg, "size"))
+		}
+		assertContains(t, strVal(cfg, "flags"), "haiku")
 
 		resp := pool.send(Msg{"type": "init", "size": 2})
 		assertNotError(t, resp)
