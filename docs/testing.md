@@ -14,23 +14,33 @@ config set flags "--dangerously-skip-permissions --model haiku"
 
 ## Framework
 
-Go's built-in `testing` package with `t.Run` subtests. Tests live in `tests/integration/`.
+Go's built-in `testing` package with `t.Run` subtests.
 
-Each test:
-1. Creates a temp pool directory
-2. Starts a daemon
-3. Runs assertions through the socket API
-4. Tears down (destroy + cleanup)
+## Test Layers
 
-## Test Structure
+### API Integration Tests (`tests/integration/`)
 
-Tests are organized as flow-based integration tests. See [tests/integration/CLAUDE.md](../tests/integration/CLAUDE.md) for the full philosophy, file listing, and guidelines for adding new tests.
+Test the daemon's behavior directly through the socket API. Raw JSON over Unix socket — no CLI involved. This is the bulk of testing.
+
+See [tests/integration/CLAUDE.md](../tests/integration/CLAUDE.md) for philosophy, file listing, and guidelines.
+
+### CLI Smoke Tests (`tests/cli/`)
+
+Test the CLI → daemon path: arg parsing, env var propagation (`CLAUDE_POOL_SESSION_ID`), output formatting, exit codes. Invoke the `claude-pool` CLI binary as a subprocess. Not a re-test of pool logic.
+
+See [tests/cli/CLAUDE.md](../tests/cli/CLAUDE.md) for philosophy and file listing.
 
 ## Running
 
 ```bash
-# All integration tests
+# All tests
+go test ./tests/... -v -timeout 15m
+
+# API integration tests only
 go test ./tests/integration/ -v -timeout 10m
+
+# CLI smoke tests only
+go test ./tests/cli/ -v -timeout 10m
 
 # Single flow
 go test ./tests/integration/ -v -run TestSession -timeout 5m
