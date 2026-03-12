@@ -60,13 +60,9 @@ func (p *Pool) EnsureDirs() error {
 		p.HooksDir(),
 	}
 	for _, d := range dirs {
-		if err := mkdirAll(d); err != nil {
+		if err := os.MkdirAll(d, 0755); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func mkdirAll(path string) error {
-	return os.MkdirAll(path, 0755)
 }

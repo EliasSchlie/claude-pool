@@ -58,11 +58,7 @@ func (m *Manager) Handle(conn net.Conn, req api.Msg) api.Msg {
 }
 
 func (m *Manager) handlePing(id any) api.Msg {
-	resp := api.Msg{"type": "pong"}
-	if id != nil {
-		resp["id"] = id
-	}
-	return resp
+	return api.Response(id, "pong")
 }
 
 func (m *Manager) handleConfig(id any, req api.Msg) api.Msg {
@@ -104,17 +100,12 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 	// TODO: spawn sessions
 	sessions := make([]any, 0)
 
-	resp := api.Msg{
-		"type": "pool",
+	return api.Response(id, "pool", api.Msg{
 		"pool": api.Msg{
 			"size":     float64(size),
 			"sessions": sessions,
 		},
-	}
-	if id != nil {
-		resp["id"] = id
-	}
-	return resp
+	})
 }
 
 func (m *Manager) handleHealth(id any) api.Msg {
@@ -126,19 +117,14 @@ func (m *Manager) handleHealth(id any) api.Msg {
 	}
 
 	// TODO: real health data
-	resp := api.Msg{
-		"type": "health",
+	return api.Response(id, "health", api.Msg{
 		"health": api.Msg{
 			"size":       float64(0),
 			"counts":     api.Msg{"idle": float64(0)},
 			"queueDepth": float64(0),
 			"sessions":   []any{},
 		},
-	}
-	if id != nil {
-		resp["id"] = id
-	}
-	return resp
+	})
 }
 
 func (m *Manager) handleDestroy(id any, req api.Msg) api.Msg {

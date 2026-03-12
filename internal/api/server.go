@@ -144,5 +144,7 @@ func (s *Server) writeMsg(conn net.Conn, msg Msg) {
 		return
 	}
 	data = append(data, '\n')
-	conn.Write(data)
+	if _, err := conn.Write(data); err != nil {
+		log.Printf("write error: %v", err)
+	}
 }

@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -31,11 +30,7 @@ func main() {
 	cfgMgr := pool.NewConfigManager(p.ConfigJSON())
 	mgr := pool.NewManager(p, cfgMgr)
 
-	handler := func(conn net.Conn, req api.Msg) api.Msg {
-		return mgr.Handle(conn, req)
-	}
-
-	srv := api.NewServer(p.Socket(), handler)
+	srv := api.NewServer(p.Socket(), mgr.Handle)
 	if err := srv.Start(); err != nil {
 		log.Fatalf("failed to start API server: %v", err)
 	}
