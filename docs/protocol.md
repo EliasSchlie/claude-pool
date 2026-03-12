@@ -80,10 +80,17 @@ The default is `jsonl-short` — a concise view of Claude's responses without to
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `size` | integer ≥ 1 | No | Number of slots. Falls back to `config.json` if omitted. |
+| `noRestore` | boolean | No | Skip restoring previously live sessions (default false). |
 
 **Response:** `{ type: "pool", pool }` — full pool state after init.
 
-**Behavior:** Creates a new pool with `size` pre-warmed Claude sessions. Reads flags from `config.json`. Errors if pool already initialized (sessions are running). Each slot spawns a Claude process with the configured flags. Sessions start in internal `fresh` state (API won't expose this — they appear once they reach a visible state). Updates `pools.json` registry.
+**Behavior:** Initializes the pool daemon. Reads flags from `config.json`. Errors if pool already initialized (sessions are running). Updates `pools.json` registry.
+
+If previous session state exists (from a prior run that was destroyed or crashed), `init` restores sessions that were **live** (idle, typing, or processing) when the pool last shut down. These sessions are loaded via `/resume` into available slots. Sessions that were already offloaded, dead, error, or archived remain in their prior state. If there are more sessions to restore than `size` slots, excess sessions stay offloaded and can be loaded later via `followup` or `pin`.
+
+If `noRestore: true`, previous session state is ignored — all slots are filled with fresh pre-warmed sessions instead.
+
+If no previous state exists (first-time init), all slots get fresh pre-warmed sessions regardless of `noRestore`.
 
 ---
 

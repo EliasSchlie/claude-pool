@@ -185,7 +185,7 @@
     },
 
     "init": {
-      "description": "Initialize pool. Size optional (falls back to config). Flags from config.json.",
+      "description": "Initialize pool. Restores previously live sessions by default. Size optional (falls back to config).",
       "request": {
         "type": "object",
         "properties": {
@@ -195,6 +195,11 @@
             "type": "integer",
             "minimum": 1,
             "description": "Slot count. Falls back to config.json if omitted."
+          },
+          "noRestore": {
+            "type": "boolean",
+            "default": false,
+            "description": "Skip restoring previously live sessions. All slots get fresh pre-warmed sessions."
           }
         },
         "required": ["type"]
