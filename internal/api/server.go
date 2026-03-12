@@ -21,6 +21,8 @@ type Server struct {
 	handler    Handler
 	wg         sync.WaitGroup
 	done       chan struct{}
+	conns      map[net.Conn]struct{}
+	connsMu    sync.Mutex
 }
 
 func NewServer(socketPath string, handler Handler) *Server {
@@ -28,6 +30,7 @@ func NewServer(socketPath string, handler Handler) *Server {
 		socketPath: socketPath,
 		handler:    handler,
 		done:       make(chan struct{}),
+		conns:      make(map[net.Conn]struct{}),
 	}
 }
 
@@ -58,14 +61,23 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Stop closes the listener and waits for connections to drain.
+// Stop closes the listener, removes the socket (so clients see it's gone immediately),
+// then waits for active connections to drain.
 func (s *Server) Stop() {
 	close(s.done)
 	if s.listener != nil {
 		s.listener.Close()
 	}
-	s.wg.Wait()
 	os.Remove(s.socketPath)
+
+	// Close all tracked connections so handleConn goroutines unblock
+	s.connsMu.Lock()
+	for conn := range s.conns {
+		conn.Close()
+	}
+	s.connsMu.Unlock()
+
+	s.wg.Wait()
 }
 
 func (s *Server) acceptLoop() {
@@ -89,7 +101,16 @@ func (s *Server) acceptLoop() {
 }
 
 func (s *Server) handleConn(conn net.Conn) {
-	defer conn.Close()
+	s.connsMu.Lock()
+	s.conns[conn] = struct{}{}
+	s.connsMu.Unlock()
+	defer func() {
+		s.connsMu.Lock()
+		delete(s.conns, conn)
+		s.connsMu.Unlock()
+		conn.Close()
+	}()
+
 	scanner := bufio.NewScanner(conn)
 	// Allow large messages (16MB)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
