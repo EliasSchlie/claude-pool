@@ -1,0 +1,72 @@
+// Package paths resolves all file paths within a pool directory.
+package paths
+
+import (
+	"os"
+	"path/filepath"
+)
+
+// Pool holds resolved paths for a pool directory.
+type Pool struct {
+	Root string // Pool root directory (--pool-dir)
+}
+
+func New(root string) *Pool {
+	return &Pool{Root: root}
+}
+
+func (p *Pool) ConfigJSON() string     { return filepath.Join(p.Root, "config.json") }
+func (p *Pool) PoolJSON() string       { return filepath.Join(p.Root, "pool.json") }
+func (p *Pool) Socket() string         { return filepath.Join(p.Root, "api.sock") }
+func (p *Pool) DaemonPID() string      { return filepath.Join(p.Root, "daemon.pid") }
+func (p *Pool) LogDir() string         { return filepath.Join(p.Root, "logs") }
+func (p *Pool) DaemonLog() string      { return filepath.Join(p.Root, "logs", "daemon.log") }
+func (p *Pool) ErrorLog() string       { return filepath.Join(p.Root, "logs", "error.log") }
+func (p *Pool) OffloadedDir() string   { return filepath.Join(p.Root, "offloaded") }
+func (p *Pool) ArchivedDir() string    { return filepath.Join(p.Root, "archived") }
+func (p *Pool) SessionPIDsDir() string { return filepath.Join(p.Root, "session-pids") }
+func (p *Pool) IdleSignalsDir() string { return filepath.Join(p.Root, "idle-signals") }
+func (p *Pool) HooksDir() string       { return filepath.Join(p.Root, ".claude") }
+func (p *Pool) HooksJSON() string      { return filepath.Join(p.Root, ".claude", "hooks.json") }
+
+// SessionOffloaded returns the directory for an offloaded session's metadata.
+func (p *Pool) SessionOffloaded(id string) string {
+	return filepath.Join(p.OffloadedDir(), id)
+}
+
+// SessionArchived returns the directory for an archived session's metadata.
+func (p *Pool) SessionArchived(id string) string {
+	return filepath.Join(p.ArchivedDir(), id)
+}
+
+// IdleSignal returns the path to a session's idle signal file.
+func (p *Pool) IdleSignal(id string) string {
+	return filepath.Join(p.IdleSignalsDir(), id)
+}
+
+// SessionPID returns the path for a PID mapping file.
+func (p *Pool) SessionPID(id string) string {
+	return filepath.Join(p.SessionPIDsDir(), id)
+}
+
+// EnsureDirs creates all required subdirectories.
+func (p *Pool) EnsureDirs() error {
+	dirs := []string{
+		p.LogDir(),
+		p.OffloadedDir(),
+		p.ArchivedDir(),
+		p.SessionPIDsDir(),
+		p.IdleSignalsDir(),
+		p.HooksDir(),
+	}
+	for _, d := range dirs {
+		if err := mkdirAll(d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func mkdirAll(path string) error {
+	return os.MkdirAll(path, 0755)
+}
