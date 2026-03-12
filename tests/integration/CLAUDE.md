@@ -59,6 +59,41 @@ go test ./tests/integration/ -v -run TestSession -timeout 5m
 
 The `-timeout` is important — real Claude sessions can take time.
 
+## Code Style
+
+### Protocol calls
+
+Use `pool.send(Msg{...})` directly for all protocol commands. No wrapper methods.
+Every request and response should be visible in the test — the reader should see
+exactly what JSON goes over the wire without tracing through helpers.
+
+### Comments
+
+Only comment when the intent isn't obvious from the code. Don't narrate what
+the code already says — comment *why* something is done, not *what*.
+
+Good:
+```go
+// Offload s1 so we can test that input errors on sessions without a live terminal
+offloadResp := pool.send(Msg{"type": "offload", "sessionId": s1})
+```
+
+```go
+// s2 should still be processing — followup must error without force
+resp := pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "ignore"})
+```
+
+Bad:
+```go
+// Send a start command
+resp := pool.send(Msg{"type": "start", "prompt": "hello"})
+// Check that there's no error
+assertNotError(t, resp)
+```
+
+The `t.Run` name describes the step. Inline comments explain non-obvious
+setup, preconditions, or why a particular assertion matters.
+
 ## Adding Tests
 
 1. If your test fits naturally into an existing flow, add a `t.Run` subtest at the
