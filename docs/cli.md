@@ -1,12 +1,13 @@
 # CLI Reference
 
-The CLI is a **separate package** (`claude-pool-cli`) that routes commands to pool daemons via their sockets. It reads `~/.claude-pool/pools.json` to resolve pool names to socket connections (local or remote).
+The CLI is a **separate package** (`claude-pool-cli`). It routes commands to pool daemons via their sockets, reading `~/.claude-pool/pools.json` to resolve pool names.
 
 ## Global Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--pool <name>` | `default` | Target a named pool from the registry |
+| `--all` | false | Show all pool sessions, not just owned ones |
 
 ## Daemon
 
@@ -33,36 +34,38 @@ claude-pool pool config set size 8
 ## Session Lifecycle
 
 ```bash
-claude-pool start <prompt>                  # Start new session
-claude-pool start <prompt> --block          # Start + wait for result
-claude-pool followup <sessionId> <prompt>   # Send to idle session
+claude-pool start <prompt>                    # Start new session (may queue)
+claude-pool start <prompt> --block            # Start + wait for result
+claude-pool followup <sessionId> <prompt>     # Send to idle session
 claude-pool followup <sessionId> <prompt> --block
-claude-pool resume <sessionId>              # Resume offloaded session
-claude-pool wait [sessionId]                # Wait for idle (any if no target)
-claude-pool result <sessionId>              # Get output (must be idle)
-claude-pool capture <sessionId>             # Get live terminal content
-claude-pool stop <sessionId>                # Interrupt running session
-claude-pool offload <sessionId>             # Manually offload idle session
+claude-pool resume <sessionId>                # Resume offloaded session
+claude-pool wait [sessionId]                  # Wait for idle (any owned if omitted)
+claude-pool result <sessionId>                # Get output (must be idle)
+claude-pool capture <sessionId>               # Get live terminal content
+claude-pool stop <sessionId>                  # Interrupt running session
+claude-pool offload <sessionId>               # Manually offload idle session
 ```
 
 ## Observing
 
 ```bash
-claude-pool ls                     # List sessions (table)
-claude-pool ls --idle              # Only idle sessions
-claude-pool ls --processing        # Only processing sessions
-claude-pool ls --all               # Include archived
+claude-pool ls                     # List owned sessions (default)
+claude-pool ls --all               # List all pool sessions
+claude-pool ls --idle              # Filter: only idle
+claude-pool ls --processing        # Filter: only processing
+claude-pool ls --queued            # Filter: only queued
 claude-pool ls --json              # Raw JSON
 
 claude-pool screen <sessionId>     # Terminal output (ANSI-stripped)
 claude-pool screen <sessionId> --raw
 claude-pool watch <sessionId> [interval]   # Follow output (default 2s)
+claude-pool info <sessionId>       # Session details (internal ID, Claude UUID, parent, status)
 ```
 
 ## Session Management
 
 ```bash
-claude-pool pin <sessionId> [seconds]      # Prevent auto-offload (default 120s)
+claude-pool pin <sessionId> [seconds]      # Prevent auto-offload + priority load (default 120s)
 claude-pool unpin <sessionId>              # Allow auto-offload
 claude-pool archive <sessionId>            # Archive session
 claude-pool unarchive <sessionId>          # Restore from archive
@@ -74,7 +77,7 @@ claude-pool unarchive <sessionId>          # Restore from archive
 claude-pool attach <sessionId>             # Attach to live terminal (raw PTY I/O)
 ```
 
-Attach gives you a live terminal stream — like `docker attach`. Pipe closes when session is offloaded or dies.
+Requires live session. To attach offloaded: `pin` → wait → `attach`.
 
 ## Low-level
 
@@ -93,9 +96,9 @@ claude-pool pools add <name> ssh://...     # Add remote pool
 claude-pool pools remove <name>            # Remove from registry
 ```
 
-## Targeting Sessions
+## Session Targeting
 
 | Format | Example | Description |
 |--------|---------|-------------|
-| Full UUID | `2947bf12-d307-...` | Exact Claude session UUID |
-| Prefix | `2947b` | Auto-resolves if unique match |
+| Full internal ID | `a7f2x9` | Pool-assigned session ID |
+| Prefix | `a7f` | Auto-resolves if unique match |

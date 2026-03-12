@@ -1,15 +1,12 @@
 {
   "name": "claude-pool",
   "version": "0.0.1",
-  "description": "Managed pool of Claude Code sessions — daemon, CLI, and socket API",
+  "description": "Managed pool of Claude Code sessions — daemon and socket API",
   "author": "Elias Schlie <elias@eliasschlie.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/EliasSchlie/claude-pool"
-  },
-  "bin": {
-    "claude-pool": "bin/claude-pool"
   },
   "main": "src/daemon.js",
   "engines": {

@@ -17,11 +17,31 @@ Newline-delimited JSON: each message is one JSON object followed by `\n`. Client
 
 Errors return `{ type: "error", error: "message" }`.
 
-## Session Addressing
+## Session Identity
 
-All sessions are addressed by their **Claude UUID** — the session UUID assigned by Claude Code. No slot indices, no terminal IDs, no internal identifiers.
+Sessions are addressed by **pool-assigned internal IDs** (not Claude UUIDs). Internal IDs are assigned immediately on `pool-start` — even while queued, before a Claude process exists. The Claude UUID is discovered later and mapped 1:1.
 
-Some commands accept an optional `sessionId`. When omitted, the daemon picks (e.g. `pool-wait` with no sessionId waits for any busy session).
+Use `get-session` to look up the Claude UUID for a session.
+
+## Ownership
+
+Every session has an optional `parentId` (the internal ID of the session that spawned it). The daemon auto-detects parents via the `CLAUDE_POOL_SESSION_ID` env var set on pool-spawned sessions. External callers can pass `parentId` explicitly.
+
+`get-sessions` returns only sessions owned by the caller (children + descendants) by default. Set `all: true` to see all pool sessions.
+
+## Session States
+
+| State | Meaning |
+|-------|---------|
+| `queued` | Request received, waiting for a slot |
+| `starting` | Slot allocated, Claude spawning, UUID not yet known |
+| `fresh` | Claude started, idle, never received a prompt |
+| `idle` | Finished processing, waiting for input |
+| `typing` | Input being sent (timing dance before Enter) |
+| `processing` | Claude is working |
+| `offloaded` | Snapshot saved, slot freed |
+| `dead` | Process died |
+| `error` | Slot error (crash during startup, etc.) |
 
 ## Commands
 
@@ -33,52 +53,46 @@ Some commands accept an optional `sessionId`. When omitted, the daemon picks (e.
 ### Pool Lifecycle
 | Command | Fields | Response |
 |---------|--------|----------|
-| `pool-init` | `size?` (default 5), `flags?` (override config) | `{ type: "pool", pool }` |
+| `pool-init` | `size?` (default 5), `flags?` | `{ type: "pool", pool }` |
 | `pool-resize` | `size` | `{ type: "pool", pool }` |
 | `pool-health` | — | `{ type: "health", health }` |
 | `pool-read` | — | `{ type: "pool", pool }` |
 | `pool-destroy` | — | `{ type: "ok" }` |
-| `pool-config` | `set?` (fields to update) | `{ type: "config", config }` |
+| `pool-config` | `set?` | `{ type: "config", config }` |
 
 ### Session Operations
 | Command | Fields | Response |
 |---------|--------|----------|
-| `pool-start` | `prompt` | `{ type: "started", sessionId }` |
-| `pool-resume` | `sessionId` | `{ type: "resumed", sessionId }` (may be new UUID) |
+| `pool-start` | `prompt`, `parentId?` | `{ type: "started", sessionId, status }` |
+| `pool-resume` | `sessionId` | `{ type: "resumed", sessionId, claudeUUID }` |
 | `pool-followup` | `sessionId`, `prompt`, `force?` | `{ type: "started", sessionId }` |
-| `pool-wait` | `sessionId?`, `timeout?` (ms, default 300000) | `{ type: "result", sessionId, buffer }` |
+| `pool-wait` | `sessionId?`, `timeout?` | `{ type: "result", sessionId, buffer }` |
 | `pool-capture` | `sessionId` | `{ type: "buffer", sessionId, buffer }` |
-| `pool-result` | `sessionId` | `{ type: "result", sessionId, buffer }` (errors if running) |
+| `pool-result` | `sessionId` | `{ type: "result", sessionId, buffer }` |
 | `pool-input` | `sessionId`, `data` | `{ type: "ok" }` |
-| `pool-offload` | `sessionId` | `{ type: "ok" }` (errors if busy) |
+| `pool-offload` | `sessionId` | `{ type: "ok" }` |
 
-**Behavior:**
-- `pool-start` — Claims a fresh slot (offloads LRU idle if none available), sends prompt.
-- `pool-resume` — Restores an offloaded session. The returned sessionId may differ (new Claude UUID).
-- `pool-followup` — Sends prompt to idle session. Auto-resumes if offloaded. Errors if busy (unless `force`).
-- `pool-wait` — Long-polls until idle. If no sessionId, waits for any busy session.
-- `pool-result` — Returns buffer only if idle.
-- `pool-offload` — Manually offload a specific session (snapshot + /clear). For when you're done with a session and want to free the slot without destroying it.
-- Automatic offloading happens via LRU eviction when `pool-start` needs a slot.
+**Queueing:** `pool-start` returns immediately with a `sessionId` and `status`. If status is `queued`, the session will be started FIFO when a slot becomes available. `pool-wait` works for queued sessions — it waits for the session to start, process, and become idle.
 
 ### Session Management
 | Command | Fields | Response |
 |---------|--------|----------|
-| `get-sessions` | — | `{ type: "sessions", sessions }` |
+| `get-sessions` | `all?` (default false) | `{ type: "sessions", sessions }` |
+| `get-session` | `sessionId` | `{ type: "session", session }` |
 | `archive-session` | `sessionId` | `{ type: "ok" }` |
 | `unarchive-session` | `sessionId` | `{ type: "ok" }` |
-| `pin-session` | `sessionId`, `duration?` (seconds, default 120) | `{ type: "ok" }` |
+| `pin-session` | `sessionId`, `duration?` (seconds) | `{ type: "ok" }` |
 | `unpin-session` | `sessionId` | `{ type: "ok" }` |
 | `stop-session` | `sessionId` | `{ type: "ok" }` |
+
+**Pin behavior:** Pinning prevents auto-offload. If the session is offloaded or queued, pinning bumps it to load on the next available slot (priority over queue).
 
 ### Terminal Attachment
 | Command | Fields | Response |
 |---------|--------|----------|
 | `attach` | `sessionId` | `{ type: "attached", socketPath }` |
 
-`attach` returns a path to a temporary Unix socket for raw PTY I/O. Connect to it for live terminal streaming (bytes in = keystrokes, bytes out = terminal output). The pipe closes automatically when the session is offloaded or dies.
-
-Only works for live sessions. Attach to an offloaded session → error. Resume first, then attach.
+Requires a live session. Pipe closes on offload/death. To attach to an offloaded session: pin → wait for live → attach.
 
 ## Security
 

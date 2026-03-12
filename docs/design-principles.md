@@ -18,46 +18,93 @@ These are non-negotiable. Code that violates an invariant is a bug.
 
 4. **Pools are uniform.** All sessions in a pool run with the same flags and configuration. If you need different flags, create a different pool. No mixed configurations within a pool.
 
-5. **Sessions are addressed by Claude UUID only.** No slot indices, no internal IDs, no terminal IDs in the API. The Claude session UUID is the only identifier clients use. The pool manages slots internally — clients never see or think about slots.
+5. **Internal session IDs are the primary identifier.** Each session gets a pool-assigned internal ID at request time (before a slot is allocated, before Claude starts). This ID is stable across the session's entire lifecycle: queued → live → offloaded → resumed. The Claude UUID is discovered later and mapped 1:1 to the internal ID. Both are queryable, but the internal ID is what clients use.
+
+6. **Sessions have owners.** Every session tracks its parent (the session or external caller that spawned it). By default, API queries return only sessions owned by the caller (direct children + their descendants). An explicit flag (`all: true`) shows all pool sessions. This prevents sessions from interfering with each other's sub-agents.
 
 ---
 
 ## 🟡 Design Decisions (strong defaults, debatable with good reason)
 
-6. **One daemon per pool.** Each pool runs a single daemon process that owns PTYs directly (via `node-pty` in-process). On restart, the daemon re-adopts orphaned PTY processes by checking PIDs from pool.json.
+7. **One daemon per pool.** Each pool runs a single daemon process that owns PTYs directly (via `node-pty` in-process). On restart, the daemon re-adopts orphaned PTY processes by checking PIDs from pool.json.
 
-7. **Each pool can run its own code version.** Different pools may run different versions of claude-pool. This enables safe testing of new versions alongside a stable production pool.
+8. **Each pool can run its own code version.** Different pools may run different versions of claude-pool. This enables safe testing of new versions alongside a stable production pool.
 
-8. **CLI is a separate package.** The CLI is a thin router that resolves pool names to socket connections (local or remote). It ships independently from the daemon. This keeps the daemon minimal and enables remote pool access without installing the full daemon.
+9. **CLI is a separate package.** The CLI is a thin router that resolves pool names to socket connections (local or remote). It ships independently from the daemon. This keeps the daemon minimal and enables remote pool access without installing the full daemon.
 
-9. **Pool registry for multi-pool access.** A shared registry (`~/.claude-pool/pools.json`) maps pool names to socket paths (local) or connection strings (remote). CLI and Open Cockpit both read this registry — no duplicated routing logic.
+10. **Pool registry for multi-pool access.** A shared registry (`~/.claude-pool/pools.json`) maps pool names to socket paths (local) or connection strings (remote). CLI and Open Cockpit both read this registry. Creating or deleting a pool automatically updates the registry.
 
-10. **CLI commands default to the `default` pool.** If `--pool` is not specified, all commands target the `default` entry in the registry.
+11. **CLI commands default to the `default` pool.** If `--pool` is not specified, all commands target the `default` entry in the registry.
 
-11. **Hooks use environment variables for pool routing.** The pool daemon sets `CLAUDE_POOL_HOME` (and similar env vars) when spawning sessions. Hook scripts read these variables to determine which pool directory to write to.
+12. **Hooks use environment variables for pool routing.** The pool daemon sets `CLAUDE_POOL_HOME` and `CLAUDE_POOL_SESSION_ID` when spawning sessions. Hook scripts read `CLAUDE_POOL_HOME` to determine which pool directory to write to. `CLAUDE_POOL_SESSION_ID` identifies the session for parent-child tracking.
 
-12. **Sugar operations live in the daemon.** High-level operations (start, followup, wait) that coordinate multiple internal steps (slot claiming, LRU eviction, offload/restore) are handled server-side. Clients send one request, get one response.
+13. **Sugar operations live in the daemon.** High-level operations (start, followup, wait) that coordinate multiple internal steps (slot claiming, LRU eviction, offload/restore, queueing) are handled server-side. Clients send one request, get one response.
 
-13. **Write locking prevents races.** All pool state mutations go through an async mutex. Multiple concurrent clients cannot corrupt pool.json.
+14. **Write locking prevents races.** All pool state mutations go through an async mutex. Multiple concurrent clients cannot corrupt pool.json.
 
-14. **Pool config drives spawning.** Each pool has a `config.json` with flags, size, etc. `pool init` and `pool resize` read flags from config. `pool config set` updates the config — affects future spawns only, never running sessions.
+15. **Pool config drives spawning.** Each pool has a `config.json` with flags, size, etc. All spawn operations (init, resize, reconciliation) read flags from config. `pool config set` updates the config — affects future spawns only, never running sessions.
 
-15. **Automatic slot management only.** The pool decides when to offload/restore sessions (LRU eviction when slots are needed). There is no manual "clean all" command. Clients can offload individual sessions explicitly if needed.
+16. **Requests queue when slots are full.** If all slots are busy and no idle session can be offloaded, `pool-start` queues the request. The request gets an internal session ID immediately. When a slot becomes available, the queued request is executed FIFO. Pinning a session that's offloaded or queued bumps it to load on the next available slot.
 
-16. **Attach is session-level.** Terminal attachment targets a session ID, not a slot. The daemon provides a raw pipe (separate socket) for live terminal I/O. If the session is offloaded, the pipe closes automatically. Clients reconnect after resume if needed.
+17. **Attach requires a live session.** Attach fails for offloaded/queued sessions. To attach to an offloaded session: pin it (triggers priority load) → wait for it to be live → attach. The raw pipe closes automatically when the session is offloaded or dies.
+
+18. **Automatic slot management.** The pool decides when to offload/restore sessions (LRU eviction when slots are needed). Clients can manually offload individual sessions. No bulk "clean" command.
 
 ---
 
 ## 🟢 Implementation Details (flexible, change freely)
 
-17. Written in Node.js (because existing code is Node.js and PTY ecosystem is mature here).
-18. Newline-delimited JSON protocol over Unix sockets.
-19. Reconciliation loop runs every 30 seconds.
-20. Socket permissions are `0600` (owner-only).
-21. Offloaded sessions stored as `snapshot.log` + `meta.json`.
-22. Default flags: `--dangerously-skip-permissions`.
+19. Written in Node.js (because existing code is Node.js and PTY ecosystem is mature here).
+20. Newline-delimited JSON protocol over Unix sockets.
+21. Reconciliation loop runs every 30 seconds.
+22. Socket permissions are `0600` (owner-only).
+23. Offloaded sessions stored as `snapshot.log` + `meta.json`.
+24. Default flags: `--dangerously-skip-permissions`.
 
 ---
+
+## Session States
+
+| State | Meaning |
+|-------|---------|
+| `queued` | Request received, waiting for a slot |
+| `starting` | Slot allocated, Claude process spawning, UUID not yet known |
+| `fresh` | Claude started, idle, never received a prompt (pre-warmed slot) |
+| `idle` | Finished processing, waiting for input |
+| `typing` | Input is being sent to the session (the timing dance before Enter) |
+| `processing` | Claude is working on a response |
+| `offloaded` | Snapshot saved, `/clear` sent, slot freed |
+| `dead` | Process died unexpectedly |
+| `error` | Slot in error state (crash during startup, etc.) |
+
+## Session Identity
+
+```
+Internal ID (pool-assigned)  ←→  Claude UUID (discovered after spawn)
+       "a7f2x9"             ←→  "2947bf12-d307-4a1c-..."
+```
+
+- Internal ID assigned immediately on `pool-start` (even while queued)
+- Claude UUID discovered via PID mapping after Claude process starts
+- Both are queryable: `get-session` returns both
+- `pool-result`, `pool-wait` etc. accept internal ID
+- Claude UUID needed for `/resume`, transcript access, etc.
+
+## Parent-Child Ownership
+
+```
+External caller (no parent)
+  └── session a7f2x9 (parent: null, spawned by external CLI)
+       ├── session b3k9m2 (parent: a7f2x9)
+       │    └── session c1p4q7 (parent: b3k9m2)
+       └── session d8w2n5 (parent: a7f2x9)
+```
+
+- `CLAUDE_POOL_SESSION_ID` env var set on spawned sessions
+- When a pool session calls `pool-start`, the daemon reads `CLAUDE_POOL_SESSION_ID` from the connection context to set the parent
+- External callers (CLI, scripts) can pass `parentId` explicitly, or omit it (parent = null)
+- `get-sessions` default: returns sessions owned by caller (children + descendants)
+- `get-sessions` with `all: true`: returns all pool sessions
 
 ## Scope — what claude-pool does NOT do
 
@@ -76,7 +123,7 @@ Each pool is fully self-contained:
 ```
 ~/.claude-pool/pools/<name>/
   config.json            # Pool configuration (flags, size)
-  pool.json              # Pool state (sessions, slots)
+  pool.json              # Pool state (sessions, queue, mappings)
   api.sock               # Daemon socket
   daemon.pid             # Daemon PID
   logs/                  # All pool logs
@@ -84,10 +131,10 @@ Each pool is fully self-contained:
     error.log            # Errors and crashes
     api.log              # API requests/responses (optional, for debugging)
   offloaded/             # Offloaded sessions
-    <claudeUUID>/
+    <internalId>/
       snapshot.log
       meta.json
-  session-pids/          # PID → Claude UUID mapping
+  session-pids/          # PID → internal ID mapping
   idle-signals/          # Session idle signal files
 ```
 
@@ -95,7 +142,7 @@ Global registry (not per-pool):
 
 ```
 ~/.claude-pool/
-  pools.json             # Pool name → socket path/connection string
+  pools.json             # Pool name → socket path/connection string (auto-updated)
   pools/
     default/             # Default pool
     work/                # Named pool
