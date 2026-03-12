@@ -10,6 +10,13 @@ Early development — designing from requirements, referencing Open Cockpit (`~/
 
 **[docs/design-principles.md](docs/design-principles.md)** — Invariants, design decisions, and implementation details, tiered by importance. All code must respect the invariants.
 
+## ⛔ Protected Files
+
+These files require **explicit user permission** before any modification:
+- `docs/design-principles.md` — Project invariants and rules
+- `docs/protocol.md` — API contract (human-readable)
+- `schema/protocol.json` — API contract (machine-readable)
+
 ## Architecture
 
 - `src/` — Daemon source (pool manager, PTY manager, API server, session discovery, attach server)

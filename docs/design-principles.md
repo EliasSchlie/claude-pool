@@ -1,5 +1,7 @@
 # Design Principles
 
+> ⛔ **Protected file.** No changes without explicit user permission.
+
 Rules that govern all design decisions. Tiered by importance — higher tiers override lower tiers.
 
 **This is not a 1:1 copy of Open Cockpit's pool logic.** We're taking lessons learned from Open Cockpit and designing a cleaner system from the requirements up. Open Cockpit code is a reference, not a blueprint.
@@ -18,7 +20,7 @@ These are non-negotiable. Code that violates an invariant is a bug.
 
 4. **Pools are uniform.** All sessions in a pool run with the same flags and configuration. If you need different flags, create a different pool. No mixed configurations within a pool.
 
-5. **Internal session IDs are the primary identifier.** Each session gets a pool-assigned internal ID at request time (before a slot is allocated, before Claude starts). This ID is stable across the session's entire lifecycle: queued → live → offloaded → resumed. The Claude UUID is discovered later and mapped 1:1 to the internal ID. Both are queryable, but the internal ID is what clients use.
+5. **Internal session IDs are the primary identifier.** Each session gets a pool-assigned internal ID (short random string) at request time — before a slot is allocated, before Claude starts. This ID is stable across the session's entire lifecycle: queued → live → offloaded → resumed. The Claude UUID is discovered later and mapped 1:1. Both are queryable, but the internal ID is what clients use.
 
 6. **Sessions have owners.** Every session tracks its parent (the session or external caller that spawned it). By default, API queries return only sessions owned by the caller (direct children + their descendants). An explicit flag (`all: true`) shows all pool sessions. This prevents sessions from interfering with each other's sub-agents.
 
@@ -42,53 +44,58 @@ These are non-negotiable. Code that violates an invariant is a bug.
 
 14. **Write locking prevents races.** All pool state mutations go through an async mutex. Multiple concurrent clients cannot corrupt pool.json.
 
-15. **Pool config drives spawning.** Each pool has a `config.json` with flags, size, etc. All spawn operations (init, resize, reconciliation) read flags from config. `pool config set` updates the config — affects future spawns only, never running sessions.
+15. **Pool config is the single source for spawn settings.** Each pool has a `config.json` with flags, size, etc. All spawn operations (init, resize, reconciliation) read flags from config. `pool-config set` updates the config — affects future spawns only. No per-command flag overrides in the protocol.
 
-16. **Requests queue when slots are full.** If all slots are busy and no idle session can be offloaded, `pool-start` queues the request. The request gets an internal session ID immediately. When a slot becomes available, the queued request is executed FIFO. Pinning a session that's offloaded or queued bumps it to load on the next available slot.
+16. **Requests queue when slots are full.** If all slots are busy and no idle session can be offloaded, `pool-start` queues the request FIFO. The request gets an internal session ID immediately. When a slot becomes available, the queued request is executed.
 
-17. **Attach requires a live session.** Attach fails for offloaded/queued sessions. To attach to an offloaded session: pin it (triggers priority load) → wait for it to be live → attach. The raw pipe closes automatically when the session is offloaded or dies.
+17. **Sessions are loaded or offloaded — nothing else.** No "archive" concept. Sessions are either in a slot (loaded) or not (offloaded). To load an offloaded session: send `pool-followup` (auto-resumes) or `pin-session` (triggers priority load). To offload: `pool-offload` or automatic LRU eviction.
 
-18. **Automatic slot management.** The pool decides when to offload/restore sessions (LRU eviction when slots are needed). Clients can manually offload individual sessions. No bulk "clean" command.
+18. **Attach requires a live session.** Attach fails for offloaded/queued sessions. To attach an offloaded session: pin it (triggers priority load) → wait for it to become live → attach. The raw pipe closes automatically when the session is offloaded or dies.
+
+19. **Automatic slot management.** The pool decides when to offload sessions via LRU eviction when slots are needed. Clients can manually offload individual sessions. No bulk "clean" command.
+
+20. **Session priority affects eviction order.** Each session has a numeric priority (default 0, range unbounded). LRU eviction prefers lower-priority sessions first, then oldest within the same priority. Priority is set per-session, not per-message. Does not affect processing speed or queue order.
 
 ---
 
 ## 🟢 Implementation Details (flexible, change freely)
 
-19. Written in Node.js (because existing code is Node.js and PTY ecosystem is mature here).
-20. Newline-delimited JSON protocol over Unix sockets.
-21. Reconciliation loop runs every 30 seconds.
-22. Socket permissions are `0600` (owner-only).
-23. Offloaded sessions stored as `snapshot.log` + `meta.json`.
-24. Default flags: `--dangerously-skip-permissions`.
+21. Written in Node.js (because existing code is Node.js and PTY ecosystem is mature here).
+22. Newline-delimited JSON protocol over Unix sockets.
+23. Reconciliation loop runs every 30 seconds.
+24. Socket permissions are `0600` (owner-only) — only the Unix user who owns the socket file can connect. Other users on the same machine cannot access the pool.
+25. Offloaded sessions stored as `snapshot.log` + `meta.json`.
+26. Default flags: `--dangerously-skip-permissions`.
+27. Typing detection: polls terminal buffer for un-submitted input text (reference: Open Cockpit `session-discovery.js` terminal input polling with consecutive-miss threshold).
 
 ---
 
-## Session States
+## Session States (API-visible)
 
 | State | Meaning |
 |-------|---------|
 | `queued` | Request received, waiting for a slot |
-| `starting` | Slot allocated, Claude process spawning, UUID not yet known |
-| `fresh` | Claude started, idle, never received a prompt (pre-warmed slot) |
 | `idle` | Finished processing, waiting for input |
-| `typing` | Input is being sent to the session (the timing dance before Enter) |
+| `typing` | Un-submitted input detected in terminal buffer |
 | `processing` | Claude is working on a response |
-| `offloaded` | Snapshot saved, `/clear` sent, slot freed |
+| `offloaded` | Snapshot saved, slot freed |
 | `dead` | Process died unexpectedly |
-| `error` | Slot in error state (crash during startup, etc.) |
+| `error` | Slot error (crash during startup, etc.) |
+
+Internal-only states (not exposed via API): `fresh` (pre-warmed slot, never prompted), `starting` (Claude process spawning). These are slot management details — clients see `queued` until the session is ready, then the first real state.
 
 ## Session Identity
 
 ```
-Internal ID (pool-assigned)  ←→  Claude UUID (discovered after spawn)
-       "a7f2x9"             ←→  "2947bf12-d307-4a1c-..."
+Internal ID (pool-assigned, short random)  ←→  Claude UUID (discovered after spawn)
+       "a7f2x9"                            ←→  "2947bf12-d307-4a1c-..."
 ```
 
 - Internal ID assigned immediately on `pool-start` (even while queued)
 - Claude UUID discovered via PID mapping after Claude process starts
-- Both are queryable: `get-session` returns both
-- `pool-result`, `pool-wait` etc. accept internal ID
-- Claude UUID needed for `/resume`, transcript access, etc.
+- Both are queryable via `get-session`
+- All API commands accept internal ID
+- Claude UUID needed for external operations (transcripts, `/resume`, etc.)
 
 ## Parent-Child Ownership
 
@@ -100,11 +107,18 @@ External caller (no parent)
        └── session d8w2n5 (parent: a7f2x9)
 ```
 
-- `CLAUDE_POOL_SESSION_ID` env var set on spawned sessions
-- When a pool session calls `pool-start`, the daemon reads `CLAUDE_POOL_SESSION_ID` from the connection context to set the parent
-- External callers (CLI, scripts) can pass `parentId` explicitly, or omit it (parent = null)
+- `CLAUDE_POOL_SESSION_ID` env var set on spawned sessions (auto-detection)
+- `parentId` field in `pool-start` for explicit override
 - `get-sessions` default: returns sessions owned by caller (children + descendants)
 - `get-sessions` with `all: true`: returns all pool sessions
+
+## Session Priority
+
+Numeric value (default 0, unbounded). Affects LRU eviction order only:
+- Lower priority evicted first
+- Within same priority, oldest evicted first
+- Does not affect queue order or processing speed
+- Set via `set-priority` command, can be changed anytime
 
 ## Scope — what claude-pool does NOT do
 

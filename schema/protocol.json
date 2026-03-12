@@ -1,25 +1,23 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Claude Pool Protocol",
-  "description": "Socket API contract. All requests and responses are newline-delimited JSON. Every request has a 'type' field. Responses echo back the 'id' field if provided. Sessions are addressed by pool-assigned internal IDs.",
+  "description": "Socket API contract. Sessions addressed by pool-assigned internal IDs (short random strings). Newline-delimited JSON over Unix socket.",
 
   "$defs": {
     "sessionId": {
       "type": "string",
-      "description": "Pool-assigned internal session ID (stable across entire lifecycle)"
+      "description": "Pool-assigned internal session ID (short random string, stable across lifecycle)"
     },
 
     "claudeUUID": {
       "type": "string",
       "pattern": "^[a-f0-9-]+$",
-      "description": "Claude Code session UUID (discovered after spawn, may be null while queued/starting)"
+      "description": "Claude Code session UUID (discovered after spawn, null while queued)"
     },
 
     "sessionStatus": {
       "enum": [
         "queued",
-        "starting",
-        "fresh",
         "idle",
         "typing",
         "processing",
@@ -27,7 +25,7 @@
         "dead",
         "error"
       ],
-      "description": "Session lifecycle state"
+      "description": "API-visible session states. Internal states (fresh, starting) are not exposed."
     },
 
     "poolState": {
@@ -49,6 +47,11 @@
         "parentId": {
           "type": ["string", "null"],
           "description": "Internal ID of parent session, null if spawned externally"
+        },
+        "priority": {
+          "type": "number",
+          "default": 0,
+          "description": "Eviction priority (lower = evicted first)"
         },
         "cwd": { "type": ["string", "null"] },
         "createdAt": { "type": "string" },
@@ -89,16 +92,16 @@
     },
 
     "pool-init": {
-      "description": "Initialize a new pool. Reads flags from config.json (or uses --flags override). Default flags: --dangerously-skip-permissions.",
+      "description": "Initialize a new pool. Size and flags from config.json.",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "pool-init" },
           "id": { "type": "integer" },
-          "size": { "type": "integer", "minimum": 1, "default": 5 },
-          "flags": {
-            "type": "string",
-            "description": "Override config flags for this init"
+          "size": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Override config size"
           }
         },
         "required": ["type"]
@@ -199,7 +202,7 @@
     },
 
     "pool-config": {
-      "description": "Get or set pool configuration. Affects future spawns only.",
+      "description": "Get or set pool configuration (flags, size). Affects future spawns only.",
       "request": {
         "type": "object",
         "properties": {
@@ -207,7 +210,7 @@
           "id": { "type": "integer" },
           "set": {
             "$ref": "#/$defs/poolConfig",
-            "description": "Fields to update. Omit to read current config."
+            "description": "Fields to update. Omit to read."
           }
         },
         "required": ["type"]
@@ -224,7 +227,7 @@
     },
 
     "pool-start": {
-      "description": "Start a new session with a prompt. Returns internal session ID immediately (even if queued). Offloads LRU idle if no fresh slots. Queues if all slots busy. Parent auto-detected from CLAUDE_POOL_SESSION_ID env var, or set via parentId field.",
+      "description": "Start a new session. Returns internal ID immediately (even if queued). Parent auto-detected from CLAUDE_POOL_SESSION_ID env var, or set via parentId.",
       "request": {
         "type": "object",
         "properties": {
@@ -233,7 +236,12 @@
           "prompt": { "type": "string" },
           "parentId": {
             "$ref": "#/$defs/sessionId",
-            "description": "Explicit parent session ID. Auto-detected from env if omitted."
+            "description": "Explicit parent. Auto-detected from env if omitted."
+          },
+          "priority": {
+            "type": "number",
+            "default": 0,
+            "description": "Eviction priority for this session"
           }
         },
         "required": ["type", "prompt"]
@@ -246,41 +254,15 @@
           "sessionId": { "$ref": "#/$defs/sessionId" },
           "status": {
             "$ref": "#/$defs/sessionStatus",
-            "description": "Initial status: 'starting' if slot available, 'queued' if waiting"
+            "description": "'queued' if no slot, else first real state"
           }
         },
         "required": ["type", "sessionId", "status"]
       }
     },
 
-    "pool-resume": {
-      "description": "Resume an offloaded session. Claims a fresh slot, sends /resume. Claude UUID may change.",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "pool-resume" },
-          "id": { "type": "integer" },
-          "sessionId": { "$ref": "#/$defs/sessionId" }
-        },
-        "required": ["type", "sessionId"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "resumed" },
-          "id": { "type": "integer" },
-          "sessionId": { "$ref": "#/$defs/sessionId" },
-          "claudeUUID": {
-            "$ref": "#/$defs/claudeUUID",
-            "description": "New Claude UUID (may differ from before offload)"
-          }
-        },
-        "required": ["type", "sessionId"]
-      }
-    },
-
     "pool-followup": {
-      "description": "Send a follow-up prompt to an idle session. Errors if busy (unless force=true). Auto-resumes if offloaded.",
+      "description": "Send prompt to idle session. Auto-resumes offloaded sessions. Errors if busy (unless force=true).",
       "request": {
         "type": "object",
         "properties": {
@@ -304,7 +286,7 @@
     },
 
     "pool-wait": {
-      "description": "Long-poll until session becomes idle. If no sessionId, waits for any owned busy session.",
+      "description": "Long-poll until session becomes idle. Works for queued sessions. If no sessionId, waits for any owned busy session.",
       "request": {
         "type": "object",
         "properties": {
@@ -333,7 +315,7 @@
     },
 
     "pool-capture": {
-      "description": "Get terminal buffer content (works even while session is running). Errors if queued/offloaded.",
+      "description": "Get terminal buffer (works while running). Errors if not in a slot (queued/offloaded).",
       "request": {
         "type": "object",
         "properties": {
@@ -356,7 +338,7 @@
     },
 
     "pool-result": {
-      "description": "Get terminal buffer only if session is idle. Errors if running, queued, or offloaded.",
+      "description": "Get terminal buffer only if idle. Errors if running, queued, or offloaded.",
       "request": {
         "type": "object",
         "properties": {
@@ -379,7 +361,7 @@
     },
 
     "pool-input": {
-      "description": "Send raw keystrokes to a live session's terminal. Errors if not live.",
+      "description": "Send raw keystrokes to a live session. Errors if not in a slot.",
       "request": {
         "type": "object",
         "properties": {
@@ -401,7 +383,7 @@
     },
 
     "pool-offload": {
-      "description": "Manually offload a specific idle session (snapshot + /clear). Errors if busy.",
+      "description": "Manually offload an idle session (snapshot + /clear). Errors if busy.",
       "request": {
         "type": "object",
         "properties": {
@@ -422,17 +404,13 @@
     },
 
     "get-sessions": {
-      "description": "List sessions. By default returns only sessions owned by the caller (children + descendants). Set all=true to see all pool sessions.",
+      "description": "List sessions. Default: only owned sessions (children + descendants). all=true for all pool sessions.",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "get-sessions" },
           "id": { "type": "integer" },
-          "all": {
-            "type": "boolean",
-            "default": false,
-            "description": "Show all pool sessions, not just owned ones"
-          }
+          "all": { "type": "boolean", "default": false }
         },
         "required": ["type"]
       },
@@ -451,7 +429,7 @@
     },
 
     "get-session": {
-      "description": "Get details for a single session, including both internal ID and Claude UUID.",
+      "description": "Get full details for a single session (internal ID, Claude UUID, parent, priority, status).",
       "request": {
         "type": "object",
         "properties": {
@@ -472,50 +450,8 @@
       }
     },
 
-    "archive-session": {
-      "description": "Archive a session (offloads first if live)",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "archive-session" },
-          "id": { "type": "integer" },
-          "sessionId": { "$ref": "#/$defs/sessionId" }
-        },
-        "required": ["type", "sessionId"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "ok" },
-          "id": { "type": "integer" }
-        },
-        "required": ["type"]
-      }
-    },
-
-    "unarchive-session": {
-      "description": "Move session from archived back to recent",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "unarchive-session" },
-          "id": { "type": "integer" },
-          "sessionId": { "$ref": "#/$defs/sessionId" }
-        },
-        "required": ["type", "sessionId"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "ok" },
-          "id": { "type": "integer" }
-        },
-        "required": ["type"]
-      }
-    },
-
     "pin-session": {
-      "description": "Prevent auto-offload. If session is offloaded or queued, bumps it to load on next available slot.",
+      "description": "Prevent auto-offload. If offloaded, triggers priority load (jumps queue). If queued, bumps to front.",
       "request": {
         "type": "object",
         "properties": {
@@ -526,7 +462,7 @@
             "type": "integer",
             "minimum": 0,
             "default": 120,
-            "description": "Pin duration in seconds"
+            "description": "Seconds"
           }
         },
         "required": ["type", "sessionId"]
@@ -542,7 +478,7 @@
     },
 
     "unpin-session": {
-      "description": "Allow session to be auto-offloaded again",
+      "description": "Allow auto-offload again",
       "request": {
         "type": "object",
         "properties": {
@@ -563,7 +499,7 @@
     },
 
     "stop-session": {
-      "description": "Interrupt a running session (sends Ctrl+C)",
+      "description": "Interrupt a running session (sends Ctrl+C). Transitions processing → idle.",
       "request": {
         "type": "object",
         "properties": {
@@ -583,8 +519,30 @@
       }
     },
 
+    "set-priority": {
+      "description": "Set session eviction priority. Lower = evicted first. Default 0. Does not affect queue order or processing speed.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "set-priority" },
+          "id": { "type": "integer" },
+          "sessionId": { "$ref": "#/$defs/sessionId" },
+          "priority": { "type": "number" }
+        },
+        "required": ["type", "sessionId", "priority"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
     "attach": {
-      "description": "Attach to a live session's terminal. Returns a socket path for raw PTY I/O. Pipe closes automatically if session is offloaded or dies. Errors if session is not live (offloaded, queued, dead). Pin first to trigger loading, then attach.",
+      "description": "Attach to live session terminal. Returns socket path for raw PTY I/O. Pipe closes on offload/death. Errors if not live.",
       "request": {
         "type": "object",
         "properties": {
