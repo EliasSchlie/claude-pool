@@ -71,18 +71,9 @@ func TestParentChild(t *testing.T) {
 			t.Fatalf("expected parentId %s, got %q", s1, session2.ParentID)
 		}
 
-		// s1 should now list s2 as a child
 		info1 := pool.send(Msg{"type": "info", "sessionId": s1})
 		session1 := parseSession(t, info1["session"])
-		found := false
-		for _, c := range session1.Children {
-			if c.SessionID == s2 {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("s1 children should contain s2")
-		}
+		assertHasChild(t, session1, s2)
 	})
 
 	t.Run("start grandchild", func(t *testing.T) {
@@ -101,15 +92,7 @@ func TestParentChild(t *testing.T) {
 
 		info2 := pool.send(Msg{"type": "info", "sessionId": s2})
 		session2 := parseSession(t, info2["session"])
-		found := false
-		for _, c := range session2.Children {
-			if c.SessionID == s3 {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("s2 children should contain s3")
-		}
+		assertHasChild(t, session2, s3)
 	})
 
 	t.Run("start second child of root", func(t *testing.T) {
@@ -125,18 +108,8 @@ func TestParentChild(t *testing.T) {
 
 		info1 := pool.send(Msg{"type": "info", "sessionId": s1})
 		session1 := parseSession(t, info1["session"])
-		foundS2, foundS4 := false, false
-		for _, c := range session1.Children {
-			if c.SessionID == s2 {
-				foundS2 = true
-			}
-			if c.SessionID == s4 {
-				foundS4 = true
-			}
-		}
-		if !foundS2 || !foundS4 {
-			t.Fatalf("s1 should have children s2 and s4, foundS2=%v foundS4=%v", foundS2, foundS4)
-		}
+		assertHasChild(t, session1, s2)
+		assertHasChild(t, session1, s4)
 	})
 
 	t.Run("info shows recursive children", func(t *testing.T) {
@@ -180,15 +153,8 @@ func TestParentChild(t *testing.T) {
 		assertNotError(t, lsResp)
 		sessions := parseSessions(t, lsResp)
 
-		// Find s1 in the results and check its tree
-		var root SessionInfo
-		for _, s := range sessions {
-			if s.SessionID == s1 {
-				root = s
-				break
-			}
-		}
-		if root.SessionID == "" {
+		root, found := findSession(sessions, s1)
+		if !found {
 			t.Fatal("s1 not found in tree ls")
 		}
 		if len(root.Children) < 2 {

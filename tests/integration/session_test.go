@@ -114,11 +114,14 @@ func TestSession(t *testing.T) {
 		assertContains(t, strVal(resp, "content"), "hello world")
 	})
 
+	var shortContent string
+
 	t.Run("capture while idle — jsonl-short default", func(t *testing.T) {
 		resp := pool.send(Msg{"type": "capture", "sessionId": s1})
 		assertNotError(t, resp)
 		assertType(t, resp, "result")
-		assertNonEmpty(t, "capture content", strVal(resp, "content"))
+		shortContent = strVal(resp, "content")
+		assertNonEmpty(t, "capture content", shortContent)
 	})
 
 	t.Run("capture — jsonl-last", func(t *testing.T) {
@@ -140,9 +143,6 @@ func TestSession(t *testing.T) {
 		assertNonEmpty(t, "jsonl-full content", fullContent)
 
 		// jsonl-full is the complete unfiltered transcript — should always be >= jsonl-short
-		// which only includes assistant messages since the last user message
-		respShort := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-short"})
-		shortContent := strVal(respShort, "content")
 		if len(fullContent) < len(shortContent) {
 			t.Fatalf("jsonl-full (%d bytes) should be >= jsonl-short (%d bytes)",
 				len(fullContent), len(shortContent))

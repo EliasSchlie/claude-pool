@@ -152,23 +152,7 @@ func TestPool(t *testing.T) {
 			t.Fatalf("expected size 3 after resize, got %v", numVal(state, "size"))
 		}
 
-		// Wait for 3 idle sessions
-		healthResp := pool.sendLong(Msg{"type": "health"}, 120*time.Second)
-		health, _ := healthResp["health"].(map[string]any)
-
-		// Poll until we see 3 idle — the new session needs time to pre-warm
-		deadline := time.Now().Add(120 * time.Second)
-		for time.Now().Before(deadline) {
-			healthResp = pool.send(Msg{"type": "health"})
-			health, _ = healthResp["health"].(map[string]any)
-			counts, _ := health["counts"].(map[string]any)
-			if numVal(counts, "idle") == 3 {
-				return
-			}
-			time.Sleep(2 * time.Second)
-		}
-		counts, _ := health["counts"].(map[string]any)
-		t.Fatalf("expected 3 idle after resize, got %v idle", numVal(counts, "idle"))
+		pool.awaitIdleCount(3, 120*time.Second)
 	})
 
 	t.Run("resize down to 1", func(t *testing.T) {
@@ -179,37 +163,14 @@ func TestPool(t *testing.T) {
 		resp := pool.send(Msg{"type": "resize", "size": 1})
 		assertNotError(t, resp)
 
-		// Wait for pool to settle at 1 slot — stop s1 so its slot can be reclaimed
-		pool.send(Msg{"type": "stop", "sessionId": s1})
-		pool.sendLong(Msg{"type": "wait", "sessionId": s1, "timeout": 120000}, 150*time.Second)
-
-		// Poll health until we reach 1 slot
-		deadline := time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			healthResp := pool.send(Msg{"type": "health"})
-			health, _ := healthResp["health"].(map[string]any)
-			if numVal(health, "size") == 1 {
-				return
-			}
-			time.Sleep(1 * time.Second)
-		}
-		t.Fatal("pool did not shrink to 1 slot within timeout")
+		// Stop s1 so its slot can be reclaimed
+		pool.stopAndWait(s1)
+		pool.awaitPoolSize(1, 30*time.Second)
 	})
 
 	t.Run("resize respects pins", func(t *testing.T) {
-		// Resize to 2, wait for both idle
 		pool.send(Msg{"type": "resize", "size": 2})
-
-		deadline := time.Now().Add(120 * time.Second)
-		for time.Now().Before(deadline) {
-			healthResp := pool.send(Msg{"type": "health"})
-			health, _ := healthResp["health"].(map[string]any)
-			counts, _ := health["counts"].(map[string]any)
-			if numVal(counts, "idle") == 2 {
-				break
-			}
-			time.Sleep(2 * time.Second)
-		}
+		pool.awaitIdleCount(2, 120*time.Second)
 
 		// Identify current sessions
 		lsResp := pool.send(Msg{"type": "ls", "all": true})
@@ -224,26 +185,17 @@ func TestPool(t *testing.T) {
 		// Resize to 1 — the unpinned session should lose its slot
 		pool.send(Msg{"type": "resize", "size": 1})
 
-		deadline = time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			healthResp := pool.send(Msg{"type": "health"})
-			health, _ := healthResp["health"].(map[string]any)
-			if numVal(health, "size") == 1 {
-				// Verify the pinned session survived
-				infoResp := pool.send(Msg{"type": "info", "sessionId": pinned})
-				assertNotError(t, infoResp)
-				info := parseSession(t, infoResp["session"])
-				if info.Status == "offloaded" || info.Status == "archived" {
-					t.Fatalf("pinned session was evicted: status=%s", info.Status)
-				}
+		pool.awaitPoolSize(1, 30*time.Second)
 
-				pool.send(Msg{"type": "unpin", "sessionId": pinned})
-				return
-			}
-			time.Sleep(1 * time.Second)
+		// Verify the pinned session survived
+		infoResp := pool.send(Msg{"type": "info", "sessionId": pinned})
+		assertNotError(t, infoResp)
+		info := parseSession(t, infoResp["session"])
+		if info.Status == "offloaded" || info.Status == "archived" {
+			t.Fatalf("pinned session was evicted: status=%s", info.Status)
 		}
+
 		pool.send(Msg{"type": "unpin", "sessionId": pinned})
-		t.Fatal("pool did not shrink to 1 slot within timeout")
 	})
 
 	t.Run("destroy without confirm errors", func(t *testing.T) {
@@ -251,13 +203,7 @@ func TestPool(t *testing.T) {
 		assertError(t, resp)
 	})
 
-	// Save a session ID before destroying — we'll check for it after re-init
-	lsResp := pool.send(Msg{"type": "ls", "all": true})
-	preDestroySessions := parseSessions(t, lsResp)
-	var restoredID string
-	if len(preDestroySessions) > 0 {
-		restoredID = preDestroySessions[0].SessionID
-	}
+	// s1 was the first session — we'll check if it's restored after re-init
 
 	t.Run("destroy", func(t *testing.T) {
 		resp := pool.send(Msg{"type": "destroy", "confirm": true})
@@ -286,17 +232,17 @@ func TestPool(t *testing.T) {
 		}
 
 		// Check if the pre-destroy session was restored
-		if restoredID != "" {
+		if s1 != "" {
 			found := false
 			for _, raw := range sessions {
 				sm, _ := raw.(map[string]any)
-				if strVal(sm, "sessionId") == restoredID {
+				if strVal(sm, "sessionId") == s1 {
 					found = true
 					break
 				}
 			}
 			if !found {
-				t.Logf("warning: expected session %s to be restored, but it wasn't in pool sessions", restoredID)
+				t.Logf("warning: expected session %s to be restored, but it wasn't in pool sessions", s1)
 			}
 		}
 	})
@@ -319,7 +265,7 @@ func TestPool(t *testing.T) {
 		for _, raw := range sessions {
 			sm, _ := raw.(map[string]any)
 			sid := strVal(sm, "sessionId")
-			if sid == restoredID || sid == s1 || sid == s2 {
+			if sid == s1 || sid == s2 {
 				t.Fatalf("session %s should not appear with noRestore", sid)
 			}
 		}

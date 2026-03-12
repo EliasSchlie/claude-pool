@@ -79,9 +79,7 @@ func TestOffload(t *testing.T) {
 		resp := pool.send(Msg{"type": "offload", "sessionId": s2})
 		assertError(t, resp)
 
-		// Clean up: stop and wait
-		pool.send(Msg{"type": "stop", "sessionId": s2})
-		pool.sendLong(Msg{"type": "wait", "sessionId": s2, "timeout": 120000}, 150*time.Second)
+		pool.stopAndWait(s2)
 	})
 
 	t.Run("capture JSONL on offloaded session works", func(t *testing.T) {
@@ -139,26 +137,21 @@ func TestOffload(t *testing.T) {
 	})
 
 	t.Run("archived session hidden from ls", func(t *testing.T) {
+		// Default ls (no archived flag) should exclude archived sessions
 		lsResp := pool.send(Msg{"type": "ls", "all": true})
 		sessions := parseSessions(t, lsResp)
-		for _, s := range sessions {
-			if s.SessionID == s1 {
-				t.Fatal("archived session should not appear in default ls")
-			}
+		if _, found := findSession(sessions, s1); found {
+			t.Fatal("archived session should not appear in ls without archived flag")
 		}
 
+		// With archived: true, it should be visible
 		lsArchived := pool.send(Msg{"type": "ls", "all": true, "archived": true})
-		sessions = parseSessions(t, lsArchived)
-		found := false
-		for _, s := range sessions {
-			if s.SessionID == s1 {
-				found = true
-				assertStatus(t, s, "archived")
-			}
-		}
+		archivedSessions := parseSessions(t, lsArchived)
+		s, found := findSession(archivedSessions, s1)
 		if !found {
 			t.Fatal("archived session should appear with archived: true")
 		}
+		assertStatus(t, s, "archived")
 	})
 
 	t.Run("capture JSONL on archived session works", func(t *testing.T) {
@@ -191,16 +184,10 @@ func TestOffload(t *testing.T) {
 		session := parseSession(t, info["session"])
 		assertStatus(t, session, "offloaded")
 
-		// Should be visible in default ls again
+		// Should be visible in ls again
 		lsResp := pool.send(Msg{"type": "ls", "all": true})
 		sessions := parseSessions(t, lsResp)
-		found := false
-		for _, s := range sessions {
-			if s.SessionID == s1 {
-				found = true
-			}
-		}
-		if !found {
+		if _, found := findSession(sessions, s1); !found {
 			t.Fatal("unarchived session should appear in ls")
 		}
 	})

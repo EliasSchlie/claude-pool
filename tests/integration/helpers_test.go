@@ -3,12 +3,13 @@ package integration
 // helpers_test.go — Shared test infrastructure
 //
 // Keeps only what genuinely reduces noise without hiding protocol details:
-//   - setupPool: complex setup/teardown (build binary, start daemon, connect, init)
+//   - setupPool / setupDaemon: complex setup/teardown (build, start, connect)
 //   - send / sendOn: socket boilerplate (marshal, write, read, unmarshal)
-//   - awaitStatus: poll info until session reaches target state (eliminates timing races)
+//   - awaitStatus / awaitPoolSize / awaitIdleCount: poll until target state
+//   - stopAndWait: stop + wait in one call
 //   - parseSession / parseSessions: JSON map → typed struct
 //   - subscription: subscribe has different mechanics (persistent stream)
-//   - assertion helpers: assertStatus, assertError, assertContains, etc.
+//   - assertion helpers: assertStatus, assertError, assertContains, assertHasChild, etc.
 //
 // Tests use pool.send(Msg{...}) directly for all protocol commands.
 // Every request and response is visible in the test — no hidden abstractions.
@@ -355,6 +356,47 @@ func (p *testPool) awaitStatus(sessionID, target string, timeout time.Duration) 
 	return SessionInfo{} // unreachable
 }
 
+// awaitPoolSize polls health until the pool reaches the target slot count.
+func (p *testPool) awaitPoolSize(target int, timeout time.Duration) {
+	p.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp := p.send(Msg{"type": "health"})
+		health, _ := resp["health"].(map[string]any)
+		if int(numVal(health, "size")) == target {
+			return
+		}
+		time.Sleep(1 * time.Second)
+	}
+	p.t.Fatalf("awaitPoolSize(%d): timed out after %v", target, timeout)
+}
+
+// awaitIdleCount polls health until at least n sessions are idle.
+func (p *testPool) awaitIdleCount(n int, timeout time.Duration) {
+	p.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp := p.send(Msg{"type": "health"})
+		health, _ := resp["health"].(map[string]any)
+		counts, _ := health["counts"].(map[string]any)
+		if int(numVal(counts, "idle")) >= n {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	p.t.Fatalf("awaitIdleCount(%d): timed out after %v", n, timeout)
+}
+
+// stopAndWait sends stop then waits for the session to finish processing.
+func (p *testPool) stopAndWait(sessionID string) {
+	p.t.Helper()
+	p.send(Msg{"type": "stop", "sessionId": sessionID})
+	p.sendLong(
+		Msg{"type": "wait", "sessionId": sessionID, "timeout": 120000},
+		150*time.Second,
+	)
+}
+
 // --------------------------------------------------------------------
 // Subscribe
 // --------------------------------------------------------------------
@@ -493,6 +535,16 @@ func assertSessionCount(t *testing.T, sessions []SessionInfo, expected int) {
 		}
 		t.Fatalf("expected %d sessions, got %d: %v", expected, len(sessions), ids)
 	}
+}
+
+func assertHasChild(t *testing.T, parent SessionInfo, childID string) {
+	t.Helper()
+	for _, c := range parent.Children {
+		if c.SessionID == childID {
+			return
+		}
+	}
+	t.Fatalf("expected session %s to have child %s", parent.SessionID, childID)
 }
 
 func findSession(sessions []SessionInfo, id string) (SessionInfo, bool) {

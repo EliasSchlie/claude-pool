@@ -340,15 +340,13 @@ func TestSlots(t *testing.T) {
 		// Clean up: stop the queued session
 		pool.send(Msg{"type": "stop", "sessionId": queuedSid})
 
-		// Stop the processing sessions
 		for _, sid := range idle {
-			pool.send(Msg{"type": "stop", "sessionId": sid})
-			pool.sendLong(Msg{"type": "wait", "sessionId": sid, "timeout": 120000}, 150*time.Second)
+			pool.stopAndWait(sid)
 		}
 	})
 
 	t.Run("followup with force on queued replaces prompt", func(t *testing.T) {
-		// Fill slots with processing sessions
+		// Fill slots with processing sessions (same setup as previous test)
 		lsResp := pool.send(Msg{"type": "ls", "all": true})
 		sessions := parseSessions(t, lsResp)
 
@@ -378,10 +376,8 @@ func TestSlots(t *testing.T) {
 		assertNotError(t, resp)
 		assertType(t, resp, "started")
 
-		// Stop processing sessions to free slots for the queued one
 		for _, sid := range idle {
-			pool.send(Msg{"type": "stop", "sessionId": sid})
-			pool.sendLong(Msg{"type": "wait", "sessionId": sid, "timeout": 120000}, 150*time.Second)
+			pool.stopAndWait(sid)
 		}
 
 		// Wait for the queued session to finish
@@ -397,24 +393,8 @@ func TestSlots(t *testing.T) {
 	})
 
 	t.Run("graceful resize down", func(t *testing.T) {
-		// Ensure 2 slots with 2 idle
-		healthResp := pool.send(Msg{"type": "health"})
-		health, _ := healthResp["health"].(map[string]any)
-		if numVal(health, "size") != 2 {
-			pool.send(Msg{"type": "resize", "size": 2})
-		}
-
-		// Wait for 2 idle
-		deadline := time.Now().Add(120 * time.Second)
-		for time.Now().Before(deadline) {
-			healthResp = pool.send(Msg{"type": "health"})
-			health, _ = healthResp["health"].(map[string]any)
-			counts, _ := health["counts"].(map[string]any)
-			if numVal(counts, "idle") >= 2 {
-				break
-			}
-			time.Sleep(2 * time.Second)
-		}
+		pool.send(Msg{"type": "resize", "size": 2})
+		pool.awaitIdleCount(2, 120*time.Second)
 
 		// Get one idle session and make it processing
 		lsResp := pool.send(Msg{"type": "ls", "all": true})
@@ -433,35 +413,13 @@ func TestSlots(t *testing.T) {
 		resp := pool.send(Msg{"type": "resize", "size": 1})
 		assertNotError(t, resp)
 
-		// Stop processing session and wait for pool to settle
-		pool.send(Msg{"type": "stop", "sessionId": processingID})
-		pool.sendLong(Msg{"type": "wait", "sessionId": processingID, "timeout": 120000}, 150*time.Second)
-
-		deadline = time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			healthResp = pool.send(Msg{"type": "health"})
-			health, _ = healthResp["health"].(map[string]any)
-			if numVal(health, "size") == 1 {
-				return
-			}
-			time.Sleep(1 * time.Second)
-		}
-		t.Fatal("pool did not shrink to 1 slot")
+		pool.stopAndWait(processingID)
+		pool.awaitPoolSize(1, 30*time.Second)
 	})
 
 	t.Run("resize respects pins during shrink", func(t *testing.T) {
 		pool.send(Msg{"type": "resize", "size": 2})
-
-		deadline := time.Now().Add(120 * time.Second)
-		for time.Now().Before(deadline) {
-			healthResp := pool.send(Msg{"type": "health"})
-			health, _ := healthResp["health"].(map[string]any)
-			counts, _ := health["counts"].(map[string]any)
-			if numVal(counts, "idle") == 2 {
-				break
-			}
-			time.Sleep(2 * time.Second)
-		}
+		pool.awaitIdleCount(2, 120*time.Second)
 
 		lsResp := pool.send(Msg{"type": "ls", "all": true})
 		sessions := parseSessions(t, lsResp)
@@ -475,23 +433,13 @@ func TestSlots(t *testing.T) {
 		pool.send(Msg{"type": "pin", "sessionId": pinned})
 
 		pool.send(Msg{"type": "resize", "size": 1})
+		pool.awaitPoolSize(1, 30*time.Second)
 
-		deadline = time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			healthResp := pool.send(Msg{"type": "health"})
-			health, _ := healthResp["health"].(map[string]any)
-			if numVal(health, "size") == 1 {
-				info := pool.send(Msg{"type": "info", "sessionId": pinned})
-				session := parseSession(t, info["session"])
-				if session.Status == "offloaded" || session.Status == "archived" {
-					t.Fatalf("pinned session was evicted during resize: status=%s", session.Status)
-				}
-				pool.send(Msg{"type": "unpin", "sessionId": pinned})
-				return
-			}
-			time.Sleep(1 * time.Second)
+		info := pool.send(Msg{"type": "info", "sessionId": pinned})
+		session := parseSession(t, info["session"])
+		if session.Status == "offloaded" || session.Status == "archived" {
+			t.Fatalf("pinned session was evicted during resize: status=%s", session.Status)
 		}
 		pool.send(Msg{"type": "unpin", "sessionId": pinned})
-		t.Fatal("pool did not shrink to 1 slot")
 	})
 }

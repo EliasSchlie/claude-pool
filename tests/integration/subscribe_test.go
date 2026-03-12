@@ -24,7 +24,6 @@ package integration
 //  13.  "multiple concurrent subscribers"
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 )
@@ -389,18 +388,8 @@ func TestSubscribe(t *testing.T) {
 	})
 
 	t.Run("multiple concurrent subscribers", func(t *testing.T) {
-		// Two independent subscription connections
-		conn1, scanner1 := pool.newConn()
-		sub1 := &subscription{t: t, conn: conn1, scanner: scanner1}
-		subMsg1, _ := json.Marshal(Msg{"type": "subscribe", "sessions": []string{s1}})
-		conn1.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		conn1.Write(append(subMsg1, '\n'))
-
-		conn2, scanner2 := pool.newConn()
-		sub2 := &subscription{t: t, conn: conn2, scanner: scanner2}
-		subMsg2, _ := json.Marshal(Msg{"type": "subscribe", "sessions": []string{s2}})
-		conn2.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		conn2.Write(append(subMsg2, '\n'))
+		sub1 := pool.subscribe(Msg{"sessions": []string{s1}})
+		sub2 := pool.subscribe(Msg{"sessions": []string{s2}})
 
 		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: multi1"})
 		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "respond with exactly: multi2"})
