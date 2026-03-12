@@ -4,11 +4,13 @@
 
 Claude Pool is a daemon that manages a pool of Claude Code terminal sessions. It handles session lifecycle, slot allocation, offloading/restoring, and exposes everything through a Unix socket API.
 
+Each pool runs as a single daemon process that owns its PTYs directly.
+
 ```
 claude-pool daemon
   ├── API server (Unix socket, newline-delimited JSON)
   ├── Pool manager (slot allocation, LRU eviction, offload/restore)
-  ├── PTY daemon (separate process, manages terminal instances)
+  ├── PTY manager (in-process, owns terminal instances via node-pty)
   ├── Session discovery (idle detection, status tracking)
   └── Reconciliation loop (auto-restart dead slots, periodic health checks)
 ```
@@ -18,8 +20,8 @@ claude-pool daemon
 ### Pool Manager
 Core business logic. Manages pool.json, slot allocation, offloading, archiving, session restoration. All state mutations go through `withPoolLock()` to prevent races.
 
-### PTY Daemon
-Standalone subprocess that owns all PTY instances. Communicates via its own Unix socket (`pty-daemon.sock`). Survives daemon restarts — sessions stay alive even if the pool daemon is restarted.
+### PTY Manager
+Owns all terminal instances in-process via `node-pty`. On daemon restart, re-adopts orphaned PTY processes by checking PIDs from pool.json (if still alive, reconnects; if dead, respawns).
 
 ### API Server
 Listens on `~/.claude-pool/pools/<name>/api.sock`. Accepts newline-delimited JSON. Routes requests to pool manager. Any number of clients can connect simultaneously.
@@ -32,37 +34,18 @@ Runs every 30s. Restarts dead/error slots, kills orphaned processes, maintains p
 
 ## Directory Structure
 
-```
-~/.claude-pool/
-  pools/
-    default/
-      pool.json          # Pool state (slots, sessions, settings)
-      api.sock           # API socket
-      pty-daemon.sock    # PTY daemon socket
-      pty-daemon.pid     # PTY daemon PID
-    work/                # Named pool example
-      ...
-  offloaded/
-    <sessionId>/
-      snapshot.log       # Terminal output at offload time
-      meta.json          # Session metadata
-  session-pids/          # PID → session mapping for auto-detection
-```
+See [design-principles.md](design-principles.md) for the canonical directory layout. Each pool is fully self-contained under `~/.claude-pool/pools/<name>/`.
 
 ## Key Design Decisions
 
-### Socket as the only interface
-All clients (CLI, Open Cockpit, Python, custom tools) use the same socket API. No in-process API, no shared libraries required. This means:
+### Socket as the only client interface
+All clients (CLI, Open Cockpit, Python, custom tools) use the same socket API. No client should read pool files directly. This means:
 - Clients can be in any language
-- Daemon can restart without killing clients
 - Multiple clients can connect simultaneously
-- Clean error boundaries — daemon bugs don't crash clients
+- Clean error boundaries — daemon bugs don't crash clients, client bugs don't corrupt pool state
 
-### PTY daemon as separate process
-The PTY daemon is a separate process from the pool daemon. This means:
-- Sessions survive pool daemon restarts
-- PTY management is isolated from business logic
-- Multiple pool daemons could theoretically share a PTY daemon
+### Single daemon per pool
+One process per pool owns everything: API server, PTY instances, pool state. Simpler than a two-daemon setup. On restart, the daemon re-adopts orphaned PTY processes by checking saved PIDs.
 
 ### Offload/restore model
 Idle sessions are offloaded (snapshot saved, `/clear` sent) to free slots. On restore, Claude's internal `/resume` command rehydrates the conversation. This allows managing more sessions than pool slots.
