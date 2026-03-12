@@ -8,26 +8,30 @@ package integration
 // for results, reading output in different formats, sending followups, and raw
 // input. It exercises the most common usage patterns.
 //
+// Session tracking: the flow creates sessions deliberately and archives them when
+// no longer needed to stay within the pool's 3-slot capacity.
+//
 // Flow:
 //
-//   1. "start returns sessionId and status"
-//   2. "wait returns result"
-//   3. "info shows session details"
-//   4. "wait on already-idle returns immediately"
-//   5. "capture while idle — jsonl-short (default)"
-//   6. "capture — jsonl-last"
-//   7. "capture — jsonl-long"
-//   8. "capture — jsonl-full"
-//   9. "capture — buffer-last"
-//  10. "capture — buffer-full"
-//  11. "followup to idle session"
-//  12. "followup on processing errors without force"
-//  13. "followup with force on processing"
-//  14. "wait with no sessionId — returns first idle"
-//  15. "wait with no sessionId — errors if none busy"
-//  16. "wait with timeout"
-//  17. "input sends raw bytes"
-//  18. "session prefix resolution"
+//   1.  "start returns sessionId and status"
+//   2.  "wait returns result"
+//   3.  "info shows session details"
+//   4.  "wait on already-idle returns immediately"
+//   5.  "capture while idle — jsonl-short (default)"
+//   6.  "capture — jsonl-last"
+//   7.  "capture — jsonl-long"
+//   8.  "capture — jsonl-full"
+//   9.  "capture — buffer-last"
+//   10. "capture — buffer-full"
+//   11. "followup to idle session"
+//   12. "followup on processing errors without force"
+//   13. "followup with force on processing"
+//   14. "wait on offloaded session errors"
+//   15. "wait with no sessionId — returns first idle"
+//   16. "wait with no sessionId — errors if none busy"
+//   17. "wait with timeout"
+//   18. "input sends raw bytes and verifiable text"
+//   19. "session prefix resolution"
 
 import (
 	"strings"
@@ -38,6 +42,8 @@ import (
 func TestSession(t *testing.T) {
 	pool := setupPool(t, 3)
 
+	// Track active sessions so we can manage pool capacity explicitly.
+	// Pool has 3 slots — we must archive/offload before exceeding that.
 	var s1 string
 
 	t.Run("start returns sessionId and status", func(t *testing.T) {
@@ -176,12 +182,14 @@ func TestSession(t *testing.T) {
 	var s2 string
 
 	t.Run("followup on processing errors without force", func(t *testing.T) {
-		// Use a slow prompt so s2 is still processing when we send the followup
-		startResp := pool.send(Msg{"type": "start", "prompt": "write a 200-word essay about the history of trees in urban environments"})
+		// Use a bash sleep to keep s2 processing without burning tokens
+		startResp := pool.send(Msg{"type": "start", "prompt": "run the bash command: sleep 60"})
 		assertNotError(t, startResp)
 		s2 = strVal(startResp, "sessionId")
 
-		// s2 should still be processing — followup must reject without force flag
+		// Wait until s2 is actually processing before testing followup rejection
+		pool.awaitStatus(s2, "processing", 30*time.Second)
+
 		resp := pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "ignore that"})
 		assertError(t, resp)
 
@@ -193,7 +201,9 @@ func TestSession(t *testing.T) {
 	})
 
 	t.Run("followup with force on processing", func(t *testing.T) {
-		// s2 is still processing from the previous step — force flag should override
+		// Confirm s2 is still processing before testing force
+		pool.awaitStatus(s2, "processing", 10*time.Second)
+
 		resp := pool.send(Msg{
 			"type": "followup", "sessionId": s2,
 			"prompt": "respond with exactly the text: interrupted", "force": true,
@@ -213,9 +223,23 @@ func TestSession(t *testing.T) {
 		assertContains(t, strVal(waitResp, "content"), "interrupted")
 	})
 
+	t.Run("wait on offloaded session errors", func(t *testing.T) {
+		// Offload s2 (idle after force-followup) to test wait on offloaded
+		pool.send(Msg{"type": "offload", "sessionId": s2})
+		pool.awaitStatus(s2, "offloaded", 10*time.Second)
+
+		resp := pool.sendLong(
+			Msg{"type": "wait", "sessionId": s2, "timeout": 5000},
+			10*time.Second,
+		)
+		assertError(t, resp)
+	})
+
 	t.Run("wait with no sessionId — returns first idle", func(t *testing.T) {
-		// Start two sessions concurrently — wait without sessionId should return
-		// whichever finishes first
+		// s2 is offloaded from the previous step — archive it to free capacity
+		pool.send(Msg{"type": "archive", "sessionId": s2})
+
+		// Start two new sessions — pool has s1 (idle) + 2 fresh = 3 slots, within capacity
 		r1 := pool.send(Msg{"type": "start", "prompt": "respond with exactly the text: first"})
 		assertNotError(t, r1)
 		s3 := strVal(r1, "sessionId")
@@ -244,34 +268,54 @@ func TestSession(t *testing.T) {
 			150*time.Second,
 		)
 		assertNotError(t, cleanup)
+
+		// Archive s3 and s4 — we only need s1 going forward
+		pool.send(Msg{"type": "archive", "sessionId": s3})
+		pool.send(Msg{"type": "archive", "sessionId": s4})
 	})
 
 	t.Run("wait with no sessionId — errors if none busy", func(t *testing.T) {
-		// All sessions should be idle at this point
+		// All remaining sessions are idle — wait should error immediately
 		resp := pool.sendLong(Msg{"type": "wait", "timeout": 5000}, 10*time.Second)
 		assertError(t, resp)
 	})
 
 	t.Run("wait with timeout", func(t *testing.T) {
-		// Use a slow prompt so it's still processing when the 1ms timeout hits
-		startResp := pool.send(Msg{"type": "start", "prompt": "write a very long and detailed 500-word essay about quantum computing"})
+		// Use bash sleep so the session stays processing without burning tokens
+		startResp := pool.send(Msg{"type": "start", "prompt": "run the bash command: sleep 60"})
 		assertNotError(t, startResp)
 		sid := strVal(startResp, "sessionId")
 
-		// 1ms timeout — guaranteed to expire before Claude finishes
+		pool.awaitStatus(sid, "processing", 30*time.Second)
+
+		// 1ms timeout — guaranteed to expire before sleep finishes
 		resp := pool.sendLong(Msg{"type": "wait", "sessionId": sid, "timeout": 1}, 5*time.Second)
 		assertError(t, resp)
 		assertContains(t, strVal(resp, "error"), "timeout")
 
-		// Clean up: let it finish so the slot isn't stuck processing
-		pool.sendLong(Msg{"type": "wait", "sessionId": sid, "timeout": 120000}, 150*time.Second)
+		// Clean up: stop the sleep, then archive the session
+		pool.send(Msg{"type": "stop", "sessionId": sid})
+		pool.sendLong(
+			Msg{"type": "wait", "sessionId": sid, "timeout": 120000},
+			150*time.Second,
+		)
+		pool.send(Msg{"type": "archive", "sessionId": sid})
 	})
 
-	t.Run("input sends raw bytes", func(t *testing.T) {
-		// s1 is idle — sending Escape is harmless but confirms input works on live sessions
-		resp := pool.send(Msg{"type": "input", "sessionId": s1, "data": "\x1b"})
+	t.Run("input sends raw bytes and verifiable text", func(t *testing.T) {
+		// Type a visible string into s1's terminal, then capture buffer to verify it arrived
+		resp := pool.send(Msg{"type": "input", "sessionId": s1, "data": "test_input_marker"})
 		assertNotError(t, resp)
 		assertType(t, resp, "ok")
+
+		// Give the terminal a moment to reflect the input, then check the buffer
+		time.Sleep(500 * time.Millisecond)
+		bufResp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "buffer-full"})
+		assertNotError(t, bufResp)
+		assertContains(t, strVal(bufResp, "content"), "test_input_marker")
+
+		// Clear the typed text so it doesn't interfere (Ctrl-U clears line)
+		pool.send(Msg{"type": "input", "sessionId": s1, "data": "\x15"})
 
 		// Offload s1 so it has no live terminal — input must error
 		offloadResp := pool.send(Msg{"type": "offload", "sessionId": s1})
@@ -280,7 +324,7 @@ func TestSession(t *testing.T) {
 		resp = pool.send(Msg{"type": "input", "sessionId": s1, "data": "\x1b"})
 		assertError(t, resp)
 
-		// Restore s1 via followup so later steps can use it
+		// Restore s1 via followup so the next step can use it
 		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly the text: restored"})
 		pool.sendLong(Msg{"type": "wait", "sessionId": s1, "timeout": 120000}, 150*time.Second)
 	})

@@ -5,6 +5,7 @@ package integration
 // Keeps only what genuinely reduces noise without hiding protocol details:
 //   - setupPool: complex setup/teardown (build binary, start daemon, connect, init)
 //   - send / sendOn: socket boilerplate (marshal, write, read, unmarshal)
+//   - awaitStatus: poll info until session reaches target state (eliminates timing races)
 //   - parseSession / parseSessions: JSON map → typed struct
 //   - subscription: subscribe has different mechanics (persistent stream)
 //   - assertion helpers: assertStatus, assertError, assertContains, etc.
@@ -21,7 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -120,9 +121,8 @@ type testPool struct {
 	socketPath string
 	conn       net.Conn
 	scanner    *bufio.Scanner
-	mu         sync.Mutex // protects conn/scanner for sequential sends
 	daemon     *exec.Cmd
-	nextID     int
+	nextID     atomic.Int64
 }
 
 // setupPool builds the daemon binary, starts it with a temp pool directory,
@@ -163,19 +163,21 @@ func setupPool(t *testing.T, size int) *testPool {
 		t.Fatalf("failed to start daemon: %v", err)
 	}
 
+	// Single goroutine to detect daemon death
+	daemonDied := make(chan struct{})
+	go func() {
+		daemon.Wait()
+		close(daemonDied)
+	}()
+
 	// Wait for socket to appear (fast-fail if daemon exits early)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(socketPath); err == nil {
 			break
 		}
-		// Check if daemon died
 		select {
-		case <-func() chan struct{} {
-			ch := make(chan struct{})
-			go func() { daemon.Wait(); close(ch) }()
-			return ch
-		}():
+		case <-daemonDied:
 			t.Fatalf("daemon exited before socket appeared")
 		default:
 		}
@@ -204,11 +206,10 @@ func setupPool(t *testing.T, size int) *testPool {
 
 	// Cleanup: destroy pool, kill daemon
 	t.Cleanup(func() {
-		// Best-effort destroy
 		p.sendRaw(Msg{"type": "destroy", "confirm": true})
 		p.conn.Close()
 		daemon.Process.Kill()
-		daemon.Wait()
+		// daemon.Wait() already called by goroutine above
 	})
 
 	// Init the pool
@@ -247,27 +248,19 @@ func findRepoRoot(t *testing.T) string {
 // Auto-assigns an incrementing id field.
 func (p *testPool) send(msg Msg) Msg {
 	p.t.Helper()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.nextID++
-	msg["id"] = p.nextID
+	msg["id"] = int(p.nextID.Add(1))
 	return p.doSend(p.conn, p.scanner, msg, 30*time.Second)
 }
 
 // sendLong sends a message with a custom read timeout (for long-polling commands like wait).
 func (p *testPool) sendLong(msg Msg, readTimeout time.Duration) Msg {
 	p.t.Helper()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.nextID++
-	msg["id"] = p.nextID
+	msg["id"] = int(p.nextID.Add(1))
 	return p.doSend(p.conn, p.scanner, msg, readTimeout)
 }
 
 // sendRaw sends without expecting a response (best-effort, for cleanup).
 func (p *testPool) sendRaw(msg Msg) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	data, _ := json.Marshal(msg)
 	data = append(data, '\n')
 	p.conn.Write(data)
@@ -315,13 +308,40 @@ func (p *testPool) newConn() (net.Conn, *bufio.Scanner) {
 }
 
 // sendOn sends a message on a specific connection and reads the response.
+// Safe to call concurrently with sends on other connections (no shared mutex).
 func (p *testPool) sendOn(conn net.Conn, scanner *bufio.Scanner, msg Msg) Msg {
 	p.t.Helper()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.nextID++
-	msg["id"] = p.nextID
+	msg["id"] = int(p.nextID.Add(1))
 	return p.doSend(conn, scanner, msg, 30*time.Second)
+}
+
+// --------------------------------------------------------------------
+// State helpers
+// --------------------------------------------------------------------
+
+// awaitStatus polls info until the session reaches the target status.
+// Eliminates timing races — use this instead of assuming a session is in
+// a particular state after sending a command.
+func (p *testPool) awaitStatus(sessionID, target string, timeout time.Duration) SessionInfo {
+	p.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp := p.send(Msg{"type": "info", "sessionId": sessionID})
+		if resp["type"] == "error" {
+			p.t.Fatalf("awaitStatus info failed: %v", resp["error"])
+		}
+		info := parseSession(p.t, resp["session"])
+		if info.Status == target {
+			return info
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	// Final check with the actual status for a useful error message
+	resp := p.send(Msg{"type": "info", "sessionId": sessionID})
+	info := parseSession(p.t, resp["session"])
+	p.t.Fatalf("awaitStatus(%s, %q): timed out after %v, last status was %q",
+		sessionID, target, timeout, info.Status)
+	return SessionInfo{} // unreachable
 }
 
 // --------------------------------------------------------------------

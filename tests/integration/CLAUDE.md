@@ -8,6 +8,11 @@ so that's what we test.
 
 Every test pool uses `--model haiku` to keep API costs low.
 
+**Save tokens:** When you need a session to stay busy (processing state), don't ask
+the model to write a long essay — have it run a slow bash command like `sleep 60`.
+This keeps the session processing without burning tokens on LLM output. Only use real
+prompts when you actually need to verify the content of the response.
+
 ## Design: Flow-Based Tests
 
 Tests are organized as **user flows**, not isolated unit assertions. Each test file
