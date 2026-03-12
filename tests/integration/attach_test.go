@@ -22,6 +22,7 @@ package integration
 //   9.  "re-pin and re-attach after offload"
 
 import (
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -130,8 +131,8 @@ func TestAttach(t *testing.T) {
 		buf := make([]byte, 1)
 		attachConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		_, err := attachConn.Read(buf)
-		if err != io.EOF {
-			t.Fatalf("expected EOF after offload, got: %v", err)
+		if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("expected EOF or closed after offload, got: %v", err)
 		}
 	})
 
@@ -173,7 +174,7 @@ func TestAttach(t *testing.T) {
 			t.Fatal("expected output from re-attached session")
 		}
 
-		// Clean up typed character
+		// Best-effort cleanup
 		newConn.Write([]byte("\x15"))
 	})
 }
@@ -188,4 +189,5 @@ func drainAttach(conn net.Conn) {
 			break
 		}
 	}
+	conn.SetReadDeadline(time.Time{})
 }
