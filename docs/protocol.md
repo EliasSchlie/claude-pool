@@ -59,6 +59,8 @@ The default is `jsonl-short` — a concise view of Claude's responses without to
 
 **Buffer formats** require a live terminal. They only work for idle, typing, and processing sessions. Errors for queued, offloaded, dead, error, and archived sessions.
 
+**Empty content is valid.** If a session was interrupted (`stop`) before Claude produced any assistant output, or if there is no assistant message after the last user message, JSONL formats return an empty string. This is not an error — it reflects that no output was produced. Callers should handle empty content gracefully.
+
 ---
 
 ## Commands
@@ -359,8 +361,8 @@ Works for any state including offloaded, archived, and dead. This is the primary
 
 **Response:** `{ type: "ok" }`
 
-**Behavior:** Interrupts or cancels a session's current operation.
-- If session is **processing** → sends Ctrl+C (`\x03`) to the PTY. Claude stops its current work and returns to idle.
+**Behavior:** Interrupts or cancels a session's current operation. **Synchronous** — the session is guaranteed to be idle (or removed) when `ok` is returned.
+- If session is **processing** → sends Ctrl+C (`\x03`) to the PTY, waits for the session to reach idle, then returns `ok`. The caller can immediately send a `followup` without needing to `wait`.
 - If session is **queued** → cancels the queued request. The session transitions back to its prior state: `offloaded` if it was being loaded, removed entirely if it was a new `start` that never got a slot.
 - If session is **idle**, **typing** → no-op (already not processing).
 - If session is **offloaded**, **dead**, **error**, **archived** → errors (nothing to stop).

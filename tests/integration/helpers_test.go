@@ -6,7 +6,6 @@ package integration
 //   - setupPool / setupDaemon: complex setup/teardown (build, start, connect)
 //   - send / sendOn: socket boilerplate (marshal, write, read, unmarshal)
 //   - awaitStatus / awaitPoolSize / awaitIdleCount: subscribe + wait for target state
-//   - stopAndWait: stop + wait in one call
 //   - parseSession / parseSessions: JSON map → typed struct
 //   - subscription: subscribe has different mechanics (persistent stream)
 //   - assertion helpers: assertStatus, assertError, assertContains, assertHasChild, etc.
@@ -438,16 +437,6 @@ func (p *testPool) awaitIdleCount(n int, timeout time.Duration) {
 		}
 	}
 	p.t.Fatalf("awaitIdleCount(%d): timed out after %v", n, timeout)
-}
-
-// stopAndWait sends stop then waits for the session to finish processing.
-func (p *testPool) stopAndWait(sessionID string) {
-	p.t.Helper()
-	p.send(Msg{"type": "stop", "sessionId": sessionID})
-	p.sendLong(
-		Msg{"type": "wait", "sessionId": sessionID, "timeout": 120000},
-		150*time.Second,
-	)
 }
 
 // --------------------------------------------------------------------

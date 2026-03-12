@@ -293,12 +293,8 @@ func TestSession(t *testing.T) {
 		assertError(t, resp)
 		assertContains(t, strVal(resp, "error"), "timeout")
 
-		// Clean up: stop the sleep, then archive the session
+		// Clean up: stop is synchronous (session idle on return), then archive
 		pool.send(Msg{"type": "stop", "sessionId": sid})
-		pool.sendLong(
-			Msg{"type": "wait", "sessionId": sid, "timeout": 120000},
-			150*time.Second,
-		)
 		pool.send(Msg{"type": "archive", "sessionId": sid})
 	})
 

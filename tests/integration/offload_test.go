@@ -79,7 +79,7 @@ func TestOffload(t *testing.T) {
 		resp := pool.send(Msg{"type": "offload", "sessionId": s2})
 		assertError(t, resp)
 
-		pool.stopAndWait(s2)
+		pool.send(Msg{"type": "stop", "sessionId": s2})
 	})
 
 	t.Run("capture JSONL on offloaded session works", func(t *testing.T) {

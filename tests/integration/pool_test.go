@@ -164,7 +164,7 @@ func TestPool(t *testing.T) {
 		assertNotError(t, resp)
 
 		// Stop s1 so its slot can be reclaimed
-		pool.stopAndWait(s1)
+		pool.send(Msg{"type": "stop", "sessionId": s1})
 		pool.awaitPoolSize(1, 30*time.Second)
 	})
 

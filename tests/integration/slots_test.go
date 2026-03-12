@@ -341,7 +341,7 @@ func TestSlots(t *testing.T) {
 		pool.send(Msg{"type": "stop", "sessionId": queuedSid})
 
 		for _, sid := range idle {
-			pool.stopAndWait(sid)
+			pool.send(Msg{"type": "stop", "sessionId": sid})
 		}
 	})
 
@@ -377,7 +377,7 @@ func TestSlots(t *testing.T) {
 		assertType(t, resp, "started")
 
 		for _, sid := range idle {
-			pool.stopAndWait(sid)
+			pool.send(Msg{"type": "stop", "sessionId": sid})
 		}
 
 		// Wait for the queued session to finish
@@ -413,7 +413,7 @@ func TestSlots(t *testing.T) {
 		resp := pool.send(Msg{"type": "resize", "size": 1})
 		assertNotError(t, resp)
 
-		pool.stopAndWait(processingID)
+		pool.send(Msg{"type": "stop", "sessionId": processingID})
 		pool.awaitPoolSize(1, 30*time.Second)
 	})
 
