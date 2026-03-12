@@ -48,7 +48,7 @@ These are non-negotiable. Code that violates an invariant is a bug.
 
 16. **Requests queue when slots are full.** If all slots are busy and no idle session can be offloaded, `start` queues the request FIFO. The request gets an internal session ID immediately. When a slot becomes available, the queued request is executed.
 
-17. **Sessions are loaded or offloaded — nothing else.** No "archive" concept. Sessions are either in a slot (loaded) or not (offloaded). Dead/error sessions are treated like offloaded — `followup` auto-resumes them. To load an offloaded session: send `followup` (auto-resumes) or `pin` (triggers priority load). To offload: `offload` or automatic LRU eviction.
+17. **Sessions are loaded, offloaded, or archived.** Sessions are either in a slot (loaded), not in a slot (offloaded), or soft-deleted (archived). Dead/error sessions are treated like offloaded — `followup` auto-resumes them. To load an offloaded session: send `followup` (auto-resumes) or `pin` (triggers priority load). To offload: `offload` or automatic LRU eviction. To archive: `archive` (stops active sessions first, errors if unarchived children unless `recursive`). Archived sessions are hidden from `ls` by default (use `archived: true` flag), auto-cleaned after 30 days. `unarchive` restores to offloaded state.
 
 18. **Attach requires a live session.** Attach fails for offloaded/queued sessions. To attach an offloaded session: pin it (triggers priority load) → wait for it to become live → attach. The raw pipe closes automatically when the session is offloaded or dies.
 
@@ -66,7 +66,7 @@ These are non-negotiable. Code that violates an invariant is a bug.
 23. Newline-delimited JSON protocol over Unix sockets.
 24. Reconciliation loop runs every 30 seconds.
 25. Socket permissions are `0600` (owner-only) — only the Unix user who owns the socket file can connect. Other users on the same machine cannot access the pool.
-26. Offloaded sessions stored as `snapshot.log` + `meta.json`.
+26. Offloaded sessions stored as `meta.json` (no terminal snapshot — JSONL transcripts are the persistent record, read via Claude UUID).
 27. Default flags: `--dangerously-skip-permissions`.
 28. Typing detection: polls terminal buffer for un-submitted input text (reference: Open Cockpit `session-discovery.js` terminal input polling with consecutive-miss threshold).
 
@@ -80,9 +80,10 @@ These are non-negotiable. Code that violates an invariant is a bug.
 | `idle` | Finished processing, waiting for input |
 | `typing` | Un-submitted input detected in terminal buffer |
 | `processing` | Claude is working on a response |
-| `offloaded` | Snapshot saved, slot freed |
+| `offloaded` | Slot freed, JSONL transcript accessible via UUID |
 | `dead` | Process died unexpectedly |
 | `error` | Slot error (crash during startup, etc.) |
+| `archived` | Soft-deleted, hidden from ls by default, auto-cleaned after 30 days |
 
 Internal-only states (not exposed via API): `fresh` (pre-warmed slot, never prompted), `starting` (Claude process spawning). These are slot management details — clients see `queued` until the session is ready, then the first real state.
 
@@ -150,7 +151,9 @@ Each pool is fully self-contained:
     api.log              # API requests/responses (optional, for debugging)
   offloaded/             # Offloaded sessions
     <internalId>/
-      snapshot.log
+      meta.json
+  archived/              # Archived sessions (auto-cleaned after 30 days)
+    <internalId>/
       meta.json
   session-pids/          # PID → internal ID mapping
   idle-signals/          # Session idle signal files

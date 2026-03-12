@@ -23,7 +23,8 @@
         "processing",
         "offloaded",
         "dead",
-        "error"
+        "error",
+        "archived"
       ],
       "description": "API-visible session states. Internal states (fresh, starting) are not exposed. Offloaded/dead/error sessions can transition to queued via followup/pin."
     },
@@ -33,11 +34,12 @@
         "jsonl-last",
         "jsonl-short",
         "jsonl-long",
+        "jsonl-full",
         "buffer-last",
         "buffer-full"
       ],
       "default": "jsonl-short",
-      "description": "Output format for commands returning session content. Default: jsonl-short."
+      "description": "Output format. JSONL formats read from Claude Code transcripts (work for any state with UUID). Buffer formats require live terminal."
     },
 
     "poolState": {
@@ -71,7 +73,7 @@
         "children": {
           "type": "array",
           "items": { "$ref": "#/$defs/sessionInfo" },
-          "description": "Direct child sessions. Populated by info and ls (with tree: true)."
+          "description": "Direct child sessions (recursive). Populated by info and ls (with tree: true)."
         }
       }
     },
@@ -255,7 +257,7 @@
     },
 
     "followup": {
-      "description": "Send prompt to session. Auto-resumes if offloaded/dead/error (queues for loading). Errors if queued/processing unless force.",
+      "description": "Send prompt to session. Auto-resumes if offloaded/dead/error (queues for loading). Errors if queued/processing unless force. Errors if archived.",
       "request": {
         "type": "object",
         "properties": {
@@ -309,7 +311,7 @@
     },
 
     "capture": {
-      "description": "Get session output (any live state). Errors if queued/offloaded.",
+      "description": "Get session output. JSONL formats work for any state with UUID. Buffer formats require live terminal.",
       "request": {
         "type": "object",
         "properties": {
@@ -333,7 +335,7 @@
     },
 
     "result": {
-      "description": "Get session output only if idle. Errors for any other state.",
+      "description": "Get session output only if complete (idle/offloaded/archived). JSONL or buffer depending on format.",
       "request": {
         "type": "object",
         "properties": {
@@ -379,7 +381,7 @@
     },
 
     "offload": {
-      "description": "Manually offload idle session (snapshot + /clear + kill PTY). Errors if busy or pinned.",
+      "description": "Manually offload idle session (save meta + /clear + kill PTY). No buffer snapshot. Errors if busy or pinned.",
       "request": {
         "type": "object",
         "properties": {
@@ -400,14 +402,15 @@
     },
 
     "ls": {
-      "description": "List sessions. Default: owned direct children. tree=true for nested descendants. all=true for everything.",
+      "description": "List sessions. Default: owned direct children (no archived). tree/all/archived flags available.",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "ls" },
           "id": { "type": "integer" },
           "all": { "type": "boolean", "default": false },
-          "tree": { "type": "boolean", "default": false }
+          "tree": { "type": "boolean", "default": false },
+          "archived": { "type": "boolean", "default": false }
         },
         "required": ["type"]
       },
@@ -426,7 +429,7 @@
     },
 
     "info": {
-      "description": "Full details for one session including children and Claude UUID. Works for any state.",
+      "description": "Full details for one session including recursive children and Claude UUID. Works for any state.",
       "request": {
         "type": "object",
         "properties": {
@@ -522,6 +525,53 @@
       }
     },
 
+    "archive": {
+      "description": "Archive session (mark as done). Stops active sessions first. Errors if unarchived children unless recursive. Auto-cleaned after 30 days.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "archive" },
+          "id": { "type": "integer" },
+          "sessionId": { "$ref": "#/$defs/sessionId" },
+          "recursive": {
+            "type": "boolean",
+            "default": false,
+            "description": "Archive all descendants depth-first"
+          }
+        },
+        "required": ["type", "sessionId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "unarchive": {
+      "description": "Restore archived session to offloaded state.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "unarchive" },
+          "id": { "type": "integer" },
+          "sessionId": { "$ref": "#/$defs/sessionId" }
+        },
+        "required": ["type", "sessionId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
     "set-priority": {
       "description": "Set eviction priority. Lower = evicted first. Negative allowed. No effect on queue or processing.",
       "request": {
@@ -569,34 +619,30 @@
       }
     },
 
-    "kill": {
-      "description": "Permanently remove a session from the pool. Kills process, deletes snapshot, removes from listings.",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "kill" },
-          "id": { "type": "integer" },
-          "sessionId": { "$ref": "#/$defs/sessionId" }
-        },
-        "required": ["type", "sessionId"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "ok" },
-          "id": { "type": "integer" }
-        },
-        "required": ["type"]
-      }
-    },
-
     "subscribe": {
-      "description": "Open persistent event stream. Daemon pushes status changes, session creation/kill, pool events.",
+      "description": "Open persistent event stream with optional filters. Daemon pushes status changes, created, archived, pool events.",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "subscribe" },
-          "id": { "type": "integer" }
+          "id": { "type": "integer" },
+          "sessions": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/sessionId" },
+            "description": "Only events for these sessions. Omit = all."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "enum": ["status", "created", "archived", "unarchived", "pool"]
+            },
+            "description": "Only these event types. Omit = all."
+          },
+          "statuses": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/sessionStatus" },
+            "description": "Only status events transitioning TO these states. Omit = all."
+          }
         },
         "required": ["type"]
       },
@@ -605,7 +651,7 @@
         "properties": {
           "type": { "const": "event" },
           "event": {
-            "enum": ["status", "created", "killed", "pool"],
+            "enum": ["status", "created", "archived", "unarchived", "pool"],
             "description": "Event type"
           },
           "sessionId": { "$ref": "#/$defs/sessionId" },

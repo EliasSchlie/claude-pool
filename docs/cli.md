@@ -24,7 +24,7 @@ claude-pool daemon status          # Check if running
 ```bash
 claude-pool init [size]            # Initialize pool (size optional, falls back to config)
 claude-pool resize <size>          # Resize pool (shrinks by offloading idle first)
-claude-pool destroy                # Kill all sessions, daemon exits (config persists)
+claude-pool destroy                # Stop all sessions, daemon exits (config persists)
 claude-pool health                 # Health report
 claude-pool config                 # Show current config
 claude-pool config set flags "--dangerously-skip-permissions"
@@ -44,12 +44,16 @@ claude-pool result <sessionId> --format jsonl-long
 claude-pool capture <sessionId>               # Get live output
 claude-pool capture <sessionId> --format buffer-full
 claude-pool stop <sessionId>                  # Interrupt or cancel queued request
-claude-pool kill <sessionId>                  # Permanently remove session
 claude-pool offload <sessionId>               # Manually offload idle session
+
+claude-pool archive <sessionId>               # Soft-delete session (stops if active)
+claude-pool archive <sessionId> --recursive   # Archive session + all descendants
+claude-pool unarchive <sessionId>             # Restore archived session (→ offloaded)
 
 claude-pool ls                                # List owned direct children
 claude-pool ls --tree                         # List with nested descendants
 claude-pool ls --all                          # List all pool sessions
+claude-pool ls --archived                     # Include archived sessions
 claude-pool ls --idle --processing --queued   # Filter by status
 claude-pool info <sessionId>                  # Full session details (includes children + UUID)
 
@@ -60,9 +64,12 @@ claude-pool watch <sessionId> [interval]      # Follow output (default 2s)
 claude-pool pin <sessionId> [seconds]         # Prevent auto-offload + priority load (default 120s)
 claude-pool pin                               # Allocate + pin fresh session
 claude-pool unpin <sessionId>                 # Allow auto-offload
-claude-pool priority <sessionId> <number>     # Set eviction priority (lower = evicted first)
+claude-pool set-priority <sessionId> <number> # Set eviction priority (lower = evicted first)
 claude-pool attach <sessionId>                # Attach to live terminal (raw PTY I/O)
 claude-pool subscribe                         # Stream pool events (status changes, etc.)
+claude-pool subscribe --events status_change,session_created
+claude-pool subscribe --statuses idle,processing
+claude-pool subscribe --sessions a7f,b3k
 ```
 
 ## Low-level
@@ -93,10 +100,13 @@ claude-pool pools remove <name>            # Remove from registry
 
 The `--format` flag is supported by `wait`, `capture`, `result`, and `start --block`:
 
-| Format | Description |
-|--------|-------------|
-| `jsonl-last` | Last assistant message only |
-| `jsonl-short` | All assistant messages since last user message **(default)** |
-| `jsonl-long` | Full JSONL since last user message, repetitive fields stripped |
-| `buffer-last` | Terminal buffer since last user message |
-| `buffer-full` | Full terminal scrollback, ANSI stripped |
+| Format | Description | Requires live terminal |
+|--------|-------------|----------------------|
+| `jsonl-last` | Last assistant message only | No (reads JSONL transcript) |
+| `jsonl-short` | All assistant messages since last user message **(default)** | No (reads JSONL transcript) |
+| `jsonl-long` | Full JSONL since last user message, repetitive fields stripped | No (reads JSONL transcript) |
+| `jsonl-full` | Complete unfiltered JSONL transcript | No (reads JSONL transcript) |
+| `buffer-last` | Terminal buffer since last user message | Yes |
+| `buffer-full` | Full terminal scrollback, ANSI stripped | Yes |
+
+JSONL formats read from Claude Code's own transcript files (located via UUID), so they work for any session state. Buffer formats require a live terminal — they fail for offloaded/archived sessions.

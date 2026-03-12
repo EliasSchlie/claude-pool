@@ -31,9 +31,10 @@ Sessions track their parent. Auto-detected via `CLAUDE_POOL_SESSION_ID` env var,
 | `idle` | Finished processing, waiting for input |
 | `typing` | Un-submitted input detected in terminal buffer |
 | `processing` | Claude is working |
-| `offloaded` | Snapshot saved, slot freed |
+| `offloaded` | Slot freed, session metadata saved. Can be resumed. |
 | `dead` | Process died |
 | `error` | Slot error (crash during startup, etc.) |
+| `archived` | Session is done. Hidden from `ls` by default. Auto-cleaned after 30 days. |
 
 **Important:** Offloaded sessions can become queued again. When `followup` or `pin` targets an offloaded (or dead/error) session, the session transitions to `queued` while waiting for a slot to become available.
 
@@ -43,15 +44,20 @@ Sessions track their parent. Auto-detected via `CLAUDE_POOL_SESSION_ID` env var,
 
 Commands that return session output (`wait`, `capture`, `result`) accept a `format` field:
 
-| Format | Description |
-|--------|-------------|
-| `jsonl-last` | Last assistant message only from the JSONL transcript. |
-| `jsonl-short` | All assistant messages since the last user message. **Default.** |
-| `jsonl-long` | Full JSONL since the last user message, with repetitive/internal fields stripped. |
-| `buffer-last` | Terminal buffer content since the last user message. |
-| `buffer-full` | Full terminal scrollback, ANSI stripped. |
+| Format | Description | Requires live terminal? |
+|--------|-------------|------------------------|
+| `jsonl-last` | Last assistant message only from the JSONL transcript. | No |
+| `jsonl-short` | All assistant messages since the last user message. **Default.** | No |
+| `jsonl-long` | Full JSONL since the last user message, with repetitive/internal fields stripped. | No |
+| `jsonl-full` | Complete JSONL transcript — every message, unfiltered. | No |
+| `buffer-last` | Terminal buffer content since the last user message. | Yes |
+| `buffer-full` | Full terminal scrollback, ANSI stripped. | Yes |
 
 The default is `jsonl-short` — a concise view of Claude's responses without tool calls or system messages.
+
+**JSONL formats** read from Claude Code's own transcript files (located via the session's Claude UUID). They work for any session state where a Claude UUID has been discovered — including offloaded, dead, and archived sessions.
+
+**Buffer formats** require a live terminal. They only work for idle, typing, and processing sessions. Errors for queued, offloaded, dead, error, and archived sessions.
 
 ---
 
@@ -166,6 +172,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 - If session is **processing** → errors, unless `force: true` (sends the prompt anyway, useful for interrupt-and-redirect).
 - If session is **typing** → errors, unless `force: true`.
 - If session is **queued** → errors, unless `force: true` (replaces the pending prompt). Use `stop` to cancel a queued request before sending a new followup.
+- If session is **archived** → errors. Unarchive first.
 
 ---
 
@@ -200,9 +207,9 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 **Response:** `{ type: "buffer", sessionId, content }` — session output.
 
 **Behavior:** Returns the current session output, regardless of session state.
-- Works for **idle**, **typing**, **processing** sessions (anything with a live terminal) — reads from live terminal.
-- Works for **offloaded** sessions — reads from saved snapshot.
-- Errors if session is **queued** (no terminal or snapshot yet).
+- **JSONL formats** work for any session with a known Claude UUID: **idle**, **typing**, **processing**, **offloaded**, **dead**, **error**, **archived**. Reads from Claude Code's transcript files.
+- **Buffer formats** only work for live sessions (**idle**, **typing**, **processing**). Errors for all other states.
+- Errors if session is **queued** (no UUID or terminal yet).
 
 ---
 
@@ -215,9 +222,10 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 **Response:** `{ type: "result", sessionId, content }`
 
-**Behavior:** Like `capture` but only succeeds when the session is **idle** or **offloaded**. This guarantees the output contains a complete response, not a partial one.
-- If session is **idle** → returns output from live terminal.
-- If session is **offloaded** → returns output from saved snapshot.
+**Behavior:** Like `capture` but only succeeds when the session has a complete (non-partial) response.
+- **JSONL formats**: works for **idle** and **offloaded** sessions. Errors for processing/typing (partial), queued (no UUID).
+- **Buffer formats**: only works for **idle** sessions.
+- If session is **archived** → JSONL formats work (transcript still available).
 - If session is **processing**, **typing**, **queued**, **dead**, **error** → errors with the current status in the error message.
 
 ---
@@ -248,11 +256,12 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 **Response:** `{ type: "ok" }`
 
 **Behavior:** Manually offload a session to free its slot.
-1. Captures a snapshot of the terminal buffer → saves to `offloaded/<internalId>/snapshot.log`.
-2. Saves session metadata → `offloaded/<internalId>/meta.json`.
-3. Sends `/clear` to the Claude session (frees Claude's internal state).
-4. Kills the slot's PTY process.
-5. Session transitions to `offloaded`.
+1. Saves session metadata → `offloaded/<internalId>/meta.json`.
+2. Sends `/clear` to the Claude session (frees Claude's internal state).
+3. Kills the slot's PTY process.
+4. Session transitions to `offloaded`.
+
+No terminal buffer snapshot is saved — the JSONL transcript (maintained by Claude Code itself) serves as the persistent record and is always accessible via the session's Claude UUID.
 
 - Only works for **idle** sessions. Errors if **processing**, **typing**, **queued** (nothing to offload), or already **offloaded**.
 - If session is **pinned** → errors (unpin first).
@@ -265,15 +274,17 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 |-------|------|----------|-------------|
 | `all` | boolean | No | Show all pool sessions (default false = owned only) |
 | `tree` | boolean | No | Show descendants as nested tree (default false = flat list of direct children) |
+| `archived` | boolean | No | Include archived sessions (default false = hidden) |
 
 **Response:** `{ type: "sessions", sessions }` — array of session info objects.
 
 **Behavior:** Lists sessions. Each session includes: `sessionId`, `claudeUUID` (null if not yet discovered), `status`, `parentId`, `priority`, `cwd`, `createdAt`, `pid`, `children` (array of child sessions, populated when `tree: true`).
-- Default: returns direct children of the caller.
+- Default: returns direct children of the caller (excludes archived).
 - `tree: true`: returns children with their descendants nested recursively (each child has its own `children` array populated).
 - `all: true`: returns every session in the pool (flat list).
 - `all: true` + `tree: true`: returns every session in the pool as a nested tree rooted at top-level sessions.
-- Includes all states: queued, idle, typing, processing, offloaded, dead, error.
+- `archived: true`: includes archived sessions in the results.
+- Includes all non-archived states by default: queued, idle, typing, processing, offloaded, dead, error.
 
 ---
 
@@ -312,7 +323,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 `children` contains direct child session objects, each of which is a full session object with its own `children` — recursively. This gives you the full subtree rooted at this session.
 
-Works for any state including offloaded and dead. This is the primary way to look up a session's Claude UUID from its internal ID.
+Works for any state including offloaded, archived, and dead. This is the primary way to look up a session's Claude UUID from its internal ID.
 
 ---
 
@@ -332,6 +343,7 @@ Works for any state including offloaded and dead. This is the primary way to loo
 - If session is **offloaded** → transitions to `queued` for priority loading. The session jumps to the front of the load queue and is loaded on the next available slot (may offload an unpinned session to make room).
 - If session is **dead/error** → transitions to `queued` for priority reload (like offloaded).
 - If session is **queued** → bumps to front of queue.
+- If session is **archived** → errors. Unarchive first.
 - Pin expires after `duration` seconds. After expiration, session is eligible for eviction again.
 - Pinning an already-pinned session resets the timer.
 
@@ -361,7 +373,42 @@ Works for any state including offloaded and dead. This is the primary way to loo
 - If session is **processing** → sends Ctrl+C (`\x03`) to the PTY. Claude stops its current work and returns to idle.
 - If session is **queued** → cancels the queued request. The session transitions back to its prior state: `offloaded` if it was being loaded, removed entirely if it was a new `start` that never got a slot.
 - If session is **idle**, **typing** → no-op (already not processing).
-- If session is **offloaded**, **dead**, **error** → errors (nothing to stop).
+- If session is **offloaded**, **dead**, **error**, **archived** → errors (nothing to stop).
+
+---
+
+### `archive`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `sessionId` | sessionId | Yes | Target session |
+| `recursive` | boolean | No | Archive all descendants too (default false) |
+
+**Response:** `{ type: "ok" }`
+
+**Behavior:** Archives a session — marks it as done. Archived sessions are hidden from `ls` by default and auto-cleaned after 30 days.
+
+- If session is **live** (idle/typing/processing) → stops the session first (sends Ctrl+C if processing, waits for idle), then offloads it, then archives. The slot is freed.
+- If session is **offloaded** → transitions to `archived`.
+- If session is **dead/error** → transitions to `archived`.
+- If session is **queued** → cancels the queued request, then archives.
+- If session is **already archived** → no-op.
+- If session has **unarchived children** → errors, unless `recursive: true`. With `recursive: true`, archives all descendants depth-first (children before parents, recursively) before archiving the target session.
+- Pinned sessions are unpinned before archiving.
+- Archived session metadata is auto-cleaned after 30 days.
+
+---
+
+### `unarchive`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `sessionId` | sessionId | Yes | Target session |
+
+**Response:** `{ type: "ok" }`
+
+**Behavior:** Restores an archived session to `offloaded` state. The session becomes visible in `ls` again and can be resumed via `followup` or `pin`.
+- Only works for **archived** sessions. Errors for any other state.
 
 ---
 
@@ -394,27 +441,9 @@ Works for any state including offloaded and dead. This is the primary way to loo
 - Connect to `socketPath` for live terminal streaming: bytes you write = keystrokes to PTY, bytes you read = terminal output.
 - Multiple clients can attach simultaneously (output is broadcast to all).
 - The pipe closes automatically when the session is offloaded, dies, or the daemon shuts down. Client receives EOF.
-- **Only works for live sessions** (idle, typing, processing). Errors if queued, offloaded, dead, error.
+- **Only works for live sessions** (idle, typing, processing). Errors if queued, offloaded, dead, error, archived.
 - To attach to an offloaded session: `pin` it (triggers load, transitions to queued) → `wait` for it to become live → `attach`.
 - The temporary socket is cleaned up when all clients disconnect.
-
----
-
-### `kill`
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `sessionId` | sessionId | Yes | Target session |
-
-**Response:** `{ type: "ok" }`
-
-**Behavior:** Permanently removes a session from the pool.
-- If session is **live** (idle/typing/processing) → kills the PTY process, frees the slot, removes the session.
-- If session is **offloaded** → deletes the saved snapshot, removes the session.
-- If session is **queued** → cancels the queued request, removes the session.
-- If session is **dead/error** → removes the session.
-- The session disappears from `ls` and `info` after kill. Its children are **not** killed — they become orphans (parentId still points to the killed session, but it no longer exists).
-- If session is **pinned** → kills anyway (pin doesn't protect against explicit kill).
 
 ---
 
@@ -422,22 +451,28 @@ Works for any state including offloaded and dead. This is the primary way to loo
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| — | — | — | No fields |
+| `sessions` | string[] | No | Only events for these sessionIds. Omit = all sessions. |
+| `events` | string[] | No | Only these event types. Omit = all events. |
+| `statuses` | string[] | No | Only `status` events transitioning TO these states. Omit = all transitions. |
 
 **Response:** Stream of events, one JSON object per line. The connection stays open.
 
-**Behavior:** Opens a persistent event stream. The daemon pushes events as they happen:
+**Behavior:** Opens a persistent event stream. The daemon pushes events matching the filters:
 
 ```json
 {"type":"event","event":"status","sessionId":"a7f2x9","status":"idle","prevStatus":"processing"}
 {"type":"event","event":"created","sessionId":"b3k9m2","status":"queued","parentId":"a7f2x9"}
-{"type":"event","event":"killed","sessionId":"b3k9m2"}
+{"type":"event","event":"archived","sessionId":"b3k9m2"}
+{"type":"event","event":"pool","action":"resize","size":5}
 ```
 
 Event types:
 - `status` — session changed state. Includes `sessionId`, `status`, `prevStatus`.
 - `created` — new session added to pool. Includes `sessionId`, `status`, `parentId`.
-- `killed` — session permanently removed. Includes `sessionId`.
+- `archived` — session archived. Includes `sessionId`.
+- `unarchived` — session unarchived. Includes `sessionId`.
 - `pool` — pool-level event (init, resize, destroy). Includes `action` and relevant details.
+
+Filters are ANDed: an event must match all specified filters. For example, `{ sessions: ["a7f2x9"], statuses: ["idle"] }` only fires when session `a7f2x9` transitions to idle.
 
 The stream continues until the client disconnects or the daemon shuts down. Multiple clients can subscribe simultaneously.
