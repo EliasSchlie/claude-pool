@@ -1,6 +1,6 @@
 # Claude Pool
 
-Managed pool of Claude Code sessions — daemon and socket API.
+Managed pool of Claude Code sessions — daemon and socket API. Written in Go.
 
 ## Status
 
@@ -19,7 +19,8 @@ These files require **explicit user permission** before any modification:
 
 ## Architecture
 
-- `src/` — Daemon source (pool manager, PTY manager, API server, session discovery, attach server)
+- `cmd/claude-pool/` — Daemon entry point
+- `internal/` — Daemon packages (pool, pty, api, attach, discovery, paths)
 - `schema/` — JSON Schema contract for the socket protocol (source of truth)
 - `hooks/` — Claude Code hook scripts (pool-aware via env vars)
 - `docs/` — Documentation
@@ -29,7 +30,7 @@ Key docs:
 - [docs/architecture.md](docs/architecture.md) — Component overview, multi-pool access
 - [docs/protocol.md](docs/protocol.md) — Socket API summary
 - [schema/protocol.json](schema/protocol.json) — Socket API contract (machine-readable)
-- [docs/extraction-plan.md](docs/extraction-plan.md) — What to reference from Open Cockpit
+- [docs/extraction-plan.md](docs/extraction-plan.md) — Implementation plan, OC reference notes
 
 ## Scope
 

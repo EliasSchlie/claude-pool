@@ -12,7 +12,7 @@
     "claudeUUID": {
       "type": "string",
       "pattern": "^[a-f0-9-]+$",
-      "description": "Claude Code session UUID (discovered after spawn, null while queued)"
+      "description": "Claude Code session UUID (discovered after spawn, null while queued). Use info command to look up."
     },
 
     "sessionStatus": {
@@ -25,7 +25,19 @@
         "dead",
         "error"
       ],
-      "description": "API-visible session states. Internal states (fresh, starting) are not exposed."
+      "description": "API-visible session states. Internal states (fresh, starting) are not exposed. Offloaded/dead/error sessions can transition to queued via followup/pin."
+    },
+
+    "outputFormat": {
+      "enum": [
+        "jsonl-last",
+        "jsonl-short",
+        "jsonl-long",
+        "buffer-last",
+        "buffer-full"
+      ],
+      "default": "jsonl-short",
+      "description": "Output format for commands returning session content. Default: jsonl-short."
     },
 
     "poolState": {
@@ -51,11 +63,16 @@
         "priority": {
           "type": "number",
           "default": 0,
-          "description": "Eviction priority (lower = evicted first)"
+          "description": "Eviction priority (lower = evicted first, negative allowed)"
         },
         "cwd": { "type": ["string", "null"] },
         "createdAt": { "type": "string" },
-        "pid": { "type": ["integer", "null"] }
+        "pid": { "type": ["integer", "null"] },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/sessionInfo" },
+          "description": "Direct child sessions. Populated by info and ls (with tree: true)."
+        }
       }
     },
 
@@ -123,7 +140,7 @@
     },
 
     "resize": {
-      "description": "Resize pool. New slots use config flags. Shrinking kills: queued first, then low-priority idle, then processing.",
+      "description": "Resize pool. Shrinking offloads idle (low priority first), then kills processing. Queued requests stay queued.",
       "request": {
         "type": "object",
         "properties": {
@@ -166,7 +183,7 @@
     },
 
     "destroy": {
-      "description": "Kill all sessions, remove pool directory, update registry. Daemon exits. Irreversible.",
+      "description": "Kill all sessions, daemon exits. Pool directory and config persist. Re-init to restart.",
       "request": {
         "type": "object",
         "properties": {
@@ -211,7 +228,7 @@
     },
 
     "start": {
-      "description": "Start new session. Returns internal ID immediately (even if queued).",
+      "description": "Start new session with prompt. Returns internal ID immediately (even if queued).",
       "request": {
         "type": "object",
         "properties": {
@@ -221,11 +238,6 @@
           "parentId": {
             "$ref": "#/$defs/sessionId",
             "description": "Explicit parent. Auto-detected from env if omitted."
-          },
-          "priority": {
-            "type": "number",
-            "default": 0,
-            "description": "Eviction priority"
           }
         },
         "required": ["type", "prompt"]
@@ -243,7 +255,7 @@
     },
 
     "followup": {
-      "description": "Send prompt to session. Auto-resumes if offloaded. Errors if busy (unless force).",
+      "description": "Send prompt to session. Auto-resumes if offloaded/dead/error (queues for loading). Errors if queued/processing unless force.",
       "request": {
         "type": "object",
         "properties": {
@@ -279,7 +291,8 @@
             "minimum": 0,
             "default": 300000,
             "description": "Timeout in ms"
-          }
+          },
+          "format": { "$ref": "#/$defs/outputFormat" }
         },
         "required": ["type"]
       },
@@ -289,20 +302,21 @@
           "type": { "const": "result" },
           "id": { "type": "integer" },
           "sessionId": { "$ref": "#/$defs/sessionId" },
-          "buffer": { "type": "string" }
+          "content": { "type": "string" }
         },
-        "required": ["type", "sessionId", "buffer"]
+        "required": ["type", "sessionId", "content"]
       }
     },
 
     "capture": {
-      "description": "Get terminal buffer (any live state). Errors if queued/offloaded.",
+      "description": "Get session output (any live state). Errors if queued/offloaded.",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "capture" },
           "id": { "type": "integer" },
-          "sessionId": { "$ref": "#/$defs/sessionId" }
+          "sessionId": { "$ref": "#/$defs/sessionId" },
+          "format": { "$ref": "#/$defs/outputFormat" }
         },
         "required": ["type", "sessionId"]
       },
@@ -312,20 +326,21 @@
           "type": { "const": "buffer" },
           "id": { "type": "integer" },
           "sessionId": { "$ref": "#/$defs/sessionId" },
-          "buffer": { "type": "string" }
+          "content": { "type": "string" }
         },
-        "required": ["type", "sessionId", "buffer"]
+        "required": ["type", "sessionId", "content"]
       }
     },
 
     "result": {
-      "description": "Get terminal buffer only if idle. Errors for any other state.",
+      "description": "Get session output only if idle. Errors for any other state.",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "result" },
           "id": { "type": "integer" },
-          "sessionId": { "$ref": "#/$defs/sessionId" }
+          "sessionId": { "$ref": "#/$defs/sessionId" },
+          "format": { "$ref": "#/$defs/outputFormat" }
         },
         "required": ["type", "sessionId"]
       },
@@ -335,9 +350,9 @@
           "type": { "const": "result" },
           "id": { "type": "integer" },
           "sessionId": { "$ref": "#/$defs/sessionId" },
-          "buffer": { "type": "string" }
+          "content": { "type": "string" }
         },
-        "required": ["type", "sessionId", "buffer"]
+        "required": ["type", "sessionId", "content"]
       }
     },
 
@@ -385,13 +400,14 @@
     },
 
     "ls": {
-      "description": "List sessions. Default: owned only. all=true for everything.",
+      "description": "List sessions. Default: owned direct children. tree=true for nested descendants. all=true for everything.",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "ls" },
           "id": { "type": "integer" },
-          "all": { "type": "boolean", "default": false }
+          "all": { "type": "boolean", "default": false },
+          "tree": { "type": "boolean", "default": false }
         },
         "required": ["type"]
       },
@@ -410,7 +426,7 @@
     },
 
     "info": {
-      "description": "Full details for one session. Works for any state.",
+      "description": "Full details for one session including children and Claude UUID. Works for any state.",
       "request": {
         "type": "object",
         "properties": {
@@ -432,13 +448,17 @@
     },
 
     "pin": {
-      "description": "Prevent auto-offload. Offloaded → priority load. Queued → bumps to front.",
+      "description": "Prevent auto-offload. No sessionId = allocate fresh session. Offloaded/dead → queued for priority load. Queued → front of queue.",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "pin" },
           "id": { "type": "integer" },
           "sessionId": { "$ref": "#/$defs/sessionId" },
+          "parentId": {
+            "$ref": "#/$defs/sessionId",
+            "description": "Only used when no sessionId (fresh session mode). Auto-detected from env if omitted."
+          },
           "duration": {
             "type": "integer",
             "minimum": 0,
@@ -446,13 +466,15 @@
             "description": "Seconds"
           }
         },
-        "required": ["type", "sessionId"]
+        "required": ["type"]
       },
       "response": {
         "type": "object",
         "properties": {
-          "type": { "const": "ok" },
-          "id": { "type": "integer" }
+          "type": { "enum": ["ok", "pinned"] },
+          "id": { "type": "integer" },
+          "sessionId": { "$ref": "#/$defs/sessionId" },
+          "status": { "$ref": "#/$defs/sessionStatus" }
         },
         "required": ["type"]
       }
@@ -480,7 +502,7 @@
     },
 
     "stop": {
-      "description": "Send Ctrl+C to interrupt processing session. No-op if already idle.",
+      "description": "Interrupt processing (Ctrl+C) or cancel queued request. No-op if idle.",
       "request": {
         "type": "object",
         "properties": {
@@ -501,7 +523,7 @@
     },
 
     "set-priority": {
-      "description": "Set eviction priority. Lower = evicted first. No effect on queue or processing.",
+      "description": "Set eviction priority. Lower = evicted first. Negative allowed. No effect on queue or processing.",
       "request": {
         "type": "object",
         "properties": {

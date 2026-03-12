@@ -21,8 +21,8 @@ Claude Pool runs a persistent daemon that manages a pool of pre-started Claude C
 │  Claude Pool daemon (one per pool)          │
 │  • Pool lifecycle (init/resize/destroy)     │
 │  • Session management + LRU eviction        │
-│  • In-process PTY management                │
-│  • Session offload/restore/archive          │
+│  • In-process PTY management (creack/pty)   │
+│  • Session offload/restore                  │
 │  • Terminal attachment (raw PTY pipes)       │
 └─────────────────────────────────────────────┘
 ```
@@ -36,14 +36,17 @@ See [docs/architecture.md](docs/architecture.md) for full details.
 claude-pool daemon start
 
 # Initialize a pool with 5 sessions
-claude-pool pool init 5
+claude-pool init 5
 
 # Send a prompt, get a response
 claude-pool start "fix the login bug" --block
 
 # Named pools (each fully independent)
-claude-pool --pool=work pool init 3
+claude-pool --pool=work init 3
 claude-pool --pool=work start "review the PR"
+
+# Pin a fresh session for interactive use
+claude-pool pin
 
 # Observe sessions
 claude-pool ls
@@ -64,8 +67,8 @@ claude-pool attach abc123
 Newline-delimited JSON over Unix socket. See [docs/protocol.md](docs/protocol.md) and [schema/protocol.json](schema/protocol.json).
 
 ```
--> {"type":"pool-start","prompt":"fix the bug","id":1}
-<- {"type":"started","sessionId":"2947bf12-d307-...","id":1}
+-> {"type":"start","prompt":"fix the bug","id":1}
+<- {"type":"started","sessionId":"a7f2x9","status":"processing","id":1}
 ```
 
 ## Design Principles
@@ -74,7 +77,7 @@ See [docs/design-principles.md](docs/design-principles.md) for invariants and ru
 
 Key principles:
 - **Pool isolation is absolute** — each pool is a separate daemon, separate directory, zero shared state
-- **Sessions addressed by Claude UUID only** — no slot indices, no internal IDs
+- **Internal session IDs** — pool-assigned short random strings, stable across lifecycle
 - **Pools are uniform** — all sessions run the same flags
 - **Socket is the only interface** — no client reads pool files directly
 

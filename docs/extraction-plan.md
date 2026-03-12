@@ -1,79 +1,146 @@
-# Extraction Plan
+# Implementation Plan
 
-Taking lessons from Open Cockpit's pool implementation, but designing a cleaner system from requirements up. Open Cockpit code is a reference, not a blueprint.
+Written in Go. Taking lessons from Open Cockpit's pool implementation, but designing a cleaner system from requirements up. Open Cockpit code is a reference for patterns and edge cases, not a blueprint.
 
 ## What to reference from Open Cockpit
 
-From `open-cockpit/src/`:
+From `open-cockpit/src/` (Node.js — used as behavioral reference, not code to port):
 
-| File | Relevance | Notes |
-|------|-----------|-------|
-| `pool.js` | High | Pure data layer — good patterns for pool.json read/write, slot selection |
-| `pool-manager.js` | High | Core logic for offloading, slot claiming, LRU eviction, session spawning. Needs significant refactoring (remove UI callbacks, absorb PTY management, drop slot-index-based APIs). |
-| `pool-lock.js` | High | Async mutex — reuse directly |
-| `api-server.js` | High | Unix socket server — adapt socket path from pool directory |
-| `api-handlers.js` | Medium | Handler pattern is good. Strip UI handlers, strip slot/term commands, strip intentions. |
-| `session-discovery.js` | High | Idle detection, status tracking — adapt paths for pool directory |
-| `secure-fs.js` | Medium | Secure file writing |
-| `platform.js` | Medium | Cross-platform path resolution |
+| File | Relevance | What to learn |
+|------|-----------|---------------|
+| `pool-manager.js` | High | Offloading flow, slot claiming, LRU eviction logic, session spawning order |
+| `session-discovery.js` | High | Idle detection via signal files, typing detection via buffer polling, consecutive-miss threshold |
+| `api-handlers.js` | Medium | Handler patterns, error responses, timing dance for prompt delivery |
+| `pool.js` | Medium | pool.json structure, slot selection heuristics |
+| `api-server.js` | Medium | Unix socket connection handling, newline-delimited JSON parsing |
 
 **Not referenced** (different scope):
-- `pty-daemon.js`, `daemon-client.js` — We use in-process PTY management, not a separate daemon
+- `pty-daemon.js`, `daemon-client.js` — We use in-process PTY, not a separate daemon
 - `main.js`, `renderer.js`, UI modules — Electron-specific
-- Terminal tab management — That's claude-term's scope
-- Intention files — That's Open Cockpit's scope
+- Terminal tab management — claude-term's scope
+- Intention files — Open Cockpit's scope
 
-## New files to create
+## Go Dependencies
 
-| File | Purpose |
-|------|---------|
-| `src/daemon.js` | Single daemon entry point. Owns PTYs in-process, runs API server, reconciliation loop. |
-| `src/pty-manager.js` | In-process PTY management (spawn, kill, read buffer, re-adopt on restart). Replaces the old two-daemon architecture. |
-| `src/paths.js` | Centralized path resolution. Pool name → all paths (config.json, pool.json, socket, logs/, offloaded/). |
-| `src/pool.js` | Pool state data layer (adapted from Open Cockpit). |
-| `src/pool-manager.js` | Pool business logic (adapted). Session-ID-only interface, no slot indices exposed. |
-| `src/pool-lock.js` | Async mutex (direct reuse). |
-| `src/api-server.js` | Unix socket server (adapted). |
-| `src/api-handlers.js` | Command handlers — pool ops, session ops, attach. No UI, no terminals, no intentions. |
-| `src/session-discovery.js` | Session state detection (adapted). |
-| `src/attach-server.js` | Per-session raw PTY pipe sockets for terminal attachment. |
-| `hooks/` | Hook scripts with `CLAUDE_POOL_HOME` env var routing. |
+| Package | Purpose |
+|---------|---------|
+| `creack/pty` | PTY spawn, read/write, window resize |
+| stdlib `net` | Unix domain sockets (API server + attach sockets) |
+| stdlib `encoding/json` | JSON protocol (marshal/unmarshal) |
+| stdlib `os/exec` | Spawning Claude Code processes |
+| stdlib `sync` | Mutex for pool state |
+| stdlib `bufio` | Newline-delimited JSON scanning |
+
+No frameworks. The stdlib covers almost everything.
+
+## Source Layout
+
+```
+cmd/
+  claude-pool/
+    main.go              # Daemon entry point
+internal/
+  daemon/
+    daemon.go            # Lifecycle: start, signal handling, graceful shutdown
+  pool/
+    pool.go              # Pool state (sessions, queue, mappings)
+    manager.go           # Business logic (start, followup, pin, offload, eviction)
+    config.go            # config.json read/write
+    queue.go             # FIFO request queue
+  pty/
+    manager.go           # PTY spawn, kill, buffer capture, re-adopt on restart
+    timing.go            # Timing dance (Escape → Ctrl-U → type → poll → Enter)
+    ansi.go              # ANSI escape stripping
+  api/
+    server.go            # Unix socket listener, connection handling
+    handlers.go          # Command dispatch → pool manager
+    protocol.go          # Request/response types, JSON marshaling
+  attach/
+    server.go            # Per-session raw PTY pipe sockets
+  discovery/
+    discovery.go         # Session state detection (signal files, JSONL)
+    typing.go            # Typing detection (buffer polling)
+  paths/
+    paths.go             # Pool name → all file paths
+hooks/
+  idle.sh               # Idle signal hook
+  stop.sh               # Stop hook
+```
 
 ## Separate package: CLI
 
-The CLI ships as `claude-pool-cli` (separate repo or package). It's a thin client:
+The CLI ships as `claude-pool-cli` (separate repo). It's a thin Go binary:
 - Reads `~/.claude-pool/pools.json` registry
 - Resolves `--pool` flag to socket connection
 - Sends JSON, pretty-prints responses
 - Supports local Unix sockets and remote connections (SSH tunneling)
 
-## Migration Strategy
+## Build & Distribution
 
-### Phase 1: Build claude-pool daemon
-1. Design from requirements (this doc + design principles), not by copying
-2. Reference Open Cockpit code for patterns, not structure
-3. All sessions addressed by Claude UUID — no slot indices in API
-4. Single daemon per pool — PTYs in-process
-5. Pool config.json for flags (default: `--dangerously-skip-permissions`)
-6. Hooks with `CLAUDE_POOL_HOME` routing
-7. Attach via session-level raw pipe sockets
+Single static binary per platform. No runtime dependencies.
 
-### Phase 2: Build CLI (separate package)
+```bash
+# Build
+go build -o claude-pool ./cmd/claude-pool
+
+# Cross-compile
+GOOS=linux GOARCH=amd64 go build -o claude-pool-linux ./cmd/claude-pool
+```
+
+## Implementation Phases
+
+### Phase 1: Core daemon
+1. Pool state management (pool.go, manager.go, config.go)
+2. PTY management (spawn, kill, buffer capture)
+3. API server (socket, handlers, protocol)
+4. Session discovery (idle detection via signal files)
+5. Basic commands: init, start, wait, result, followup, ls, info, health
+6. Timing dance for prompt delivery
+7. Hooks (idle signal, stop)
+
+### Phase 2: Advanced features
+1. Offload/restore flow
+2. Claim command (fresh session access)
+3. LRU eviction with priority
+4. Queue management
+5. Pin/unpin
+6. Attach server (raw PTY pipe sockets)
+7. Reconciliation loop
+
+### Phase 3: CLI (separate package)
 1. Pool registry (`~/.claude-pool/pools.json`)
 2. Local socket connections
 3. Remote pool support (SSH tunneling)
 4. Pretty-printed output, `--json` flag for programmatic use
 
-### Phase 3: Wire Open Cockpit
+### Phase 4: Wire Open Cockpit
 1. Open Cockpit reads pool registry, connects to pool sockets as a client
 2. Remove pool logic from Open Cockpit
 3. Pool UI goes through socket API
 4. Attach feeds xterm.js via raw pipe sockets
 
-### Phase 4: Extract claude-term (separate project)
+### Phase 5: Extract claude-term (separate project)
 1. Per-session persistent terminal tabs
 2. Independent from claude-pool
 3. Open Cockpit depends on both
+
+## Key Implementation Notes
+
+### Timing dance (from OC reference)
+The sequence for safely delivering a prompt to an idle Claude session:
+1. Send Escape (clear any partial input)
+2. Send Ctrl-U (clear line)
+3. Type the prompt text
+4. Poll terminal buffer until prompt text appears
+5. Send Enter
+
+This must be reimplemented in Go using `creack/pty` read/write on the `*os.File`.
+
+### PTY re-adoption on restart
+On daemon restart, read PIDs from pool.json → check if processes are still alive → re-open `/proc/<pid>/fd/0` (Linux) or use `os.FindProcess` → reconnect PTY I/O.
+
+### Session state detection
+Claude Code writes signal files when idle. The daemon watches these files + polls the JSONL transcript for processing state. Typing detection polls the terminal buffer for un-submitted input (with consecutive-miss threshold to avoid false positives).
 
 ## Open Questions
 
@@ -81,4 +148,3 @@ The CLI ships as `claude-pool-cli` (separate repo or package). It's a thin clien
 - [ ] How to handle migration for existing Open Cockpit users?
 - [ ] Should hooks ship as a claude-pool plugin or integrate with Open Cockpit's existing plugin?
 - [ ] Pool registry format — should remote connections use SSH tunnel strings, TCP addresses, or something else?
-- [ ] Should `pool-start` block until the Claude UUID is discovered, or return immediately with a pending ID?

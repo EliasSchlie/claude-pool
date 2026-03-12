@@ -4,13 +4,13 @@
 
 Claude Pool is a daemon that manages a pool of Claude Code sessions. It handles session lifecycle, slot allocation, offloading/restoring, and exposes everything through a Unix socket API.
 
-Each pool runs as a single daemon process that owns its PTYs directly. Sessions are addressed exclusively by their Claude UUID.
+Each pool runs as a single daemon process that owns its PTYs directly. Sessions are addressed by pool-assigned internal IDs (short random strings).
 
 ```
 claude-pool daemon
   ├── API server (Unix socket, newline-delimited JSON)
-  ├── Pool manager (session allocation, LRU eviction, offload/restore)
-  ├── PTY manager (in-process, owns terminal instances via node-pty)
+  ├── Pool manager (session allocation, queue, LRU eviction, offload/restore)
+  ├── PTY manager (in-process, owns terminal instances via creack/pty)
   ├── Attach server (per-session raw PTY pipe sockets)
   ├── Session discovery (idle detection, status tracking)
   └── Reconciliation loop (auto-restart dead sessions, periodic health checks)
@@ -19,10 +19,10 @@ claude-pool daemon
 ## Components
 
 ### Pool Manager
-Core business logic. Manages pool.json, session allocation, offloading, archiving, session restoration. All state mutations go through `withPoolLock()` to prevent races. External interface uses Claude UUIDs only — slot indices are an internal implementation detail.
+Core business logic. Manages pool.json, session allocation, queueing, offloading, session restoration. All state mutations go through a mutex to prevent races. External interface uses internal session IDs — slot indices are an implementation detail.
 
 ### PTY Manager
-Owns all terminal instances in-process via `node-pty`. On daemon restart, re-adopts orphaned PTY processes by checking PIDs from pool.json.
+Owns all terminal instances in-process via `creack/pty`. On daemon restart, re-adopts orphaned PTY processes by checking PIDs from pool.json.
 
 ### API Server
 Listens on `~/.claude-pool/pools/<name>/api.sock`. Accepts newline-delimited JSON. Routes requests to pool manager.
@@ -53,7 +53,7 @@ CLI and Open Cockpit both read this registry. No routing logic duplication — i
 ## Key Design Decisions
 
 ### Sessions, not slots
-Clients never see or think about slots. The pool manages slots internally (which physical PTY holds which session). Clients use Claude UUIDs. This means the pool is free to move sessions between slots, change its internal allocation strategy, etc. without breaking clients.
+Clients never see or think about slots. The pool manages slots internally (which physical PTY holds which session). Clients use internal session IDs. This means the pool is free to move sessions between slots, change its internal allocation strategy, etc. without breaking clients.
 
 ### Socket as the only client interface
 All clients use the same socket API. No client reads pool files directly.
@@ -62,13 +62,13 @@ All clients use the same socket API. No client reads pool files directly.
 One process per pool owns everything: API server, PTY instances, pool state. On restart, re-adopts orphaned PTY processes.
 
 ### Automatic slot management
-The pool decides when to offload sessions (LRU eviction when slots are needed for `pool-start`). Clients can manually offload specific sessions, but there's no bulk "clean" operation.
+The pool decides when to offload sessions (LRU eviction when slots are needed for `start`). Clients can manually offload specific sessions, but there's no bulk "clean" operation.
 
 ### Uniform pools
 All sessions in a pool run with the same flags. Different flags = different pool.
 
 ### Config-driven spawning
-Pool config.json stores flags and settings. `pool init` and `pool resize` read from config. Changes to config affect future spawns only.
+Pool config.json stores flags and settings. `init` and `resize` read from config. Changes to config affect future spawns only.
 
 ## What Claude Pool Does NOT Do
 
