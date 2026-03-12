@@ -255,7 +255,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 **Response:** `{ type: "sessions", sessions }` — array of session info objects.
 
-**Behavior:** Lists sessions. Each session includes: `sessionId`, `claudeUUID` (null if not yet discovered), `status`, `parentId`, `priority`, `cwd`, `createdAt`, `pid`, `children` (array of child sessions, populated when `tree: true`).
+**Behavior:** Lists sessions. Each session includes: `sessionId`, `claudeUUID` (null if not yet discovered), `status`, `parentId`, `priority`, `cwd`, `spawnCwd`, `createdAt`, `pid`, `pinned`, `children` (array of child sessions, populated when `tree: true`).
 - Default: returns direct children of the caller (excludes archived).
 - `tree: true`: returns children with their descendants nested recursively (each child has its own `children` array populated).
 - `all: true`: returns every session in the pool (flat list).
@@ -283,8 +283,10 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
   "parentId": null,
   "priority": 0,
   "cwd": "/Users/me/project",
+  "spawnCwd": "/Users/me",
   "createdAt": "2026-03-12T14:30:00Z",
   "pid": 12345,
+  "pinned": false,
   "children": [
     {
       "sessionId": "b3k9m2",
@@ -297,6 +299,10 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
   ]
 }
 ```
+
+`cwd` is the session's **current** working directory — it changes as Claude `cd`s around. For live sessions, detected via process inspection (`lsof`/`/proc`). For offloaded/dead sessions, falls back to the last known cwd from the JSONL transcript. `spawnCwd` is the directory the session was originally spawned in (never changes).
+
+`pinned` indicates whether the session is currently pinned (prevents LRU eviction).
 
 `children` contains direct child session objects, each of which is a full session object with its own `children` — recursively. This gives you the full subtree rooted at this session.
 
@@ -431,6 +437,7 @@ Works for any state including offloaded, archived, and dead. This is the primary
 | `sessions` | string[] | No | Only events for these sessionIds. Omit = all sessions. |
 | `events` | string[] | No | Only these event types. Omit = all events. |
 | `statuses` | string[] | No | Only `status` events transitioning TO these states. Omit = all transitions. |
+| `fields` | string[] | No | Only `updated` events for these fields. Omit = all fields. |
 
 **Response:** Stream of events, one JSON object per line. The connection stays open.
 
@@ -439,6 +446,8 @@ Works for any state including offloaded, archived, and dead. This is the primary
 ```json
 {"type":"event","event":"status","sessionId":"a7f2x9","status":"idle","prevStatus":"processing"}
 {"type":"event","event":"created","sessionId":"b3k9m2","status":"queued","parentId":"a7f2x9"}
+{"type":"event","event":"updated","sessionId":"a7f2x9","changes":{"cwd":"/Users/me/other-project"}}
+{"type":"event","event":"updated","sessionId":"a7f2x9","changes":{"priority":5}}
 {"type":"event","event":"archived","sessionId":"b3k9m2"}
 {"type":"event","event":"pool","action":"resize","size":5}
 ```
@@ -446,6 +455,7 @@ Works for any state including offloaded, archived, and dead. This is the primary
 Event types:
 - `status` — session changed state. Includes `sessionId`, `status`, `prevStatus`.
 - `created` — new session added to pool. Includes `sessionId`, `status`, `parentId`.
+- `updated` — session property changed (not status). Includes `sessionId` and `changes` object with the changed fields and their new values. Tracked fields: `cwd`, `priority`, `pinned`. Filter with the `fields` param to only receive updates for specific properties.
 - `archived` — session archived. Includes `sessionId`.
 - `unarchived` — session unarchived. Includes `sessionId`.
 - `pool` — pool-level event (init, resize, destroy). Includes `action` and relevant details.

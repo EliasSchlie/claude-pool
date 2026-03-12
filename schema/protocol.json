@@ -124,9 +124,20 @@
           "default": 0,
           "description": "Eviction priority (lower = evicted first, negative allowed)"
         },
-        "cwd": { "type": ["string", "null"] },
+        "cwd": {
+          "type": ["string", "null"],
+          "description": "Current working directory. Live sessions: detected via process inspection. Offloaded/dead: last known from JSONL transcript."
+        },
+        "spawnCwd": {
+          "type": ["string", "null"],
+          "description": "Directory the session was originally spawned in (never changes)"
+        },
         "createdAt": { "type": "string" },
         "pid": { "type": ["integer", "null"] },
+        "pinned": {
+          "type": "boolean",
+          "description": "Whether the session is currently pinned (prevents LRU eviction)"
+        },
         "children": {
           "type": "array",
           "items": { "$ref": "#/$defs/sessionInfo" },
@@ -673,7 +684,14 @@
           "events": {
             "type": "array",
             "items": {
-              "enum": ["status", "created", "archived", "unarchived", "pool"]
+              "enum": [
+                "status",
+                "created",
+                "updated",
+                "archived",
+                "unarchived",
+                "pool"
+              ]
             },
             "description": "Only these event types. Omit = all."
           },
@@ -681,6 +699,13 @@
             "type": "array",
             "items": { "$ref": "#/$defs/sessionStatus" },
             "description": "Only status events transitioning TO these states. Omit = all."
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "enum": ["cwd", "priority", "pinned"]
+            },
+            "description": "Only updated events for these fields. Omit = all fields."
           }
         },
         "required": ["type"]
@@ -690,13 +715,24 @@
         "properties": {
           "type": { "const": "event" },
           "event": {
-            "enum": ["status", "created", "archived", "unarchived", "pool"],
+            "enum": [
+              "status",
+              "created",
+              "updated",
+              "archived",
+              "unarchived",
+              "pool"
+            ],
             "description": "Event type"
           },
           "sessionId": { "$ref": "#/$defs/sessionId" },
           "status": { "$ref": "#/$defs/sessionStatus" },
           "prevStatus": { "$ref": "#/$defs/sessionStatus" },
           "parentId": { "$ref": "#/$defs/sessionId" },
+          "changes": {
+            "type": "object",
+            "description": "Changed fields and their new values (updated events only)"
+          },
           "action": {
             "type": "string",
             "description": "Pool-level action (init, resize, destroy)"
