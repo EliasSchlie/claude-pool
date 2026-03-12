@@ -118,6 +118,7 @@ func boolVal(m map[string]any, key string) bool {
 type testPool struct {
 	t          *testing.T
 	dir        string // temp pool directory
+	binPath    string // daemon binary path
 	socketPath string
 	conn       net.Conn
 	scanner    *bufio.Scanner
@@ -125,13 +126,26 @@ type testPool struct {
 	nextID     atomic.Int64
 }
 
-// setupPool builds the daemon binary, starts it with a temp pool directory,
-// configures flags, calls init, and returns a connected testPool.
-// t.Cleanup tears everything down.
+// setupPool builds the daemon binary, starts it, calls init, and returns a connected testPool.
+// Most tests should use this. Use setupDaemon if you need to control init yourself.
 func setupPool(t *testing.T, size int) *testPool {
 	t.Helper()
+	p := setupDaemon(t, size)
 
-	// Build the daemon binary
+	resp := p.send(Msg{"type": "init", "size": size})
+	if resp["type"] == "error" {
+		t.Fatalf("init failed: %v", resp["error"])
+	}
+
+	return p
+}
+
+// setupDaemon builds the daemon binary, starts it with a temp pool directory,
+// and connects — but does NOT call init. Use this when the test flow needs to
+// control init timing (e.g., pool_test.go tests ping/config before init).
+func setupDaemon(t *testing.T, size int) *testPool {
+	t.Helper()
+
 	binDir := t.TempDir()
 	binPath := filepath.Join(binDir, "claude-pool")
 	build := exec.Command("go", "build", "-o", binPath, "./cmd/claude-pool")
@@ -140,11 +154,9 @@ func setupPool(t *testing.T, size int) *testPool {
 		t.Fatalf("failed to build daemon: %v\n%s", err, out)
 	}
 
-	// Create temp pool directory
 	poolDir := t.TempDir()
 	socketPath := filepath.Join(poolDir, "api.sock")
 
-	// Write initial config
 	configPath := filepath.Join(poolDir, "config.json")
 	config := Msg{
 		"flags": "--dangerously-skip-permissions --model haiku",
@@ -155,70 +167,69 @@ func setupPool(t *testing.T, size int) *testPool {
 		t.Fatalf("failed to write config: %v", err)
 	}
 
-	// Start daemon
-	daemon := exec.Command(binPath, "--pool-dir", poolDir)
+	p := &testPool{
+		t:          t,
+		dir:        poolDir,
+		binPath:    binPath,
+		socketPath: socketPath,
+	}
+
+	p.startDaemon()
+
+	t.Cleanup(func() {
+		p.sendRaw(Msg{"type": "destroy", "confirm": true})
+		p.conn.Close()
+		if p.daemon != nil && p.daemon.Process != nil {
+			p.daemon.Process.Kill()
+		}
+	})
+
+	return p
+}
+
+// startDaemon starts (or restarts) the daemon process and connects to its socket.
+// Used by setupDaemon and by tests that need to restart the daemon after destroy.
+func (p *testPool) startDaemon() {
+	p.t.Helper()
+
+	daemon := exec.Command(p.binPath, "--pool-dir", p.dir)
 	daemon.Stdout = os.Stdout
 	daemon.Stderr = os.Stderr
 	if err := daemon.Start(); err != nil {
-		t.Fatalf("failed to start daemon: %v", err)
+		p.t.Fatalf("failed to start daemon: %v", err)
 	}
+	p.daemon = daemon
 
-	// Single goroutine to detect daemon death
 	daemonDied := make(chan struct{})
 	go func() {
 		daemon.Wait()
 		close(daemonDied)
 	}()
 
-	// Wait for socket to appear (fast-fail if daemon exits early)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(socketPath); err == nil {
+		if _, err := os.Stat(p.socketPath); err == nil {
 			break
 		}
 		select {
 		case <-daemonDied:
-			t.Fatalf("daemon exited before socket appeared")
+			p.t.Fatalf("daemon exited before socket appeared")
 		default:
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if _, err := os.Stat(socketPath); err != nil {
+	if _, err := os.Stat(p.socketPath); err != nil {
 		daemon.Process.Kill()
-		t.Fatalf("daemon socket never appeared at %s", socketPath)
+		p.t.Fatalf("daemon socket never appeared at %s", p.socketPath)
 	}
 
-	// Connect
-	conn, err := net.Dial("unix", socketPath)
+	conn, err := net.Dial("unix", p.socketPath)
 	if err != nil {
 		daemon.Process.Kill()
-		t.Fatalf("failed to connect to daemon socket: %v", err)
+		p.t.Fatalf("failed to connect to daemon socket: %v", err)
 	}
-
-	p := &testPool{
-		t:          t,
-		dir:        poolDir,
-		socketPath: socketPath,
-		conn:       conn,
-		scanner:    bufio.NewScanner(conn),
-		daemon:     daemon,
-	}
-
-	// Cleanup: destroy pool, kill daemon
-	t.Cleanup(func() {
-		p.sendRaw(Msg{"type": "destroy", "confirm": true})
-		p.conn.Close()
-		daemon.Process.Kill()
-		// daemon.Wait() already called by goroutine above
-	})
-
-	// Init the pool
-	resp := p.send(Msg{"type": "init", "size": size})
-	if resp["type"] == "error" {
-		t.Fatalf("init failed: %v", resp["error"])
-	}
-
-	return p
+	p.conn = conn
+	p.scanner = bufio.NewScanner(conn)
 }
 
 // findRepoRoot walks up from cwd to find go.mod.

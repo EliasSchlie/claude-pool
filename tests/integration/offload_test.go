@@ -9,95 +9,223 @@ package integration
 //
 // Flow:
 //
-//   1. "start and wait for idle"
-//      Start a session with prompt "respond with exactly: offload test".
-//      Wait for idle. Save as s1.
-//      Also start s2 with a different prompt. Wait for idle.
-//
-//   2. "offload idle session"
-//      Call offload on s1.
-//      Assert: response is {type: "ok"}.
-//      Info on s1 — status is "offloaded", pid is null.
-//
-//   3. "offload pinned session errors"
-//      Pin s2. Call offload on s2.
-//      Assert: error (session is pinned, unpin first).
-//      Unpin s2.
-//
-//   4. "offload non-idle errors"
-//      Start a slow prompt on s2 (now processing).
-//      Call offload on s2.
-//      Assert: error (session is processing).
-//      Wait for s2 to become idle.
-//
-//   5. "capture JSONL on offloaded session works"
-//      s1 is offloaded. Call capture on s1 with format "jsonl-short".
-//      Assert: content is non-empty, contains "offload test".
-//      Also try "jsonl-last", "jsonl-long", "jsonl-full".
-//      Assert: all return non-empty content.
-//
-//   6. "capture buffer on offloaded session errors"
-//      Call capture on s1 with format "buffer-last".
-//      Assert: error (no live terminal).
-//      Same for "buffer-full" — error.
-//
-//   7. "followup restores offloaded session"
-//      Call followup on s1 with prompt "respond with exactly: restored".
-//      Assert: response is "started", status is "queued" (s1 is being loaded).
-//      Wait for s1 to become idle.
-//      Assert: capture content contains "restored".
-//      Info on s1 — status is "idle", pid is non-null again.
-//
-//   8. "archive idle session"
-//      Call archive on s1.
-//      Assert: response is {type: "ok"}.
-//      Info on s1 — status is "archived".
-//
-//   9. "archived session hidden from ls"
-//      Call ls (default).
-//      Assert: s1 is NOT in the results.
-//      Call ls with archived: true.
-//      Assert: s1 IS in the results with status "archived".
-//
-//  10. "capture JSONL on archived session works"
-//      Call capture on s1 (archived) with format "jsonl-short".
-//      Assert: content is non-empty (transcript still accessible).
-//
-//  11. "capture buffer on archived session errors"
-//      Call capture on s1 with format "buffer-last".
-//      Assert: error (no live terminal).
-//
-//  12. "followup on archived errors"
-//      Call followup on s1 with a prompt.
-//      Assert: error (session is archived, unarchive first).
-//
-//  13. "pin on archived errors"
-//      Call pin on s1.
-//      Assert: error (session is archived, unarchive first).
-//
-//  14. "unarchive restores to offloaded"
-//      Call unarchive on s1.
-//      Assert: response is {type: "ok"}.
-//      Info on s1 — status is "offloaded".
-//      ls (default) — s1 is visible again.
-//
-//  15. "unarchive on non-archived errors"
-//      Call unarchive on s2 (which is idle, not archived).
-//      Assert: error.
-//
-//  16. "archive stops active session first"
-//      Send a slow prompt to s2 (now processing).
-//      Call archive on s2.
-//      Assert: response is {type: "ok"} (archive stops it first, then offloads,
-//      then archives).
-//      Info on s2 — status is "archived".
-//
-//  17. "archive is idempotent"
-//      Call archive on s2 again (already archived).
-//      Assert: response is {type: "ok"} (no-op).
+//   1.  "start and wait for idle"
+//   2.  "offload idle session"
+//   3.  "offload pinned session errors"
+//   4.  "offload non-idle errors"
+//   5.  "capture JSONL on offloaded session works"
+//   6.  "capture buffer on offloaded session errors"
+//   7.  "followup restores offloaded session"
+//   8.  "archive idle session"
+//   9.  "archived session hidden from ls"
+//  10.  "capture JSONL on archived session works"
+//  11.  "capture buffer on archived session errors"
+//  12.  "followup on archived errors"
+//  13.  "pin on archived errors"
+//  14.  "unarchive restores to offloaded"
+//  15.  "unarchive on non-archived errors"
+//  16.  "archive stops active session first"
+//  17.  "archive is idempotent"
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestOffload(t *testing.T) {
-	t.Skip("not yet implemented")
+	pool := setupPool(t, 2)
+
+	var s1, s2 string
+
+	t.Run("start and wait for idle", func(t *testing.T) {
+		r1 := pool.send(Msg{"type": "start", "prompt": "respond with exactly: offload test"})
+		assertNotError(t, r1)
+		s1 = strVal(r1, "sessionId")
+
+		r2 := pool.send(Msg{"type": "start", "prompt": "respond with exactly: second"})
+		assertNotError(t, r2)
+		s2 = strVal(r2, "sessionId")
+
+		pool.awaitStatus(s1, "idle", 120*time.Second)
+		pool.awaitStatus(s2, "idle", 120*time.Second)
+	})
+
+	t.Run("offload idle session", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "offload", "sessionId": s1})
+		assertNotError(t, resp)
+		assertType(t, resp, "ok")
+
+		info := pool.send(Msg{"type": "info", "sessionId": s1})
+		session := parseSession(t, info["session"])
+		assertStatus(t, session, "offloaded")
+		if session.PID != 0 {
+			t.Fatalf("offloaded session should have no PID, got %v", session.PID)
+		}
+	})
+
+	t.Run("offload pinned session errors", func(t *testing.T) {
+		pool.send(Msg{"type": "pin", "sessionId": s2})
+
+		resp := pool.send(Msg{"type": "offload", "sessionId": s2})
+		assertError(t, resp)
+
+		pool.send(Msg{"type": "unpin", "sessionId": s2})
+	})
+
+	t.Run("offload non-idle errors", func(t *testing.T) {
+		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "run the bash command: sleep 60"})
+		pool.awaitStatus(s2, "processing", 30*time.Second)
+
+		resp := pool.send(Msg{"type": "offload", "sessionId": s2})
+		assertError(t, resp)
+
+		// Clean up: stop and wait
+		pool.send(Msg{"type": "stop", "sessionId": s2})
+		pool.sendLong(Msg{"type": "wait", "sessionId": s2, "timeout": 120000}, 150*time.Second)
+	})
+
+	t.Run("capture JSONL on offloaded session works", func(t *testing.T) {
+		// s1 is offloaded — JSONL capture reads from persisted transcript
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-short"})
+		assertNotError(t, resp)
+		assertContains(t, strVal(resp, "content"), "offload test")
+
+		for _, format := range []string{"jsonl-last", "jsonl-long", "jsonl-full"} {
+			r := pool.send(Msg{"type": "capture", "sessionId": s1, "format": format})
+			assertNotError(t, r)
+			assertNonEmpty(t, format+" content", strVal(r, "content"))
+		}
+	})
+
+	t.Run("capture buffer on offloaded session errors", func(t *testing.T) {
+		// Buffer capture requires a live terminal
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "buffer-last"})
+		assertError(t, resp)
+
+		resp = pool.send(Msg{"type": "capture", "sessionId": s1, "format": "buffer-full"})
+		assertError(t, resp)
+	})
+
+	t.Run("followup restores offloaded session", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: restored"})
+		assertNotError(t, resp)
+		assertType(t, resp, "started")
+
+		pool.awaitStatus(s1, "idle", 120*time.Second)
+
+		capture := pool.send(Msg{"type": "capture", "sessionId": s1})
+		assertContains(t, strVal(capture, "content"), "restored")
+
+		info := pool.send(Msg{"type": "info", "sessionId": s1})
+		session := parseSession(t, info["session"])
+		assertStatus(t, session, "idle")
+		if session.PID <= 0 {
+			t.Fatalf("restored session should have a PID, got %v", session.PID)
+		}
+	})
+
+	t.Run("archive idle session", func(t *testing.T) {
+		// Offload first so it frees the slot, then archive
+		pool.send(Msg{"type": "offload", "sessionId": s1})
+		pool.awaitStatus(s1, "offloaded", 10*time.Second)
+
+		resp := pool.send(Msg{"type": "archive", "sessionId": s1})
+		assertNotError(t, resp)
+		assertType(t, resp, "ok")
+
+		info := pool.send(Msg{"type": "info", "sessionId": s1})
+		session := parseSession(t, info["session"])
+		assertStatus(t, session, "archived")
+	})
+
+	t.Run("archived session hidden from ls", func(t *testing.T) {
+		lsResp := pool.send(Msg{"type": "ls", "all": true})
+		sessions := parseSessions(t, lsResp)
+		for _, s := range sessions {
+			if s.SessionID == s1 {
+				t.Fatal("archived session should not appear in default ls")
+			}
+		}
+
+		lsArchived := pool.send(Msg{"type": "ls", "all": true, "archived": true})
+		sessions = parseSessions(t, lsArchived)
+		found := false
+		for _, s := range sessions {
+			if s.SessionID == s1 {
+				found = true
+				assertStatus(t, s, "archived")
+			}
+		}
+		if !found {
+			t.Fatal("archived session should appear with archived: true")
+		}
+	})
+
+	t.Run("capture JSONL on archived session works", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-short"})
+		assertNotError(t, resp)
+		assertNonEmpty(t, "archived capture", strVal(resp, "content"))
+	})
+
+	t.Run("capture buffer on archived session errors", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "buffer-last"})
+		assertError(t, resp)
+	})
+
+	t.Run("followup on archived errors", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "nope"})
+		assertError(t, resp)
+	})
+
+	t.Run("pin on archived errors", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "pin", "sessionId": s1})
+		assertError(t, resp)
+	})
+
+	t.Run("unarchive restores to offloaded", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "unarchive", "sessionId": s1})
+		assertNotError(t, resp)
+		assertType(t, resp, "ok")
+
+		info := pool.send(Msg{"type": "info", "sessionId": s1})
+		session := parseSession(t, info["session"])
+		assertStatus(t, session, "offloaded")
+
+		// Should be visible in default ls again
+		lsResp := pool.send(Msg{"type": "ls", "all": true})
+		sessions := parseSessions(t, lsResp)
+		found := false
+		for _, s := range sessions {
+			if s.SessionID == s1 {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("unarchived session should appear in ls")
+		}
+	})
+
+	t.Run("unarchive on non-archived errors", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "unarchive", "sessionId": s2})
+		assertError(t, resp)
+	})
+
+	t.Run("archive stops active session first", func(t *testing.T) {
+		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "run the bash command: sleep 60"})
+		pool.awaitStatus(s2, "processing", 30*time.Second)
+
+		resp := pool.send(Msg{"type": "archive", "sessionId": s2})
+		assertNotError(t, resp)
+		assertType(t, resp, "ok")
+
+		info := pool.send(Msg{"type": "info", "sessionId": s2})
+		session := parseSession(t, info["session"])
+		assertStatus(t, session, "archived")
+	})
+
+	t.Run("archive is idempotent", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "archive", "sessionId": s2})
+		assertNotError(t, resp)
+		assertType(t, resp, "ok")
+	})
 }
