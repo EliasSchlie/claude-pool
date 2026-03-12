@@ -16,14 +16,16 @@ These files require **explicit user permission** before any modification:
 - `docs/design-principles.md` — Project invariants and rules
 - `docs/protocol.md` — API contract (human-readable)
 - `schema/protocol.json` — API contract (machine-readable)
+- `tests/integration/` — All integration test files. Tests are the contract — never modify without explicit user permission. Propose changes and get approval first.
 
 ## Architecture
 
 - `cmd/claude-pool/` — Daemon entry point
 - `internal/` — Daemon packages (pool, pty, api, attach, discovery, paths)
 - `tests/integration/` — Integration tests (real Claude sessions, `--model haiku`)
+- `tests/manual/` — Manual testing directory (own `.claude/` hooks, independent per worktree)
 - `schema/` — JSON Schema contract for the socket protocol (source of truth)
-- `hooks/` — Claude Code hook scripts (pool-aware via env vars)
+- `hooks/` — Claude Code hook scripts (project-local, written into pool dir on init)
 - `docs/` — Documentation
 
 Key docs:
@@ -45,6 +47,10 @@ Claude Pool manages pools of Claude sessions: spawn, offload, restore, prompt, w
 - **CLI** — Separate package (`claude-pool-cli`). Thin router that resolves pool names from registry to socket connections.
 - **claude-term** — Separate project. Persistent terminal tabs for Claude sessions. Independent from claude-pool.
 - **Open Cockpit** — Electron app. Depends on claude-pool (via socket) and claude-term. Human interface.
+
+## Testing
+
+When a bug is found in production that wasn't caught by integration tests, figure out which existing flow should have caught it and add a `t.Run` step at the right point in the sequence. If it doesn't fit naturally into any existing flow (different pool config needed, flow would get too long, fundamentally different scenario), propose a new flow file to the user. See [tests/integration/CLAUDE.md](tests/integration/CLAUDE.md) for test structure and philosophy.
 
 ## Origin
 

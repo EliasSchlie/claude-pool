@@ -38,7 +38,7 @@ These are non-negotiable. Code that violates an invariant is a bug.
 
 11. **CLI commands default to the `default` pool.** If `--pool` is not specified, all commands target the `default` entry in the registry.
 
-12. **Hooks use environment variables for pool routing.** The pool daemon sets `CLAUDE_POOL_HOME` and `CLAUDE_POOL_SESSION_ID` when spawning sessions. Hook scripts read `CLAUDE_POOL_HOME` to determine which pool directory to write to. `CLAUDE_POOL_SESSION_ID` identifies the session for parent-child tracking.
+12. **Hooks are project-local and self-contained.** The pool daemon writes `.claude/hooks.json` + hook scripts into the pool directory on `init`. Sessions spawn there, so Claude Code loads the hooks automatically. Hook scripts read `CLAUDE_POOL_HOME` and `CLAUDE_POOL_SESSION_ID` environment variables set by the daemon. No plugins, no global hooks — each pool is fully self-contained.
 
 13. **Sugar operations live in the daemon.** High-level operations (start, followup, wait, pin) that coordinate multiple internal steps (slot claiming, LRU eviction, offload/restore, queueing) are handled server-side. Clients send one request, get one response.
 
@@ -69,6 +69,7 @@ These are non-negotiable. Code that violates an invariant is a bug.
 26. Offloaded sessions stored as `meta.json` (no terminal snapshot — JSONL transcripts are the persistent record, read via Claude UUID).
 27. Default flags: `--dangerously-skip-permissions`.
 28. Typing detection: polls terminal buffer for un-submitted input text (reference: Open Cockpit `session-discovery.js` terminal input polling with consecutive-miss threshold).
+29. Lock discipline: hold the mutex only for in-memory state mutations. Never hold it across I/O, process spawning, or network calls.
 
 ---
 

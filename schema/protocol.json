@@ -560,7 +560,7 @@
     },
 
     "stop": {
-      "description": "Interrupt processing (Ctrl+C) or cancel queued request. No-op if idle.",
+      "description": "Interrupt processing (Ctrl+C) or cancel queued request. Synchronous: session is idle when ok returns. No-op if idle.",
       "request": {
         "type": "object",
         "properties": {

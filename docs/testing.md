@@ -14,74 +14,34 @@ config set flags "--dangerously-skip-permissions --model haiku"
 
 ## Framework
 
-Go's built-in `testing` package with `t.Run` subtests. Tests live in `tests/integration/`.
+Go's built-in `testing` package with `t.Run` subtests.
 
-Each test:
-1. Creates a temp pool directory
-2. Starts a daemon
-3. Runs assertions through the socket API
-4. Tears down (destroy + cleanup)
+## Test Layers
 
-## Test Categories
+### API Integration Tests (`tests/integration/`)
 
-### Daemon lifecycle
-- Start foreground/background, status, stop
-- Re-start re-adopts live PIDs
+Test the daemon's behavior directly through the socket API. Raw JSON over Unix socket — no CLI involved. This is the bulk of testing.
 
-### Pool lifecycle
-- Init with size, resize up/down, destroy (config persists), health, config get/set
+See [tests/integration/CLAUDE.md](../tests/integration/CLAUDE.md) for philosophy, file listing, and guidelines.
 
-### Session basics
-- `start --block`, `followup`, `wait`, `result`, `capture`
-- All output formats: jsonl-last, jsonl-short, jsonl-long, jsonl-full, buffer-last, buffer-full
+### CLI Smoke Tests (`tests/cli/`)
 
-### Queue behavior
-- Start when pool full → queues, slot frees → dequeues FIFO
-- Stop cancels queued request
+Test the CLI → daemon path: arg parsing, env var propagation (`CLAUDE_POOL_SESSION_ID`), output formatting, exit codes. Invoke the `claude-pool` CLI binary as a subprocess. Not a re-test of pool logic.
 
-### Offload/restore
-- Offload idle session, followup restores it
-- Pin restores offloaded session
-- JSONL formats work while offloaded, buffer formats error
+See [tests/cli/CLAUDE.md](../tests/cli/CLAUDE.md) for philosophy and file listing.
 
-### Archive/unarchive
-- Archive stops active sessions first
-- Errors on unarchived children (without recursive flag)
-- Recursive archives descendants depth-first
-- `ls --archived` shows them, default `ls` hides them
-- Unarchive → offloaded state
+## Running
 
-### Pin/unpin
-- Pin with sessionId prevents eviction
-- Pin without sessionId allocates fresh session
-- Unpin allows eviction
+```bash
+# All tests
+go test ./tests/... -v -timeout 15m
 
-### Priority & eviction
-- `set-priority` changes eviction order
-- LRU evicts lower priority first, oldest within same priority
+# API integration tests only
+go test ./tests/integration/ -v -timeout 10m
 
-### Parent-child
-- Start with parentId sets ownership
-- `ls` returns owned children only
-- `ls --tree` nests descendants
-- `info` shows recursive children
+# CLI smoke tests only
+go test ./tests/cli/ -v -timeout 10m
 
-### Subscribe
-- Event stream delivers status changes
-- Filters: sessions, events, statuses (ANDed)
-- Re-subscribe on same connection replaces filters
-- Multiple concurrent subscribers
-
-### Attach
-- Raw PTY I/O works for live sessions
-- Errors for offloaded/queued
-- Input/key/type low-level commands
-
-### Screen/watch
-- Terminal buffer output, ANSI stripping
-
-### Edge cases
-- Session prefix resolution (unique prefix matches)
-- Ambiguous prefix → error
-- Concurrent clients on same pool
-- Followup on queued → error; followup with force → replaces prompt
+# Single flow
+go test ./tests/integration/ -v -run TestSession -timeout 5m
+```
