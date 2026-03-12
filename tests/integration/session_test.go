@@ -11,105 +11,225 @@ package integration
 // Flow:
 //
 //   1. "start returns sessionId and status"
-//      Call start with prompt "respond with exactly: hello world".
-//      Assert: response type is "started", sessionId is a non-empty string,
-//      status is "processing" (or "queued" if slots aren't ready yet, but with
-//      size 3 and only 1 session, it should get a slot immediately).
-//      Save sessionId as s1.
-//
 //   2. "wait returns result"
-//      Call wait with s1.
-//      Assert: response type is "result", sessionId matches s1, content is
-//      non-empty and contains "hello world".
-//
 //   3. "info shows session details"
-//      Call info on s1.
-//      Assert: sessionId matches, status is "idle", claudeUUID is non-null (discovered
-//      after processing), pid is a positive integer, pinned is false, priority is 0,
-//      spawnCwd is non-empty, cwd is non-empty, createdAt is a valid timestamp,
-//      children is an empty array.
-//
 //   4. "wait on already-idle returns immediately"
-//      Call wait on s1 again (it's already idle from step 2).
-//      Assert: returns immediately with content (the previous response).
-//
 //   5. "capture while idle — jsonl-short (default)"
-//      Call capture on s1 with no format (default jsonl-short).
-//      Assert: content is non-empty, contains the assistant's response text.
-//
 //   6. "capture — jsonl-last"
-//      Call capture on s1 with format "jsonl-last".
-//      Assert: content is non-empty. Should be just the last assistant message.
-//
 //   7. "capture — jsonl-long"
-//      Call capture on s1 with format "jsonl-long".
-//      Assert: content is non-empty. Should include more context than jsonl-short
-//      but with repetitive fields stripped.
-//
 //   8. "capture — jsonl-full"
-//      Call capture on s1 with format "jsonl-full".
-//      Assert: content is non-empty. Should be the complete unfiltered transcript.
-//      Should be the longest of all JSONL formats.
-//
 //   9. "capture — buffer-last"
-//      Call capture on s1 with format "buffer-last".
-//      Assert: content is non-empty. Terminal buffer content since last user message.
-//
 //  10. "capture — buffer-full"
-//      Call capture on s1 with format "buffer-full".
-//      Assert: content is non-empty. Full terminal scrollback. Should be longer
-//      than buffer-last (includes earlier output).
-//
 //  11. "followup to idle session"
-//      Call followup on s1 with prompt "respond with exactly: goodbye".
-//      Assert: response type is "started", sessionId matches s1, status field is present.
-//      Call wait on s1.
-//      Assert: content contains "goodbye".
-//
 //  12. "followup on processing errors without force"
-//      Start a new session s2 with a slow prompt "write a 200-word essay about trees".
-//      Immediately call followup on s2 (should still be processing).
-//      Assert: error response (session is processing, use force).
-//
 //  13. "followup with force on processing"
-//      Call followup on s2 with force: true and prompt "respond with exactly: interrupted".
-//      Assert: response type is "started".
-//      Wait for s2 to become idle.
-//      Assert: the response relates to the forced followup, not the original prompt.
-//
 //  14. "wait with no sessionId — returns first idle"
-//      Start two sessions s3 and s4 with prompts.
-//      Call wait with no sessionId.
-//      Assert: returns whichever finishes first. Response includes the sessionId
-//      of the completed session.
-//
 //  15. "wait with no sessionId — errors if none busy"
-//      Ensure all sessions are idle.
-//      Call wait with no sessionId.
-//      Assert: error (no owned sessions are busy).
-//
 //  16. "wait with timeout"
-//      Start a session with a slow prompt.
-//      Call wait with timeout: 1 (1ms — will expire immediately).
-//      Assert: error response with "timeout".
-//
 //  17. "input sends raw bytes"
-//      Use s1 (idle). Call input with data "\x1b" (Escape — should be harmless on idle).
-//      Assert: response is {type: "ok"}.
-//      Call input on an offloaded session (offload s1 first, then try input).
-//      Assert: error (no live terminal).
-//
 //  18. "session prefix resolution"
-//      Get s1's full sessionId. Call info with just the first 3 characters.
-//      Assert: resolves to the full session and returns its info.
-//
-//  19. "ambiguous prefix errors"
-//      If any two sessions share a prefix, call info with that prefix.
-//      Assert: error (ambiguous).
-//      (If no natural collision exists, skip this sub-test.)
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSession(t *testing.T) {
-	t.Skip("not yet implemented")
+	pool := setupPool(t, 3)
+
+	var s1 string
+
+	t.Run("start returns sessionId and status", func(t *testing.T) {
+		resp := pool.startRaw("respond with exactly the text: hello world")
+		assertNotError(t, resp)
+		if resp["type"] != "started" {
+			t.Fatalf("expected type started, got %v", resp["type"])
+		}
+		s1 = strVal(resp, "sessionId")
+		assertNonEmpty(t, "sessionId", s1)
+		status := strVal(resp, "status")
+		// Should be processing or queued (processing expected with 3 slots and 1 session)
+		if status != "processing" && status != "queued" {
+			t.Fatalf("expected status processing or queued, got %q", status)
+		}
+	})
+
+	t.Run("wait returns result", func(t *testing.T) {
+		content := pool.waitIdle(s1)
+		assertContains(t, content, "hello world")
+	})
+
+	t.Run("info shows session details", func(t *testing.T) {
+		info := pool.info(s1)
+		if info.SessionID != s1 {
+			t.Fatalf("expected sessionId %s, got %s", s1, info.SessionID)
+		}
+		assertStatus(t, info, "idle")
+		assertNonEmpty(t, "claudeUUID", info.ClaudeUUID)
+		if info.PID <= 0 {
+			t.Fatalf("expected positive PID, got %v", info.PID)
+		}
+		if info.Pinned {
+			t.Fatal("expected pinned=false for new session")
+		}
+		if info.Priority != 0 {
+			t.Fatalf("expected priority 0, got %v", info.Priority)
+		}
+		assertNonEmpty(t, "spawnCwd", info.SpawnCwd)
+		assertNonEmpty(t, "cwd", info.Cwd)
+		assertNonEmpty(t, "createdAt", info.CreatedAt)
+		if len(info.Children) != 0 {
+			t.Fatalf("expected no children, got %d", len(info.Children))
+		}
+	})
+
+	t.Run("wait on already-idle returns immediately", func(t *testing.T) {
+		content := pool.waitIdle(s1)
+		// Should return immediately with the previous response
+		assertContains(t, content, "hello world")
+	})
+
+	t.Run("capture while idle — jsonl-short default", func(t *testing.T) {
+		content := pool.capture(s1)
+		assertNonEmpty(t, "capture content", content)
+	})
+
+	t.Run("capture — jsonl-last", func(t *testing.T) {
+		content := pool.captureFormat(s1, "jsonl-last")
+		assertNonEmpty(t, "jsonl-last content", content)
+	})
+
+	t.Run("capture — jsonl-long", func(t *testing.T) {
+		content := pool.captureFormat(s1, "jsonl-long")
+		assertNonEmpty(t, "jsonl-long content", content)
+	})
+
+	t.Run("capture — jsonl-full", func(t *testing.T) {
+		content := pool.captureFormat(s1, "jsonl-full")
+		assertNonEmpty(t, "jsonl-full content", content)
+		// jsonl-full should be the longest format (complete transcript)
+		shortContent := pool.captureFormat(s1, "jsonl-short")
+		if len(content) < len(shortContent) {
+			t.Fatalf("jsonl-full (%d bytes) should be >= jsonl-short (%d bytes)",
+				len(content), len(shortContent))
+		}
+	})
+
+	t.Run("capture — buffer-last", func(t *testing.T) {
+		content := pool.captureFormat(s1, "buffer-last")
+		assertNonEmpty(t, "buffer-last content", content)
+	})
+
+	t.Run("capture — buffer-full", func(t *testing.T) {
+		content := pool.captureFormat(s1, "buffer-full")
+		assertNonEmpty(t, "buffer-full content", content)
+	})
+
+	t.Run("followup to idle session", func(t *testing.T) {
+		resp := pool.followup(s1, "respond with exactly the text: goodbye")
+		sid := strVal(resp, "sessionId")
+		if sid != s1 {
+			t.Fatalf("followup returned different sessionId: got %s, want %s", sid, s1)
+		}
+		// followup response should include status
+		status := strVal(resp, "status")
+		assertNonEmpty(t, "followup status", status)
+
+		content := pool.waitIdle(s1)
+		assertContains(t, content, "goodbye")
+	})
+
+	var s2 string
+
+	t.Run("followup on processing errors without force", func(t *testing.T) {
+		s2 = pool.start("write a 200-word essay about the history of trees in urban environments")
+		// s2 should be processing — immediately try followup
+		resp := pool.followupRaw(s2, "ignore that")
+		assertError(t, resp)
+		// Error message should mention processing or force
+		errMsg := strVal(resp, "error")
+		if !strings.Contains(strings.ToLower(errMsg), "processing") &&
+			!strings.Contains(strings.ToLower(errMsg), "force") {
+			t.Logf("warning: error message doesn't mention processing/force: %s", errMsg)
+		}
+	})
+
+	t.Run("followup with force on processing", func(t *testing.T) {
+		resp := pool.followupForce(s2, "respond with exactly the text: interrupted")
+		sid := strVal(resp, "sessionId")
+		if sid != s2 {
+			t.Fatalf("expected sessionId %s, got %s", s2, sid)
+		}
+		content := pool.waitIdle(s2)
+		assertContains(t, content, "interrupted")
+	})
+
+	t.Run("wait with no sessionId — returns first idle", func(t *testing.T) {
+		s3 := pool.start("respond with exactly the text: first")
+		s4 := pool.start("respond with exactly the text: second")
+
+		sid, content := pool.waitAny()
+		// Should be one of the two
+		if sid != s3 && sid != s4 {
+			t.Fatalf("waitAny returned unknown session %s (expected %s or %s)", sid, s3, s4)
+		}
+		assertNonEmpty(t, "waitAny content", content)
+
+		// Wait for the other one too (cleanup)
+		other := s3
+		if sid == s3 {
+			other = s4
+		}
+		pool.waitIdle(other)
+	})
+
+	t.Run("wait with no sessionId — errors if none busy", func(t *testing.T) {
+		// All sessions should be idle at this point
+		resp := pool.waitWithTimeout("", 5000)
+		assertError(t, resp)
+	})
+
+	t.Run("wait with timeout", func(t *testing.T) {
+		sid := pool.start("write a very long and detailed 500-word essay about quantum computing")
+		// Wait with 1ms timeout — should expire immediately
+		resp := pool.waitWithTimeout(sid, 1)
+		assertError(t, resp)
+		errMsg := strVal(resp, "error")
+		assertContains(t, errMsg, "timeout")
+		// Let it finish so we don't leave a processing session
+		pool.waitIdle(sid)
+	})
+
+	t.Run("input sends raw bytes", func(t *testing.T) {
+		// s1 is idle — input should succeed
+		pool.input(s1, "\x1b") // Escape — harmless on idle
+
+		// Offload s1, then try input — should error
+		pool.offload(s1)
+		resp := pool.send(Msg{"type": "input", "sessionId": s1, "data": "\x1b"})
+		assertError(t, resp)
+
+		// Restore s1 for the next test
+		pool.followup(s1, "respond with exactly the text: restored")
+		pool.waitIdle(s1)
+	})
+
+	t.Run("session prefix resolution", func(t *testing.T) {
+		// Use first 3 chars of s1 as prefix
+		prefix := s1[:3]
+		resp := pool.infoRaw(prefix)
+		// If it resolves uniquely, should succeed
+		if resp["type"] == "error" {
+			errMsg := strVal(resp, "error")
+			if strings.Contains(strings.ToLower(errMsg), "ambiguous") {
+				t.Skip("prefix is ambiguous — multiple sessions share this prefix")
+			}
+			t.Fatalf("prefix resolution failed: %s", errMsg)
+		}
+		session := parseSession(t, resp["session"])
+		if session.SessionID != s1 {
+			t.Fatalf("prefix resolved to wrong session: got %s, want %s",
+				session.SessionID, s1)
+		}
+	})
 }
