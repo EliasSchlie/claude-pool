@@ -16,14 +16,16 @@ These files require **explicit user permission** before any modification:
 - `docs/design-principles.md` — Project invariants and rules
 - `docs/protocol.md` — API contract (human-readable)
 - `schema/protocol.json` — API contract (machine-readable)
+- `tests/integration/` — All integration test files. Tests are the contract — never modify without explicit user permission. Propose changes and get approval first.
 
 ## Architecture
 
 - `cmd/claude-pool/` — Daemon entry point
 - `internal/` — Daemon packages (pool, pty, api, attach, discovery, paths)
 - `tests/integration/` — Integration tests (real Claude sessions, `--model haiku`)
+- `tests/manual/` — Manual testing directory (own `.claude/` hooks, independent per worktree)
 - `schema/` — JSON Schema contract for the socket protocol (source of truth)
-- `hooks/` — Claude Code hook scripts (pool-aware via env vars)
+- `hooks/` — Claude Code hook scripts (project-local, written into pool dir on init)
 - `docs/` — Documentation
 
 Key docs:

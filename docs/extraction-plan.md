@@ -65,6 +65,13 @@ internal/
 hooks/
   idle.sh               # Idle signal hook
   stop.sh               # Stop hook
+  hooks.json            # Template for .claude/hooks.json
+tests/
+  integration/          # Automated integration tests (real Claude sessions)
+  cli/                  # CLI smoke tests
+  manual/               # Manual testing directory
+    .claude/
+      hooks.json        # Points to ../../hooks/ scripts
 ```
 
 ## Separate package: CLI
@@ -143,9 +150,30 @@ On daemon restart, read PIDs from pool.json → check if processes are still ali
 ### Session state detection
 Claude Code writes signal files when idle. The daemon watches these files + polls the JSONL transcript for processing state. Typing detection polls the terminal buffer for un-submitted input (with consecutive-miss threshold to avoid false positives).
 
-## Open Questions
+## Resolved Questions
 
-- [ ] Should the daemon auto-start when the CLI connects? (Like Docker)
-- [ ] How to handle migration for existing Open Cockpit users?
-- [ ] Should hooks ship as a claude-pool plugin or integrate with Open Cockpit's existing plugin?
-- [ ] Pool registry format — should remote connections use SSH tunnel strings, TCP addresses, or something else?
+- **Daemon auto-start:** Yes. CLI detects missing socket → spawns daemon → connects → sends command. Same pattern as Docker/gpg-agent/ssh-agent. Explicit `claude-pool daemon start/stop` still available for manual control.
+- **OC migration:** Develop claude-pool independently. Once stable, transition Open Cockpit to use it as a client (via socket API). OC stays untouched until then. Breaking changes are fine.
+- **Hooks deployment:** Project-local `.claude/` hooks in the pool's working directory. Each pool session spawns there, so hooks are automatically active for pool sessions only. No plugins, no global hook pollution, fully self-contained. See "Hooks Strategy" below.
+- **Remote pool access:** SSH tunnel. CLI does `ssh -L /tmp/pool-xyz.sock:$remote_socket $host` automatically, then connects to the local forwarded socket. Full protocol support including subscribe works over the tunnel. Zero additional infra — uses existing SSH auth, encrypted, works through NAT/firewalls. TCP can be added later if needed.
+
+## Hooks Strategy
+
+Hooks tell the pool when sessions change state (idle/processing transitions). They live in the pool's working directory as project-local Claude Code hooks.
+
+**How it works:**
+- Each pool has a working directory (the `--pool-dir` or `~/.claude-pool/pools/<name>/`)
+- Pool sessions spawn with their cwd set to a subdirectory that contains `.claude/hooks.json`
+- Claude Code automatically loads project-local hooks — no install step, no plugin
+- Hooks write to signal files in the pool directory (read `CLAUDE_POOL_HOME` env var)
+- Completely self-contained: hooks only affect pool sessions, no conflict with user's own hooks
+
+**For development/manual testing:**
+- `tests/manual/` directory in the repo with its own `.claude/hooks.json` pointing to hook scripts
+- Spawn a test pool with `--pool-dir tests/manual/pool-data/`
+- Each worktree can have its own independent test pool
+- No deploy step — edit hooks, restart pool, changes take effect immediately
+
+**For production:**
+- `claude-pool init` writes `.claude/hooks.json` + hook scripts into the pool directory
+- Sessions inherit hooks automatically by spawning in that directory
