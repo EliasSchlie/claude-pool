@@ -19,7 +19,62 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/EliasSchlie/claude-pool/tests/testutil"
 )
+
+// Built once by TestMain and shared across all test functions.
+var (
+	daemonBinPath string
+	cliBinPath    string
+)
+
+func TestMain(m *testing.M) {
+	tmpDir, err := os.MkdirTemp("", "claude-pool-cli-test-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
+		os.Exit(1)
+	}
+
+	repoRoot := testutil.FindRepoRoot()
+
+	// Build daemon and CLI in parallel — they're independent
+	daemonBinPath = filepath.Join(tmpDir, "claude-pool")
+	cliBinPath = filepath.Join(tmpDir, "claude-pool-cli")
+
+	type buildResult struct {
+		name string
+		out  []byte
+		err  error
+	}
+	ch := make(chan buildResult, 2)
+
+	for _, target := range []struct{ name, bin, pkg string }{
+		{"daemon", daemonBinPath, "./cmd/claude-pool"},
+		{"CLI", cliBinPath, "./cmd/claude-pool-cli"},
+	} {
+		target := target
+		go func() {
+			build := exec.Command("go", "build", "-o", target.bin, target.pkg)
+			build.Dir = repoRoot
+			out, err := build.CombinedOutput()
+			ch <- buildResult{target.name, out, err}
+		}()
+	}
+
+	for i := 0; i < 2; i++ {
+		r := <-ch
+		if r.err != nil {
+			os.RemoveAll(tmpDir)
+			fmt.Fprintf(os.Stderr, "failed to build %s: %v\n%s\n", r.name, r.err, r.out)
+			os.Exit(1)
+		}
+	}
+
+	code := m.Run()
+	os.RemoveAll(tmpDir)
+	os.Exit(code)
+}
 
 type Msg = map[string]any
 
@@ -27,7 +82,6 @@ type cliPool struct {
 	t          *testing.T
 	poolDir    string
 	socketPath string
-	daemonBin  string
 	cliBin     string
 	daemon     *exec.Cmd
 	poolName   string
@@ -39,31 +93,11 @@ type cmdResult struct {
 	ExitCode int
 }
 
-// setupCLIPool builds both binaries, starts the daemon, calls init via socket,
-// and returns a cliPool ready for CLI commands.
+// setupCLIPool starts the daemon, calls init via socket, and returns a cliPool
+// ready for CLI commands. Binaries are built once by TestMain.
 func setupCLIPool(t *testing.T, size int) *cliPool {
 	t.Helper()
 
-	repoRoot := findRepoRoot(t)
-
-	// Build daemon binary
-	binDir := t.TempDir()
-	daemonBin := filepath.Join(binDir, "claude-pool")
-	build := exec.Command("go", "build", "-o", daemonBin, "./cmd/claude-pool")
-	build.Dir = repoRoot
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build daemon: %v\n%s", err, out)
-	}
-
-	// Build CLI binary
-	cliBin := filepath.Join(binDir, "claude-pool-cli")
-	build = exec.Command("go", "build", "-o", cliBin, "./cmd/claude-pool-cli")
-	build.Dir = repoRoot
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build CLI: %v\n%s", err, out)
-	}
-
-	// Create temp pool directory and registry
 	poolDir := t.TempDir()
 	socketPath := filepath.Join(poolDir, "api.sock")
 	poolName := "test"
@@ -91,7 +125,7 @@ func setupCLIPool(t *testing.T, size int) *cliPool {
 	}
 
 	// Start daemon
-	daemon := exec.Command(daemonBin, "--pool-dir", poolDir)
+	daemon := exec.Command(daemonBinPath, "--pool-dir", poolDir)
 	daemon.Stdout = os.Stdout
 	daemon.Stderr = os.Stderr
 	if err := daemon.Start(); err != nil {
@@ -115,8 +149,7 @@ func setupCLIPool(t *testing.T, size int) *cliPool {
 		t:          t,
 		poolDir:    poolDir,
 		socketPath: socketPath,
-		daemonBin:  daemonBin,
-		cliBin:     cliBin,
+		cliBin:     cliBinPath,
 		daemon:     daemon,
 		poolName:   poolName,
 	}
@@ -247,24 +280,6 @@ func (p *cliPool) runInSessionJSON(sessionID string, args ...string) Msg {
 		p.t.Fatalf("failed to parse CLI JSON output: %v\nstdout: %s", err, result.Stdout)
 	}
 	return msg
-}
-
-func findRepoRoot(t *testing.T) string {
-	t.Helper()
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatal("could not find repo root (no go.mod)")
-		}
-		dir = parent
-	}
 }
 
 func strVal(m map[string]any, key string) string {

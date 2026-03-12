@@ -25,7 +25,28 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/EliasSchlie/claude-pool/tests/testutil"
 )
+
+// daemonBinPath is built once by TestMain and shared across all test functions.
+var daemonBinPath string
+
+func TestMain(m *testing.M) {
+	tmpDir, err := os.MkdirTemp("", "claude-pool-test-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
+		os.Exit(1)
+	}
+
+	repoRoot := testutil.FindRepoRoot()
+	daemonBinPath = filepath.Join(tmpDir, "claude-pool")
+	testutil.BuildBinary(repoRoot, daemonBinPath, "./cmd/claude-pool")
+
+	code := m.Run()
+	os.RemoveAll(tmpDir)
+	os.Exit(code)
+}
 
 // --------------------------------------------------------------------
 // JSON message types
@@ -140,19 +161,12 @@ func setupPool(t *testing.T, size int) *testPool {
 	return p
 }
 
-// setupDaemon builds the daemon binary, starts it with a temp pool directory,
-// and connects — but does NOT call init. Use this when the test flow needs to
-// control init timing (e.g., pool_test.go tests ping/config before init).
+// setupDaemon starts a daemon with a temp pool directory and connects — but does
+// NOT call init. Use this when the test flow needs to control init timing
+// (e.g., pool_test.go tests ping/config before init).
+// The daemon binary is built once by TestMain and shared across all tests.
 func setupDaemon(t *testing.T, size int) *testPool {
 	t.Helper()
-
-	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "claude-pool")
-	build := exec.Command("go", "build", "-o", binPath, "./cmd/claude-pool")
-	build.Dir = findRepoRoot(t)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build daemon: %v\n%s", err, out)
-	}
 
 	poolDir := t.TempDir()
 	socketPath := filepath.Join(poolDir, "api.sock")
@@ -170,7 +184,7 @@ func setupDaemon(t *testing.T, size int) *testPool {
 	p := &testPool{
 		t:          t,
 		dir:        poolDir,
-		binPath:    binPath,
+		binPath:    daemonBinPath,
 		socketPath: socketPath,
 	}
 
@@ -230,25 +244,6 @@ func (p *testPool) startDaemon() {
 	}
 	p.conn = conn
 	p.scanner = bufio.NewScanner(conn)
-}
-
-// findRepoRoot walks up from cwd to find go.mod.
-func findRepoRoot(t *testing.T) string {
-	t.Helper()
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatal("could not find repo root (no go.mod)")
-		}
-		dir = parent
-	}
 }
 
 // --------------------------------------------------------------------
