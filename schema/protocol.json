@@ -44,12 +44,69 @@
 
     "poolState": {
       "type": "object",
-      "description": "Pool state: session list, queue, config, metadata"
+      "properties": {
+        "size": {
+          "type": "integer",
+          "description": "Current slot count"
+        },
+        "sessions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/sessionInfo" },
+          "description": "All sessions in the pool"
+        },
+        "queue": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/sessionId" },
+          "description": "Queued session IDs in FIFO order"
+        },
+        "config": { "$ref": "#/$defs/poolConfig" }
+      },
+      "required": ["size", "sessions", "queue", "config"],
+      "description": "Pool state: slots, sessions, queue, config"
     },
 
     "healthReport": {
       "type": "object",
-      "description": "Pool health: per-session status, counts, PID liveness, queue depth"
+      "properties": {
+        "size": {
+          "type": "integer",
+          "description": "Current slot count"
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "queued": { "type": "integer" },
+            "idle": { "type": "integer" },
+            "typing": { "type": "integer" },
+            "processing": { "type": "integer" },
+            "offloaded": { "type": "integer" },
+            "dead": { "type": "integer" },
+            "error": { "type": "integer" },
+            "archived": { "type": "integer" }
+          },
+          "description": "Session count per state"
+        },
+        "queueDepth": {
+          "type": "integer",
+          "description": "Number of queued requests"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sessionId": { "$ref": "#/$defs/sessionId" },
+              "status": { "$ref": "#/$defs/sessionStatus" },
+              "pid": { "type": ["integer", "null"] },
+              "pidAlive": { "type": "boolean" }
+            },
+            "required": ["sessionId", "status", "pidAlive"]
+          },
+          "description": "Per-session health: status and PID liveness"
+        }
+      },
+      "required": ["size", "counts", "queueDepth", "sessions"],
+      "description": "Pool health: counts per state, PID liveness, queue depth"
     },
 
     "sessionInfo": {
@@ -75,7 +132,8 @@
           "items": { "$ref": "#/$defs/sessionInfo" },
           "description": "Direct child sessions (recursive). Populated by info and ls (with tree: true)."
         }
-      }
+      },
+      "required": ["sessionId", "status"]
     },
 
     "poolConfig": {
@@ -330,7 +388,7 @@
       "response": {
         "type": "object",
         "properties": {
-          "type": { "const": "buffer" },
+          "type": { "const": "result" },
           "id": { "type": "integer" },
           "sessionId": { "$ref": "#/$defs/sessionId" },
           "content": { "type": "string" }

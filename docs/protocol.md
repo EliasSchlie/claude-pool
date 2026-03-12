@@ -204,7 +204,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 | `sessionId` | sessionId | Yes | Target session |
 | `format` | string | No | Output format (see Output Formats). Default: `jsonl-short`. |
 
-**Response:** `{ type: "buffer", sessionId, content }` — session output.
+**Response:** `{ type: "result", sessionId, content }` — session output.
 
 **Behavior:** Returns the current session output, regardless of session state.
 - **JSONL formats** work for any session with a known Claude UUID: **idle**, **typing**, **processing**, **offloaded**, **dead**, **error**, **archived**. Reads from Claude Code's transcript files.
