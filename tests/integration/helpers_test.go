@@ -5,7 +5,7 @@ package integration
 // Keeps only what genuinely reduces noise without hiding protocol details:
 //   - setupPool / setupDaemon: complex setup/teardown (build, start, connect)
 //   - send / sendOn: socket boilerplate (marshal, write, read, unmarshal)
-//   - awaitStatus / awaitPoolSize / awaitIdleCount: poll until target state
+//   - awaitStatus / awaitPoolSize / awaitIdleCount: subscribe + wait for target state
 //   - stopAndWait: stop + wait in one call
 //   - parseSession / parseSessions: JSON map → typed struct
 //   - subscription: subscribe has different mechanics (persistent stream)
@@ -331,58 +331,111 @@ func (p *testPool) sendOn(conn net.Conn, scanner *bufio.Scanner, msg Msg) Msg {
 // State helpers
 // --------------------------------------------------------------------
 
-// awaitStatus polls info until the session reaches the target status.
-// Eliminates timing races — use this instead of assuming a session is in
-// a particular state after sending a command.
+// awaitStatus subscribes to status events for a specific session and waits
+// until it reaches the target status. Uses subscribe rather than polling —
+// same as a production client would.
 func (p *testPool) awaitStatus(sessionID, target string, timeout time.Duration) SessionInfo {
 	p.t.Helper()
+
+	// Check immediately — might already be at target
+	resp := p.send(Msg{"type": "info", "sessionId": sessionID})
+	if resp["type"] == "error" {
+		p.t.Fatalf("awaitStatus info failed: %v", resp["error"])
+	}
+	info := parseSession(p.t, resp["session"])
+	if info.Status == target {
+		return info
+	}
+
+	// Subscribe to status events for this specific session
+	sub := p.subscribe(Msg{
+		"sessions": []string{sessionID},
+		"events":   []string{"status"},
+		"statuses": []string{target},
+	})
+
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp := p.send(Msg{"type": "info", "sessionId": sessionID})
-		if resp["type"] == "error" {
-			p.t.Fatalf("awaitStatus info failed: %v", resp["error"])
+		ev, ok := sub.nextWithin(time.Until(deadline))
+		if !ok {
+			break
 		}
-		info := parseSession(p.t, resp["session"])
-		if info.Status == target {
-			return info
+		if strVal(ev, "sessionId") == sessionID && strVal(ev, "status") == target {
+			// Fetch full info to return
+			resp = p.send(Msg{"type": "info", "sessionId": sessionID})
+			if resp["type"] == "error" {
+				p.t.Fatalf("awaitStatus info failed: %v", resp["error"])
+			}
+			return parseSession(p.t, resp["session"])
 		}
-		time.Sleep(200 * time.Millisecond)
 	}
-	// Final check with the actual status for a useful error message
-	resp := p.send(Msg{"type": "info", "sessionId": sessionID})
-	info := parseSession(p.t, resp["session"])
+
+	// Timeout — get actual status for the error message
+	resp = p.send(Msg{"type": "info", "sessionId": sessionID})
+	info = parseSession(p.t, resp["session"])
 	p.t.Fatalf("awaitStatus(%s, %q): timed out after %v, last status was %q",
 		sessionID, target, timeout, info.Status)
 	return SessionInfo{} // unreachable
 }
 
-// awaitPoolSize polls health until the pool reaches the target slot count.
+// awaitPoolSize subscribes to pool events and waits until the pool reaches
+// the target slot count. Uses subscribe rather than polling — same as a
+// production client would.
 func (p *testPool) awaitPoolSize(target int, timeout time.Duration) {
 	p.t.Helper()
+
+	// Check immediately — might already be at target
+	resp := p.send(Msg{"type": "health"})
+	health, _ := resp["health"].(map[string]any)
+	if int(numVal(health, "size")) == target {
+		return
+	}
+
+	// Subscribe to pool events (resize, init, etc.) on a dedicated connection
+	sub := p.subscribe(Msg{"events": []string{"pool"}})
+
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp := p.send(Msg{"type": "health"})
-		health, _ := resp["health"].(map[string]any)
+		_, ok := sub.nextWithin(time.Until(deadline))
+		if !ok {
+			break
+		}
+		resp = p.send(Msg{"type": "health"})
+		health, _ = resp["health"].(map[string]any)
 		if int(numVal(health, "size")) == target {
 			return
 		}
-		time.Sleep(1 * time.Second)
 	}
 	p.t.Fatalf("awaitPoolSize(%d): timed out after %v", target, timeout)
 }
 
-// awaitIdleCount polls health until at least n sessions are idle.
+// awaitIdleCount subscribes to status events and waits until at least n
+// sessions are idle. Uses subscribe rather than polling.
 func (p *testPool) awaitIdleCount(n int, timeout time.Duration) {
 	p.t.Helper()
+
+	resp := p.send(Msg{"type": "health"})
+	health, _ := resp["health"].(map[string]any)
+	counts, _ := health["counts"].(map[string]any)
+	if int(numVal(counts, "idle")) >= n {
+		return
+	}
+
+	// Subscribe to idle transitions — each event means a session just became idle
+	sub := p.subscribe(Msg{"events": []string{"status"}, "statuses": []string{"idle"}})
+
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp := p.send(Msg{"type": "health"})
-		health, _ := resp["health"].(map[string]any)
-		counts, _ := health["counts"].(map[string]any)
+		_, ok := sub.nextWithin(time.Until(deadline))
+		if !ok {
+			break
+		}
+		resp = p.send(Msg{"type": "health"})
+		health, _ = resp["health"].(map[string]any)
+		counts, _ = health["counts"].(map[string]any)
 		if int(numVal(counts, "idle")) >= n {
 			return
 		}
-		time.Sleep(2 * time.Second)
 	}
 	p.t.Fatalf("awaitIdleCount(%d): timed out after %v", n, timeout)
 }
