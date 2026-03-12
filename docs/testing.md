@@ -22,66 +22,16 @@ Each test:
 3. Runs assertions through the socket API
 4. Tears down (destroy + cleanup)
 
-## Test Categories
+## Test Structure
 
-### Daemon lifecycle
-- Start foreground/background, status, stop
-- Re-start re-adopts live PIDs
+Tests are organized as flow-based integration tests. See [tests/integration/CLAUDE.md](../tests/integration/CLAUDE.md) for the full philosophy, file listing, and guidelines for adding new tests.
 
-### Pool lifecycle
-- Init with size, resize up/down, destroy (config persists), health, config get/set
+## Running
 
-### Session basics
-- `start --block`, `followup`, `wait`, `result`, `capture`
-- All output formats: jsonl-last, jsonl-short, jsonl-long, jsonl-full, buffer-last, buffer-full
+```bash
+# All integration tests
+go test ./tests/integration/ -v -timeout 10m
 
-### Queue behavior
-- Start when pool full → queues, slot frees → dequeues FIFO
-- Stop cancels queued request
-
-### Offload/restore
-- Offload idle session, followup restores it
-- Pin restores offloaded session
-- JSONL formats work while offloaded, buffer formats error
-
-### Archive/unarchive
-- Archive stops active sessions first
-- Errors on unarchived children (without recursive flag)
-- Recursive archives descendants depth-first
-- `ls --archived` shows them, default `ls` hides them
-- Unarchive → offloaded state
-
-### Pin/unpin
-- Pin with sessionId prevents eviction
-- Pin without sessionId allocates fresh session
-- Unpin allows eviction
-
-### Priority & eviction
-- `set-priority` changes eviction order
-- LRU evicts lower priority first, oldest within same priority
-
-### Parent-child
-- Start with parentId sets ownership
-- `ls` returns owned children only
-- `ls --tree` nests descendants
-- `info` shows recursive children
-
-### Subscribe
-- Event stream delivers status changes
-- Filters: sessions, events, statuses (ANDed)
-- Re-subscribe on same connection replaces filters
-- Multiple concurrent subscribers
-
-### Attach
-- Raw PTY I/O works for live sessions
-- Errors for offloaded/queued
-- Input/key/type low-level commands
-
-### Screen/watch
-- Terminal buffer output, ANSI stripping
-
-### Edge cases
-- Session prefix resolution (unique prefix matches)
-- Ambiguous prefix → error
-- Concurrent clients on same pool
-- Followup on queued → error; followup with force → replaces prompt
+# Single flow
+go test ./tests/integration/ -v -run TestSession -timeout 5m
+```

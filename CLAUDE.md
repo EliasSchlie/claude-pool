@@ -46,6 +46,10 @@ Claude Pool manages pools of Claude sessions: spawn, offload, restore, prompt, w
 - **claude-term** — Separate project. Persistent terminal tabs for Claude sessions. Independent from claude-pool.
 - **Open Cockpit** — Electron app. Depends on claude-pool (via socket) and claude-term. Human interface.
 
+## Testing
+
+When a bug is found in production that wasn't caught by integration tests, figure out which existing flow should have caught it and add a `t.Run` step at the right point in the sequence. If it doesn't fit naturally into any existing flow (different pool config needed, flow would get too long, fundamentally different scenario), propose a new flow file to the user. See [tests/integration/CLAUDE.md](tests/integration/CLAUDE.md) for test structure and philosophy.
+
 ## Origin
 
 Designed from requirements, not copied from Open Cockpit. Open Cockpit code is a reference for patterns and edge cases. See [docs/extraction-plan.md](docs/extraction-plan.md).
