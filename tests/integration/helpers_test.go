@@ -191,7 +191,7 @@ func setupDaemon(t *testing.T, size int) *testPool {
 	p.startDaemon()
 
 	t.Cleanup(func() {
-		p.sendRaw(Msg{"type": "destroy", "confirm": true})
+		p.send(Msg{"type": "destroy", "confirm": true})
 		p.conn.Close()
 		if p.daemon != nil && p.daemon.Process != nil {
 			p.daemon.Process.Kill()
