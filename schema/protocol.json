@@ -142,7 +142,7 @@
     },
 
     "resize": {
-      "description": "Resize pool. Shrinking offloads idle (low priority first), then kills processing. Queued requests stay queued.",
+      "description": "Resize pool. Shrinking enqueues kill-slot tokens at front. Processing sessions finish naturally. Pinned sessions never evicted. Queued requests stay queued.",
       "request": {
         "type": "object",
         "properties": {
@@ -190,9 +190,13 @@
         "type": "object",
         "properties": {
           "type": { "const": "destroy" },
-          "id": { "type": "integer" }
+          "id": { "type": "integer" },
+          "confirm": {
+            "const": true,
+            "description": "Must be true. Safety guard against accidental destruction."
+          }
         },
-        "required": ["type"]
+        "required": ["type", "confirm"]
       },
       "response": {
         "type": "object",
@@ -274,9 +278,10 @@
         "properties": {
           "type": { "const": "started" },
           "id": { "type": "integer" },
-          "sessionId": { "$ref": "#/$defs/sessionId" }
+          "sessionId": { "$ref": "#/$defs/sessionId" },
+          "status": { "$ref": "#/$defs/sessionStatus" }
         },
-        "required": ["type", "sessionId"]
+        "required": ["type", "sessionId", "status"]
       }
     },
 
@@ -334,32 +339,8 @@
       }
     },
 
-    "result": {
-      "description": "Get session output only if complete (idle/offloaded/archived). JSONL or buffer depending on format.",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "result" },
-          "id": { "type": "integer" },
-          "sessionId": { "$ref": "#/$defs/sessionId" },
-          "format": { "$ref": "#/$defs/outputFormat" }
-        },
-        "required": ["type", "sessionId"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "result" },
-          "id": { "type": "integer" },
-          "sessionId": { "$ref": "#/$defs/sessionId" },
-          "content": { "type": "string" }
-        },
-        "required": ["type", "sessionId", "content"]
-      }
-    },
-
     "input": {
-      "description": "Send raw bytes to session PTY. No timing dance. Errors if no terminal (queued/offloaded).",
+      "description": "Send raw bytes to session PTY. No timing dance. Errors if no live terminal (queued/offloaded/dead/error/archived).",
       "request": {
         "type": "object",
         "properties": {
@@ -381,7 +362,7 @@
     },
 
     "offload": {
-      "description": "Manually offload idle session (save meta + /clear + kill PTY). No buffer snapshot. Errors if busy or pinned.",
+      "description": "Manually offload idle session. Frees slot, saves metadata. Errors if busy or pinned.",
       "request": {
         "type": "object",
         "properties": {
