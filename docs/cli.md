@@ -18,66 +18,47 @@ claude-pool daemon stop            # Stop daemon
 claude-pool daemon status          # Check if running
 ```
 
-## Pool Management
+## Pool
 
 ```bash
-claude-pool pool init [size]       # Initialize pool (default 5, flags from config)
-claude-pool pool init 5 --flags="--dangerously-skip-permissions --model opus"
-claude-pool pool status            # Health report
-claude-pool pool resize <size>     # Resize pool (new slots use config flags)
-claude-pool pool destroy           # Destroy pool and kill all sessions
-claude-pool pool config            # Show current config
-claude-pool pool config set flags "--dangerously-skip-permissions"
-claude-pool pool config set size 8
+claude-pool init [size]            # Initialize pool (size optional, falls back to config)
+claude-pool resize <size>          # Resize pool (new slots use config flags)
+claude-pool destroy                # Destroy pool and kill all sessions
+claude-pool health                 # Health report
+claude-pool config                 # Show current config
+claude-pool config set flags "--dangerously-skip-permissions"
+claude-pool config set size 8
 ```
 
-## Session Lifecycle
+## Sessions
 
 ```bash
 claude-pool start <prompt>                    # Start new session (may queue)
 claude-pool start <prompt> --block            # Start + wait for result
-claude-pool followup <sessionId> <prompt>     # Send to idle session
+claude-pool start <prompt> --priority 5       # Start with eviction priority
+claude-pool followup <sessionId> <prompt>     # Send to idle/offloaded session
 claude-pool followup <sessionId> <prompt> --block
-claude-pool resume <sessionId>                # Resume offloaded session
 claude-pool wait [sessionId]                  # Wait for idle (any owned if omitted)
 claude-pool result <sessionId>                # Get output (must be idle)
 claude-pool capture <sessionId>               # Get live terminal content
-claude-pool stop <sessionId>                  # Interrupt running session
+claude-pool stop <sessionId>                  # Interrupt running session (Ctrl+C)
 claude-pool offload <sessionId>               # Manually offload idle session
+
+claude-pool ls                                # List owned sessions
+claude-pool ls --all                          # List all pool sessions
+claude-pool ls --idle --processing --queued   # Filter by status
+claude-pool ls --json                         # Raw JSON
+claude-pool info <sessionId>                  # Full session details
+
+claude-pool screen <sessionId>                # Terminal output (ANSI-stripped)
+claude-pool screen <sessionId> --raw          # With ANSI codes
+claude-pool watch <sessionId> [interval]      # Follow output (default 2s)
+
+claude-pool pin <sessionId> [seconds]         # Prevent auto-offload + priority load (default 120s)
+claude-pool unpin <sessionId>                 # Allow auto-offload
+claude-pool priority <sessionId> <number>     # Set eviction priority (lower = evicted first)
+claude-pool attach <sessionId>                # Attach to live terminal (raw PTY I/O)
 ```
-
-## Observing
-
-```bash
-claude-pool ls                     # List owned sessions (default)
-claude-pool ls --all               # List all pool sessions
-claude-pool ls --idle              # Filter: only idle
-claude-pool ls --processing        # Filter: only processing
-claude-pool ls --queued            # Filter: only queued
-claude-pool ls --json              # Raw JSON
-
-claude-pool screen <sessionId>     # Terminal output (ANSI-stripped)
-claude-pool screen <sessionId> --raw
-claude-pool watch <sessionId> [interval]   # Follow output (default 2s)
-claude-pool info <sessionId>       # Session details (internal ID, Claude UUID, parent, status)
-```
-
-## Session Management
-
-```bash
-claude-pool pin <sessionId> [seconds]      # Prevent auto-offload + priority load (default 120s)
-claude-pool unpin <sessionId>              # Allow auto-offload
-claude-pool archive <sessionId>            # Archive session
-claude-pool unarchive <sessionId>          # Restore from archive
-```
-
-## Terminal Attachment
-
-```bash
-claude-pool attach <sessionId>             # Attach to live terminal (raw PTY I/O)
-```
-
-Requires live session. To attach offloaded: `pin` → wait → `attach`.
 
 ## Low-level
 
