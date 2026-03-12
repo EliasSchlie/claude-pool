@@ -250,7 +250,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 **Behavior:** Manually offload a session to free its slot. Saves session metadata, frees the slot's resources, and transitions the session to `offloaded`. The JSONL transcript (maintained by Claude Code itself) serves as the persistent record and is always accessible via the session's Claude UUID.
 
 - Only works for **idle** sessions. Errors if **processing**, **typing**, **queued** (nothing to offload), or already **offloaded**.
-- If session is **pinned** → errors (unpin first).
+- If session is **pinned** → automatically unpinned before offloading.
 
 ---
 

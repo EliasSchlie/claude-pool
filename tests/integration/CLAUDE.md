@@ -45,6 +45,7 @@ Each test file = one pool, one flow, multiple subtests:
 | `offload_test.go` | 2 | Offload, capture while offloaded, restore, archive lifecycle |
 | `parent_child_test.go` | 3 | Ownership, ls/tree, info, recursive archive |
 | `subscribe_test.go` | 2 | Event stream, filters, re-subscribe, updated events |
+| `attach_test.go` | 2 | Attach pipe, typing detection, followup while attached, offload closes pipe, re-attach |
 
 Shared infrastructure:
 
