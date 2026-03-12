@@ -41,7 +41,7 @@ Each test file = one pool, one flow, multiple subtests:
 |------|-----------|----------------|
 | `pool_test.go` | 2 | Init, config, resize, health, destroy, re-init with restore |
 | `session_test.go` | 3 | Start, wait, capture, followup, output formats, input |
-| `slots_test.go` | 2 | Queue, priority, pin/eviction, graceful resize |
+| `slots_test.go` | 2 | Queue, priority, pin/eviction, queued-session behavior |
 | `offload_test.go` | 2 | Offload, capture while offloaded, restore, archive lifecycle |
 | `parent_child_test.go` | 3 | Ownership, ls/tree, info, recursive archive |
 | `subscribe_test.go` | 2 | Event stream, filters, re-subscribe, updated events |

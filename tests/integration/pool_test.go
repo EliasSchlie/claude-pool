@@ -212,9 +212,7 @@ func TestPool(t *testing.T) {
 	})
 
 	t.Run("re-init restores sessions", func(t *testing.T) {
-		// Wait briefly for daemon to exit and socket to clean up
-		time.Sleep(2 * time.Second)
-
+		pool.awaitSocketGone(10 * time.Second)
 		pool.startDaemon()
 
 		resp := pool.send(Msg{"type": "init", "size": 2})
@@ -224,14 +222,13 @@ func TestPool(t *testing.T) {
 		state, _ := resp["pool"].(map[string]any)
 		sessions, _ := state["sessions"].([]any)
 
-		// Wait for sessions to become idle
 		for _, raw := range sessions {
 			sm, _ := raw.(map[string]any)
 			sid := strVal(sm, "sessionId")
 			pool.awaitStatus(sid, "idle", 120*time.Second)
 		}
 
-		// Check if the pre-destroy session was restored
+		// Session restoration is a contract — s1 must survive destroy+re-init
 		if s1 != "" {
 			found := false
 			for _, raw := range sessions {
@@ -242,15 +239,14 @@ func TestPool(t *testing.T) {
 				}
 			}
 			if !found {
-				t.Logf("warning: expected session %s to be restored, but it wasn't in pool sessions", s1)
+				t.Fatalf("expected session %s to be restored after re-init, but it wasn't in pool sessions", s1)
 			}
 		}
 	})
 
 	t.Run("re-init with noRestore", func(t *testing.T) {
-		// Destroy and restart
 		pool.send(Msg{"type": "destroy", "confirm": true})
-		time.Sleep(2 * time.Second)
+		pool.awaitSocketGone(10 * time.Second)
 
 		pool.startDaemon()
 

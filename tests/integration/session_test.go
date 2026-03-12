@@ -326,8 +326,9 @@ func TestSession(t *testing.T) {
 	})
 
 	t.Run("session prefix resolution", func(t *testing.T) {
-		// The protocol allows addressing sessions by unique prefix of their ID
-		prefix := s1[:3]
+		// The protocol allows addressing sessions by unique prefix of their ID.
+		// Use 6 chars — collision with <10 sessions is astronomically unlikely.
+		prefix := s1[:6]
 		resp := pool.send(Msg{"type": "info", "sessionId": prefix})
 
 		if resp["type"] == "error" {

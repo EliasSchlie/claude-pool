@@ -5,8 +5,10 @@ package integration
 // Pool size: 2
 //
 // This flow tests what happens when slots are scarce: queueing, priority-based
-// eviction, pin protection, and graceful resize behavior. The small pool size (2)
+// eviction, pin protection, and queued-session behavior. The small pool size (2)
 // makes it easy to exhaust slots and trigger these behaviors.
+//
+// Resize tests (graceful resize, resize respects pins) live in pool_test.go.
 //
 // Flow:
 //
@@ -19,11 +21,9 @@ package integration
 //   7.  "pin prevents eviction"
 //   8.  "pin on offloaded triggers priority load"
 //   9.  "pin without sessionId allocates fresh"
-//  10.  "unpin allows eviction"
+//  10.  "unpin clears pinned flag"
 //  11.  "followup on queued errors"
 //  12.  "followup with force on queued replaces prompt"
-//  13.  "graceful resize down"
-//  14.  "resize respects pins during shrink"
 
 import (
 	"testing"
@@ -278,7 +278,7 @@ func TestSlots(t *testing.T) {
 		pool.send(Msg{"type": "unpin", "sessionId": pinSid})
 	})
 
-	t.Run("unpin allows eviction", func(t *testing.T) {
+	t.Run("unpin clears pinned flag", func(t *testing.T) {
 		// Get current sessions
 		lsResp := pool.send(Msg{"type": "ls", "all": true})
 		sessions := parseSessions(t, lsResp)
@@ -392,54 +392,4 @@ func TestSlots(t *testing.T) {
 		pool.send(Msg{"type": "archive", "sessionId": queuedSid})
 	})
 
-	t.Run("graceful resize down", func(t *testing.T) {
-		pool.send(Msg{"type": "resize", "size": 2})
-		pool.awaitIdleCount(2, 120*time.Second)
-
-		// Get one idle session and make it processing
-		lsResp := pool.send(Msg{"type": "ls", "all": true})
-		sessions := parseSessions(t, lsResp)
-		var processingID string
-		for _, s := range sessions {
-			if s.Status == "idle" {
-				processingID = s.SessionID
-				break
-			}
-		}
-		pool.send(Msg{"type": "followup", "sessionId": processingID, "prompt": "run the bash command: sleep 60"})
-		pool.awaitStatus(processingID, "processing", 30*time.Second)
-
-		// Resize to 1 — should not interrupt the processing session
-		resp := pool.send(Msg{"type": "resize", "size": 1})
-		assertNotError(t, resp)
-
-		pool.send(Msg{"type": "stop", "sessionId": processingID})
-		pool.awaitPoolSize(1, 30*time.Second)
-	})
-
-	t.Run("resize respects pins during shrink", func(t *testing.T) {
-		pool.send(Msg{"type": "resize", "size": 2})
-		pool.awaitIdleCount(2, 120*time.Second)
-
-		lsResp := pool.send(Msg{"type": "ls", "all": true})
-		sessions := parseSessions(t, lsResp)
-		var pinned string
-		for _, s := range sessions {
-			if s.Status == "idle" {
-				pinned = s.SessionID
-				break
-			}
-		}
-		pool.send(Msg{"type": "pin", "sessionId": pinned})
-
-		pool.send(Msg{"type": "resize", "size": 1})
-		pool.awaitPoolSize(1, 30*time.Second)
-
-		info := pool.send(Msg{"type": "info", "sessionId": pinned})
-		session := parseSession(t, info["session"])
-		if session.Status == "offloaded" || session.Status == "archived" {
-			t.Fatalf("pinned session was evicted during resize: status=%s", session.Status)
-		}
-		pool.send(Msg{"type": "unpin", "sessionId": pinned})
-	})
 }

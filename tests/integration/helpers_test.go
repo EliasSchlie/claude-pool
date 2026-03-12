@@ -330,6 +330,19 @@ func (p *testPool) sendOn(conn net.Conn, scanner *bufio.Scanner, msg Msg) Msg {
 // State helpers
 // --------------------------------------------------------------------
 
+// awaitSocketGone polls until the socket file disappears (daemon exited).
+func (p *testPool) awaitSocketGone(timeout time.Duration) {
+	p.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(p.socketPath); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	p.t.Fatalf("socket %s still exists after %v", p.socketPath, timeout)
+}
+
 // awaitStatus subscribes to status events for a specific session and waits
 // until it reaches the target status. Uses subscribe rather than polling —
 // same as a production client would.
@@ -352,6 +365,7 @@ func (p *testPool) awaitStatus(sessionID, target string, timeout time.Duration) 
 		"events":   []string{"status"},
 		"statuses": []string{target},
 	})
+	defer sub.close()
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -392,6 +406,7 @@ func (p *testPool) awaitPoolSize(target int, timeout time.Duration) {
 
 	// Subscribe to pool events (resize, init, etc.) on a dedicated connection
 	sub := p.subscribe(Msg{"events": []string{"pool"}})
+	defer sub.close()
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -422,6 +437,7 @@ func (p *testPool) awaitIdleCount(n int, timeout time.Duration) {
 
 	// Subscribe to idle transitions — each event means a session just became idle
 	sub := p.subscribe(Msg{"events": []string{"status"}, "statuses": []string{"idle"}})
+	defer sub.close()
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -447,6 +463,12 @@ type subscription struct {
 	t       *testing.T
 	conn    net.Conn
 	scanner *bufio.Scanner
+}
+
+// close releases the subscription connection. Call this when done waiting
+// to avoid accumulating zombie connections over a long flow.
+func (s *subscription) close() {
+	s.conn.Close()
 }
 
 // subscribe opens a persistent event stream on a new connection.

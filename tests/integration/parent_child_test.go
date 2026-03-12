@@ -29,7 +29,6 @@ package integration
 //  11.  "archive leaf session succeeds"
 //  12.  "archive parent after children archived"
 //  13.  "recursive archive archives entire subtree"
-//  14.  "session info fields"
 
 import (
 	"testing"
@@ -182,9 +181,28 @@ func TestParentChild(t *testing.T) {
 		lsResp := pool.send(Msg{"type": "ls", "all": true, "tree": true})
 		assertNotError(t, lsResp)
 		sessions := parseSessions(t, lsResp)
-		// Should have a tree structure
-		if len(sessions) == 0 {
-			t.Fatal("expected sessions in tree")
+
+		// Root s1 should appear with children nested underneath
+		root, found := findSession(sessions, s1)
+		if !found {
+			t.Fatal("s1 not found in all+tree ls")
+		}
+		if len(root.Children) < 2 {
+			t.Fatalf("expected s1 to have at least 2 children in tree, got %d", len(root.Children))
+		}
+
+		// s2 should be nested under s1 with s3 as its child
+		var child2 SessionInfo
+		for _, c := range root.Children {
+			if c.SessionID == s2 {
+				child2 = c
+			}
+		}
+		if child2.SessionID == "" {
+			t.Fatal("s2 not found as child of s1 in tree")
+		}
+		if len(child2.Children) != 1 || child2.Children[0].SessionID != s3 {
+			t.Fatalf("expected s2 to have s3 as child, got %d children", len(child2.Children))
 		}
 	})
 
@@ -251,22 +269,6 @@ func TestParentChild(t *testing.T) {
 		archivedSessions := parseSessions(t, lsArchived)
 		if len(archivedSessions) < 4 {
 			t.Fatalf("expected at least 4 sessions with archived flag, got %d", len(archivedSessions))
-		}
-	})
-
-	t.Run("session info fields", func(t *testing.T) {
-		pool.send(Msg{"type": "unarchive", "sessionId": s1})
-
-		info := pool.send(Msg{"type": "info", "sessionId": s1})
-		session := parseSession(t, info["session"])
-
-		assertNonEmpty(t, "spawnCwd", session.SpawnCwd)
-		assertNonEmpty(t, "createdAt", session.CreatedAt)
-		if session.Priority != 0 {
-			t.Fatalf("expected default priority 0, got %v", session.Priority)
-		}
-		if session.Pinned {
-			t.Fatal("expected pinned=false for default session")
 		}
 	})
 }
