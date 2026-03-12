@@ -475,4 +475,8 @@ Event types:
 
 Filters are ANDed: an event must match all specified filters. For example, `{ sessions: ["a7f2x9"], statuses: ["idle"] }` only fires when session `a7f2x9` transitions to idle.
 
-The stream continues until the client disconnects or the daemon shuts down. Multiple clients can subscribe simultaneously.
+**Re-subscribing:** Sending another `subscribe` on the same connection replaces the active subscription's filters. This lets you dynamically add/remove session IDs or change event filters without disconnecting (which could cause missed events). For example, when a new session is created, update your subscription to include it.
+
+**Multiple subscribers:** Each socket connection is independent. Multiple clients (or multiple connections from the same client) can subscribe simultaneously with different filters. Each gets its own event stream.
+
+The stream continues until the client disconnects or the daemon shuts down.

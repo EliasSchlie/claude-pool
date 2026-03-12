@@ -620,7 +620,7 @@
     },
 
     "subscribe": {
-      "description": "Open persistent event stream with optional filters. Daemon pushes status changes, created, archived, pool events.",
+      "description": "Open persistent event stream with optional filters. Sending subscribe again on the same connection replaces filters (no reconnect needed). Multiple connections can subscribe independently.",
       "request": {
         "type": "object",
         "properties": {

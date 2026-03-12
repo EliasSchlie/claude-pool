@@ -21,6 +21,7 @@ These files require **explicit user permission** before any modification:
 
 - `cmd/claude-pool/` — Daemon entry point
 - `internal/` — Daemon packages (pool, pty, api, attach, discovery, paths)
+- `tests/integration/` — Integration tests (real Claude sessions, `--model haiku`)
 - `schema/` — JSON Schema contract for the socket protocol (source of truth)
 - `hooks/` — Claude Code hook scripts (pool-aware via env vars)
 - `docs/` — Documentation
@@ -31,6 +32,7 @@ Key docs:
 - [docs/protocol.md](docs/protocol.md) — Socket API summary
 - [schema/protocol.json](schema/protocol.json) — Socket API contract (machine-readable)
 - [docs/extraction-plan.md](docs/extraction-plan.md) — Implementation plan, OC reference notes
+- [docs/testing.md](docs/testing.md) — Testing strategy (no mocking, real sessions, haiku model)
 
 ## Scope
 
