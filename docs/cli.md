@@ -44,6 +44,7 @@ claude-pool result <sessionId> --format jsonl-long
 claude-pool capture <sessionId>               # Get live output
 claude-pool capture <sessionId> --format buffer-full
 claude-pool stop <sessionId>                  # Interrupt or cancel queued request
+claude-pool kill <sessionId>                  # Permanently remove session
 claude-pool offload <sessionId>               # Manually offload idle session
 
 claude-pool ls                                # List owned direct children
@@ -61,6 +62,7 @@ claude-pool pin                               # Allocate + pin fresh session
 claude-pool unpin <sessionId>                 # Allow auto-offload
 claude-pool priority <sessionId> <number>     # Set eviction priority (lower = evicted first)
 claude-pool attach <sessionId>                # Attach to live terminal (raw PTY I/O)
+claude-pool subscribe                         # Stream pool events (status changes, etc.)
 ```
 
 ## Low-level

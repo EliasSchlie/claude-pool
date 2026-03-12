@@ -471,12 +471,12 @@
       "response": {
         "type": "object",
         "properties": {
-          "type": { "enum": ["ok", "pinned"] },
+          "type": { "const": "ok" },
           "id": { "type": "integer" },
           "sessionId": { "$ref": "#/$defs/sessionId" },
           "status": { "$ref": "#/$defs/sessionStatus" }
         },
-        "required": ["type"]
+        "required": ["type", "sessionId", "status"]
       }
     },
 
@@ -566,6 +566,58 @@
           }
         },
         "required": ["type", "socketPath"]
+      }
+    },
+
+    "kill": {
+      "description": "Permanently remove a session from the pool. Kills process, deletes snapshot, removes from listings.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "kill" },
+          "id": { "type": "integer" },
+          "sessionId": { "$ref": "#/$defs/sessionId" }
+        },
+        "required": ["type", "sessionId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "subscribe": {
+      "description": "Open persistent event stream. Daemon pushes status changes, session creation/kill, pool events.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "subscribe" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      },
+      "events": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "event" },
+          "event": {
+            "enum": ["status", "created", "killed", "pool"],
+            "description": "Event type"
+          },
+          "sessionId": { "$ref": "#/$defs/sessionId" },
+          "status": { "$ref": "#/$defs/sessionStatus" },
+          "prevStatus": { "$ref": "#/$defs/sessionStatus" },
+          "parentId": { "$ref": "#/$defs/sessionId" },
+          "action": {
+            "type": "string",
+            "description": "Pool-level action (init, resize, destroy)"
+          }
+        },
+        "required": ["type", "event"]
       }
     },
 

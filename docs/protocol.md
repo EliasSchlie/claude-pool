@@ -200,8 +200,9 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 **Response:** `{ type: "buffer", sessionId, content }` — session output.
 
 **Behavior:** Returns the current session output, regardless of session state.
-- Works for **idle**, **typing**, **processing** sessions (anything with a live terminal).
-- Errors if session is **queued** (no terminal yet) or **offloaded** (terminal freed).
+- Works for **idle**, **typing**, **processing** sessions (anything with a live terminal) — reads from live terminal.
+- Works for **offloaded** sessions — reads from saved snapshot.
+- Errors if session is **queued** (no terminal or snapshot yet).
 
 ---
 
@@ -214,9 +215,10 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 **Response:** `{ type: "result", sessionId, content }`
 
-**Behavior:** Like `capture` but only succeeds when the session is **idle**. This guarantees the output contains a complete response, not a partial one.
-- If session is **idle** → returns output.
-- If session is **processing**, **typing**, **queued**, **offloaded**, **dead**, **error** → errors with the current status in the error message.
+**Behavior:** Like `capture` but only succeeds when the session is **idle** or **offloaded**. This guarantees the output contains a complete response, not a partial one.
+- If session is **idle** → returns output from live terminal.
+- If session is **offloaded** → returns output from saved snapshot.
+- If session is **processing**, **typing**, **queued**, **dead**, **error** → errors with the current status in the error message.
 
 ---
 
@@ -281,11 +283,36 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 |-------|------|----------|-------------|
 | `sessionId` | sessionId | Yes | Target session |
 
-**Response:** `{ type: "session", session }` — full session details.
+**Response:** `{ type: "session", session }` — a session object (see below).
 
-**Behavior:** Returns complete information for a single session: internal ID, Claude UUID (null if pending), status, parent, priority, cwd, createdAt, pid, `children` (array of direct child session objects). Works for any state including offloaded and dead.
+**Behavior:** Returns a **session object** with all information about the session:
 
-This is the primary way to look up a session's Claude UUID from its internal ID.
+```json
+{
+  "sessionId": "a7f2x9",
+  "claudeUUID": "2947bf12-d307-4a1c-...",
+  "status": "idle",
+  "parentId": null,
+  "priority": 0,
+  "cwd": "/Users/me/project",
+  "createdAt": "2026-03-12T14:30:00Z",
+  "pid": 12345,
+  "children": [
+    {
+      "sessionId": "b3k9m2",
+      "status": "processing",
+      "children": [
+        { "sessionId": "c1p4q7", "status": "idle", "children": [], ... }
+      ],
+      ...
+    }
+  ]
+}
+```
+
+`children` contains direct child session objects, each of which is a full session object with its own `children` — recursively. This gives you the full subtree rooted at this session.
+
+Works for any state including offloaded and dead. This is the primary way to look up a session's Claude UUID from its internal ID.
 
 ---
 
@@ -297,9 +324,7 @@ This is the primary way to look up a session's Claude UUID from its internal ID.
 | `parentId` | sessionId | No | Only used when no sessionId (fresh session mode). Auto-detected from env if omitted. |
 | `duration` | integer | No | Pin duration in seconds (default 120) |
 
-**Response:**
-- With sessionId: `{ type: "ok" }`
-- Without sessionId: `{ type: "pinned", sessionId, status }` — internal ID of the fresh session.
+**Response:** `{ type: "ok", sessionId, status }` — sessionId is the target (or newly allocated) session. Status is its current state.
 
 **Behavior:** Prevents automatic LRU eviction for the specified duration.
 - If **no sessionId** → allocates a fresh pre-warmed session, pins it, and returns its sessionId. If no fresh slot is available, offloads the lowest-priority idle session. If all slots are busy, queues the request (status: `queued`). Use `set-priority` after to adjust priority if needed.
@@ -372,3 +397,47 @@ This is the primary way to look up a session's Claude UUID from its internal ID.
 - **Only works for live sessions** (idle, typing, processing). Errors if queued, offloaded, dead, error.
 - To attach to an offloaded session: `pin` it (triggers load, transitions to queued) → `wait` for it to become live → `attach`.
 - The temporary socket is cleaned up when all clients disconnect.
+
+---
+
+### `kill`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `sessionId` | sessionId | Yes | Target session |
+
+**Response:** `{ type: "ok" }`
+
+**Behavior:** Permanently removes a session from the pool.
+- If session is **live** (idle/typing/processing) → kills the PTY process, frees the slot, removes the session.
+- If session is **offloaded** → deletes the saved snapshot, removes the session.
+- If session is **queued** → cancels the queued request, removes the session.
+- If session is **dead/error** → removes the session.
+- The session disappears from `ls` and `info` after kill. Its children are **not** killed — they become orphans (parentId still points to the killed session, but it no longer exists).
+- If session is **pinned** → kills anyway (pin doesn't protect against explicit kill).
+
+---
+
+### `subscribe`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| — | — | — | No fields |
+
+**Response:** Stream of events, one JSON object per line. The connection stays open.
+
+**Behavior:** Opens a persistent event stream. The daemon pushes events as they happen:
+
+```json
+{"type":"event","event":"status","sessionId":"a7f2x9","status":"idle","prevStatus":"processing"}
+{"type":"event","event":"created","sessionId":"b3k9m2","status":"queued","parentId":"a7f2x9"}
+{"type":"event","event":"killed","sessionId":"b3k9m2"}
+```
+
+Event types:
+- `status` — session changed state. Includes `sessionId`, `status`, `prevStatus`.
+- `created` — new session added to pool. Includes `sessionId`, `status`, `parentId`.
+- `killed` — session permanently removed. Includes `sessionId`.
+- `pool` — pool-level event (init, resize, destroy). Includes `action` and relevant details.
+
+The stream continues until the client disconnects or the daemon shuts down. Multiple clients can subscribe simultaneously.
