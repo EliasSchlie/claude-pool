@@ -1,0 +1,69 @@
+# Integration Tests
+
+## Philosophy
+
+These tests run against **real Claude Code sessions** through the full socket API.
+No mocking, no stubs, no fakes. The pool's value is orchestrating real processes —
+so that's what we test.
+
+Every test pool uses `--model haiku` to keep API costs low.
+
+## Design: Flow-Based Tests
+
+Tests are organized as **user flows**, not isolated unit assertions. Each test file
+tells a story: it initializes a pool, builds up state through a sequence of commands,
+and asserts at each step. This mirrors how the pool is actually used.
+
+Why flows instead of isolated tests:
+- **Setup cost is real.** Spinning up a pool with real Claude sessions takes 10-30s.
+  Doing that per assertion would make the suite take hours.
+- **State is the point.** Most interesting behavior depends on prior state (eviction
+  needs a full pool, archive needs children, restore needs a prior run). Building
+  state naturally through a flow is more reliable than trying to synthetically
+  recreate it.
+- **Failures are still locatable.** Each step is a named `t.Run` subtest, so when
+  something fails you see exactly which checkpoint broke.
+
+Tradeoff: a failure mid-flow can cascade. We accept this — fixing the first failure
+fixes the cascade, and the alternative (isolated tests) would be 10x slower and
+require duplicating all the state-building logic.
+
+## Structure
+
+Each test file = one pool, one flow, multiple subtests:
+
+| File | Pool size | What it covers |
+|------|-----------|----------------|
+| `pool_test.go` | 2 | Init, config, resize, health, destroy, re-init with restore |
+| `session_test.go` | 3 | Start, wait, capture, followup, output formats, input |
+| `slots_test.go` | 2 | Queue, priority, pin/eviction, graceful resize |
+| `offload_test.go` | 2 | Offload, capture while offloaded, restore, archive lifecycle |
+| `parent_child_test.go` | 3 | Ownership, ls/tree, info, recursive archive |
+| `subscribe_test.go` | 2 | Event stream, filters, re-subscribe, updated events |
+
+Shared infrastructure:
+
+| File | Purpose |
+|------|---------|
+| `helpers_test.go` | Pool setup/teardown, socket client, assertion helpers |
+
+## Running
+
+```bash
+# All integration tests
+go test ./tests/integration/ -v -timeout 10m
+
+# Single flow
+go test ./tests/integration/ -v -run TestSession -timeout 5m
+```
+
+The `-timeout` is important — real Claude sessions can take time.
+
+## Adding Tests
+
+1. If your test fits naturally into an existing flow, add a `t.Run` subtest at the
+   appropriate point in the sequence.
+2. If it needs fundamentally different pool state (different size, special config),
+   create a new file with its own pool.
+3. Keep flows linear — don't branch. Each subtest should depend only on the state
+   built by previous subtests in the same flow.
