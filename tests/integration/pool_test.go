@@ -97,7 +97,7 @@ func TestPool(t *testing.T) {
 		for _, raw := range sessions {
 			sm, _ := raw.(map[string]any)
 			sid := strVal(sm, "sessionId")
-			pool.awaitStatus(sid, "idle", 120*time.Second)
+			pool.awaitStatus(sid, "idle", 60*time.Second)
 		}
 
 		sm0, _ := sessions[0].(map[string]any)
@@ -152,25 +152,25 @@ func TestPool(t *testing.T) {
 			t.Fatalf("expected size 3 after resize, got %v", numVal(state, "size"))
 		}
 
-		pool.awaitIdleCount(3, 120*time.Second)
+		pool.awaitIdleCount(3, 60*time.Second)
 	})
 
 	t.Run("resize down to 1", func(t *testing.T) {
 		// Keep s1 processing so we can observe async slot reclamation
 		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "run the bash command: sleep 60"})
-		pool.awaitStatus(s1, "processing", 30*time.Second)
+		pool.awaitStatus(s1, "processing", 15*time.Second)
 
 		resp := pool.send(Msg{"type": "resize", "size": 1})
 		assertNotError(t, resp)
 
 		// Stop s1 so its slot can be reclaimed
 		pool.send(Msg{"type": "stop", "sessionId": s1})
-		pool.awaitPoolSize(1, 30*time.Second)
+		pool.awaitPoolSize(1, 15*time.Second)
 	})
 
 	t.Run("resize respects pins", func(t *testing.T) {
 		pool.send(Msg{"type": "resize", "size": 2})
-		pool.awaitIdleCount(2, 120*time.Second)
+		pool.awaitIdleCount(2, 60*time.Second)
 
 		// Identify current sessions
 		lsResp := pool.send(Msg{"type": "ls", "all": true})
@@ -185,7 +185,7 @@ func TestPool(t *testing.T) {
 		// Resize to 1 — the unpinned session should lose its slot
 		pool.send(Msg{"type": "resize", "size": 1})
 
-		pool.awaitPoolSize(1, 30*time.Second)
+		pool.awaitPoolSize(1, 15*time.Second)
 
 		// Verify the pinned session survived
 		infoResp := pool.send(Msg{"type": "info", "sessionId": pinned})
@@ -233,7 +233,7 @@ func TestPool(t *testing.T) {
 		for _, raw := range sessions {
 			sm, _ := raw.(map[string]any)
 			sid := strVal(sm, "sessionId")
-			pool.awaitStatus(sid, "idle", 120*time.Second)
+			pool.awaitStatus(sid, "idle", 60*time.Second)
 		}
 
 		// Session restoration is a contract — s1 must survive destroy+re-init
@@ -278,7 +278,7 @@ func TestPool(t *testing.T) {
 		for _, raw := range sessions {
 			sm, _ := raw.(map[string]any)
 			sid := strVal(sm, "sessionId")
-			pool.awaitStatus(sid, "idle", 120*time.Second)
+			pool.awaitStatus(sid, "idle", 60*time.Second)
 		}
 	})
 }

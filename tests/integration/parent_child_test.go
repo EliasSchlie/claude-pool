@@ -45,7 +45,7 @@ func TestParentChild(t *testing.T) {
 		assertNotError(t, resp)
 		s1 = strVal(resp, "sessionId")
 
-		pool.awaitStatus(s1, "idle", 120*time.Second)
+		pool.awaitStatus(s1, "idle", 60*time.Second)
 
 		info := pool.send(Msg{"type": "info", "sessionId": s1})
 		session := parseSession(t, info["session"])
@@ -62,7 +62,7 @@ func TestParentChild(t *testing.T) {
 		assertNotError(t, resp)
 		s2 = strVal(resp, "sessionId")
 
-		pool.awaitStatus(s2, "idle", 120*time.Second)
+		pool.awaitStatus(s2, "idle", 60*time.Second)
 
 		info2 := pool.send(Msg{"type": "info", "sessionId": s2})
 		session2 := parseSession(t, info2["session"])
@@ -81,7 +81,7 @@ func TestParentChild(t *testing.T) {
 		assertNotError(t, resp)
 		s3 = strVal(resp, "sessionId")
 
-		pool.awaitStatus(s3, "idle", 120*time.Second)
+		pool.awaitStatus(s3, "idle", 60*time.Second)
 
 		info3 := pool.send(Msg{"type": "info", "sessionId": s3})
 		session3 := parseSession(t, info3["session"])
@@ -103,7 +103,7 @@ func TestParentChild(t *testing.T) {
 		assertNotError(t, resp)
 		s4 = strVal(resp, "sessionId")
 
-		pool.awaitStatus(s4, "idle", 120*time.Second)
+		pool.awaitStatus(s4, "idle", 60*time.Second)
 
 		info1 := pool.send(Msg{"type": "info", "sessionId": s1})
 		session1 := parseSession(t, info1["session"])

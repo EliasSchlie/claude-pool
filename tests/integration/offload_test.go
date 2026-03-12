@@ -46,8 +46,8 @@ func TestOffload(t *testing.T) {
 		assertNotError(t, r2)
 		s2 = strVal(r2, "sessionId")
 
-		pool.awaitStatus(s1, "idle", 120*time.Second)
-		pool.awaitStatus(s2, "idle", 120*time.Second)
+		pool.awaitStatus(s1, "idle", 60*time.Second)
+		pool.awaitStatus(s2, "idle", 60*time.Second)
 	})
 
 	t.Run("offload idle session", func(t *testing.T) {
@@ -74,7 +74,7 @@ func TestOffload(t *testing.T) {
 
 	t.Run("offload non-idle errors", func(t *testing.T) {
 		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "run the bash command: sleep 60"})
-		pool.awaitStatus(s2, "processing", 30*time.Second)
+		pool.awaitStatus(s2, "processing", 15*time.Second)
 
 		resp := pool.send(Msg{"type": "offload", "sessionId": s2})
 		assertError(t, resp)
@@ -109,7 +109,7 @@ func TestOffload(t *testing.T) {
 		assertNotError(t, resp)
 		assertType(t, resp, "started")
 
-		pool.awaitStatus(s1, "idle", 120*time.Second)
+		pool.awaitStatus(s1, "idle", 60*time.Second)
 
 		capture := pool.send(Msg{"type": "capture", "sessionId": s1})
 		assertContains(t, strVal(capture, "content"), "restored")
@@ -199,7 +199,7 @@ func TestOffload(t *testing.T) {
 
 	t.Run("archive stops active session first", func(t *testing.T) {
 		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "run the bash command: sleep 60"})
-		pool.awaitStatus(s2, "processing", 30*time.Second)
+		pool.awaitStatus(s2, "processing", 15*time.Second)
 
 		resp := pool.send(Msg{"type": "archive", "sessionId": s2})
 		assertNotError(t, resp)

@@ -255,7 +255,7 @@ func (p *testPool) startDaemon() {
 func (p *testPool) send(msg Msg) Msg {
 	p.t.Helper()
 	msg["id"] = int(p.nextID.Add(1))
-	return p.doSend(p.conn, p.scanner, msg, 30*time.Second)
+	return p.doSend(p.conn, p.scanner, msg, 10*time.Second)
 }
 
 // sendLong sends a message with a custom read timeout (for long-polling commands like wait).
@@ -281,7 +281,7 @@ func (p *testPool) doSend(conn net.Conn, scanner *bufio.Scanner, msg Msg, readTi
 	}
 	data = append(data, '\n')
 
-	conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if _, err := conn.Write(data); err != nil {
 		p.t.Fatalf("write: %v", err)
 	}
@@ -318,7 +318,7 @@ func (p *testPool) newConn() (net.Conn, *bufio.Scanner) {
 func (p *testPool) sendOn(conn net.Conn, scanner *bufio.Scanner, msg Msg) Msg {
 	p.t.Helper()
 	msg["id"] = int(p.nextID.Add(1))
-	return p.doSend(conn, scanner, msg, 30*time.Second)
+	return p.doSend(conn, scanner, msg, 10*time.Second)
 }
 
 // --------------------------------------------------------------------

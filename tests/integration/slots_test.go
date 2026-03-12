@@ -44,8 +44,8 @@ func TestSlots(t *testing.T) {
 		assertNotError(t, r2)
 		s2 = strVal(r2, "sessionId")
 
-		pool.awaitStatus(s1, "idle", 120*time.Second)
-		pool.awaitStatus(s2, "idle", 120*time.Second)
+		pool.awaitStatus(s1, "idle", 60*time.Second)
+		pool.awaitStatus(s2, "idle", 60*time.Second)
 
 		healthResp := pool.send(Msg{"type": "health"})
 		health, _ := healthResp["health"].(map[string]any)
@@ -116,7 +116,7 @@ func TestSlots(t *testing.T) {
 		pool.awaitStatus(s1, "offloaded", 10*time.Second)
 
 		// s4 should dequeue into the freed slot
-		pool.awaitStatus(s4, "idle", 120*time.Second)
+		pool.awaitStatus(s4, "idle", 60*time.Second)
 
 		// After spawning, claudeUUID and PID should be populated
 		info := pool.send(Msg{"type": "info", "sessionId": s4})
@@ -147,7 +147,7 @@ func TestSlots(t *testing.T) {
 		s5 := strVal(r, "sessionId")
 
 		// s4 (priority -1) should be evicted, not s2 (priority 10)
-		pool.awaitStatus(s4, "offloaded", 30*time.Second)
+		pool.awaitStatus(s4, "offloaded", 15*time.Second)
 
 		info2 := pool.send(Msg{"type": "info", "sessionId": s2})
 		session2 := parseSession(t, info2["session"])
@@ -155,7 +155,7 @@ func TestSlots(t *testing.T) {
 			t.Fatalf("expected s2 to survive eviction, got status %q", session2.Status)
 		}
 
-		pool.awaitStatus(s5, "idle", 120*time.Second)
+		pool.awaitStatus(s5, "idle", 60*time.Second)
 
 		// Reset priorities and clean up for next steps
 		pool.send(Msg{"type": "set-priority", "sessionId": s2, "priority": 0})
@@ -186,14 +186,14 @@ func TestSlots(t *testing.T) {
 
 		// Touch slotB by sending a followup — makes it most recently used
 		pool.send(Msg{"type": "followup", "sessionId": slotB, "prompt": "respond with exactly: recent"})
-		pool.awaitStatus(slotB, "idle", 120*time.Second)
+		pool.awaitStatus(slotB, "idle", 60*time.Second)
 
 		// Start new session — slotA (older/less recent) should be evicted
 		r := pool.send(Msg{"type": "start", "prompt": "respond with exactly: lru"})
 		assertNotError(t, r)
 		newSid := strVal(r, "sessionId")
 
-		pool.awaitStatus(slotA, "offloaded", 30*time.Second)
+		pool.awaitStatus(slotA, "offloaded", 15*time.Second)
 
 		infoB := pool.send(Msg{"type": "info", "sessionId": slotB})
 		sessionB := parseSession(t, infoB["session"])
@@ -201,7 +201,7 @@ func TestSlots(t *testing.T) {
 			t.Fatalf("expected recently-used session to survive, got status %q", sessionB.Status)
 		}
 
-		pool.awaitStatus(newSid, "idle", 120*time.Second)
+		pool.awaitStatus(newSid, "idle", 60*time.Second)
 
 		// Archive old sessions to manage capacity
 		pool.send(Msg{"type": "archive", "sessionId": slotA})
@@ -230,7 +230,7 @@ func TestSlots(t *testing.T) {
 		assertNotError(t, r)
 		newSid := strVal(r, "sessionId")
 
-		pool.awaitStatus(unpinTarget, "offloaded", 30*time.Second)
+		pool.awaitStatus(unpinTarget, "offloaded", 15*time.Second)
 
 		infoP := pool.send(Msg{"type": "info", "sessionId": pinTarget})
 		sessionP := parseSession(t, infoP["session"])
@@ -241,7 +241,7 @@ func TestSlots(t *testing.T) {
 			t.Fatal("expected pinned=true")
 		}
 
-		pool.awaitStatus(newSid, "idle", 120*time.Second)
+		pool.awaitStatus(newSid, "idle", 60*time.Second)
 		pool.send(Msg{"type": "unpin", "sessionId": pinTarget})
 		pool.send(Msg{"type": "archive", "sessionId": unpinTarget})
 	})
@@ -257,7 +257,7 @@ func TestSlots(t *testing.T) {
 			t.Fatalf("expected queued/processing/idle after pin, got %q", status)
 		}
 
-		pool.awaitStatus(s4, "idle", 120*time.Second)
+		pool.awaitStatus(s4, "idle", 60*time.Second)
 
 		info := pool.send(Msg{"type": "info", "sessionId": s4})
 		session := parseSession(t, info["session"])
@@ -283,7 +283,7 @@ func TestSlots(t *testing.T) {
 		pinSid := strVal(resp, "sessionId")
 		assertNonEmpty(t, "pin sessionId", pinSid)
 
-		pool.awaitStatus(pinSid, "idle", 120*time.Second)
+		pool.awaitStatus(pinSid, "idle", 60*time.Second)
 
 		info := pool.send(Msg{"type": "info", "sessionId": pinSid})
 		session := parseSession(t, info["session"])
@@ -337,7 +337,7 @@ func TestSlots(t *testing.T) {
 			pool.send(Msg{"type": "followup", "sessionId": sid, "prompt": "run the bash command: sleep 60"})
 		}
 		for _, sid := range idle {
-			pool.awaitStatus(sid, "processing", 30*time.Second)
+			pool.awaitStatus(sid, "processing", 15*time.Second)
 		}
 
 		// Queue a new session
@@ -376,7 +376,7 @@ func TestSlots(t *testing.T) {
 			pool.send(Msg{"type": "followup", "sessionId": sid, "prompt": "run the bash command: sleep 60"})
 		}
 		for _, sid := range idle {
-			pool.awaitStatus(sid, "processing", 30*time.Second)
+			pool.awaitStatus(sid, "processing", 15*time.Second)
 		}
 
 		// Queue a new session
@@ -398,8 +398,8 @@ func TestSlots(t *testing.T) {
 
 		// Wait for the queued session to finish
 		waitResp := pool.sendLong(
-			Msg{"type": "wait", "sessionId": queuedSid, "timeout": 120000},
-			150*time.Second,
+			Msg{"type": "wait", "sessionId": queuedSid, "timeout": 60000},
+			75*time.Second,
 		)
 		assertNotError(t, waitResp)
 		assertContains(t, strVal(waitResp, "content"), "replaced")
