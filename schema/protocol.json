@@ -1,0 +1,1003 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Claude Pool Protocol",
+  "description": "Socket API contract. All requests and responses are newline-delimited JSON. Every request has a 'type' field. Responses echo back the 'id' field if provided.",
+
+  "$defs": {
+    "sessionTarget": {
+      "description": "Target a session by ID, prefix, or slot index",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
+          },
+          "required": ["sessionId"]
+        },
+        {
+          "type": "object",
+          "properties": { "slotIndex": { "type": "integer", "minimum": 0 } },
+          "required": ["slotIndex"]
+        }
+      ]
+    },
+
+    "poolState": {
+      "type": "object",
+      "description": "Contents of pool.json — slot list, settings, metadata"
+    },
+
+    "healthReport": {
+      "type": "object",
+      "description": "Pool health: per-slot status, counts, PID liveness"
+    },
+
+    "sessionInfo": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string" },
+        "slotIndex": { "type": "integer" },
+        "status": { "enum": ["fresh", "idle", "processing", "dead", "error"] },
+        "intentionHeading": { "type": ["string", "null"] },
+        "cwd": { "type": ["string", "null"] },
+        "createdAt": { "type": "string" },
+        "pid": { "type": ["integer", "null"] }
+      }
+    },
+
+    "terminalTab": {
+      "type": "object",
+      "properties": {
+        "termId": { "type": "integer" },
+        "index": { "type": "integer" },
+        "label": { "type": "string" },
+        "isTui": { "type": "boolean" },
+        "pid": { "type": ["integer", "null"] },
+        "cwd": { "type": ["string", "null"] }
+      }
+    }
+  },
+
+  "commands": {
+    "ping": {
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ping" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pong" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "pool-init": {
+      "description": "Initialize a new pool with the given number of slots",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-init" },
+          "id": { "type": "integer" },
+          "size": { "type": "integer", "minimum": 1, "default": 5 }
+        },
+        "required": ["type"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool" },
+          "id": { "type": "integer" },
+          "pool": { "$ref": "#/$defs/poolState" }
+        },
+        "required": ["type", "pool"]
+      }
+    },
+
+    "pool-resize": {
+      "description": "Resize pool to a new slot count",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-resize" },
+          "id": { "type": "integer" },
+          "size": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["type", "size"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool" },
+          "id": { "type": "integer" },
+          "pool": { "$ref": "#/$defs/poolState" }
+        },
+        "required": ["type", "pool"]
+      }
+    },
+
+    "pool-health": {
+      "description": "Get pool health report",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-health" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "health" },
+          "id": { "type": "integer" },
+          "health": { "$ref": "#/$defs/healthReport" }
+        },
+        "required": ["type", "health"]
+      }
+    },
+
+    "pool-read": {
+      "description": "Read raw pool state",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-read" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool" },
+          "id": { "type": "integer" },
+          "pool": { "$ref": "#/$defs/poolState" }
+        },
+        "required": ["type", "pool"]
+      }
+    },
+
+    "pool-destroy": {
+      "description": "Kill all slots and remove pool",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-destroy" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "pool-clean": {
+      "description": "Offload + archive all idle sessions to free slots",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-clean" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "cleaned" },
+          "id": { "type": "integer" },
+          "count": { "type": "integer" }
+        },
+        "required": ["type", "count"]
+      }
+    },
+
+    "pool-get-flags": {
+      "description": "Get session spawn flags",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-get-flags" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "flags" },
+          "id": { "type": "integer" },
+          "flags": { "type": "string" }
+        },
+        "required": ["type", "flags"]
+      }
+    },
+
+    "pool-set-flags": {
+      "description": "Set session spawn flags",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-set-flags" },
+          "id": { "type": "integer" },
+          "flags": { "type": "string" }
+        },
+        "required": ["type", "flags"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "flags" },
+          "id": { "type": "integer" },
+          "flags": { "type": "string" }
+        },
+        "required": ["type", "flags"]
+      }
+    },
+
+    "pool-get-min-fresh": {
+      "description": "Get minimum fresh slots setting",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-get-min-fresh" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "min-fresh" },
+          "id": { "type": "integer" },
+          "minFreshSlots": { "type": "integer" }
+        },
+        "required": ["type", "minFreshSlots"]
+      }
+    },
+
+    "pool-set-min-fresh": {
+      "description": "Set minimum fresh slots to maintain",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-set-min-fresh" },
+          "id": { "type": "integer" },
+          "minFreshSlots": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["type", "minFreshSlots"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "min-fresh" },
+          "id": { "type": "integer" },
+          "minFreshSlots": { "type": "integer" }
+        },
+        "required": ["type", "minFreshSlots"]
+      }
+    },
+
+    "pool-start": {
+      "description": "Claim a fresh slot, send a prompt. Offloads LRU idle if no fresh slots.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-start" },
+          "id": { "type": "integer" },
+          "prompt": { "type": "string" },
+          "parentSessionId": { "type": "string" }
+        },
+        "required": ["type", "prompt"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "started" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string" },
+          "termId": { "type": "integer" },
+          "slotIndex": { "type": "integer" }
+        },
+        "required": ["type", "sessionId", "termId", "slotIndex"]
+      }
+    },
+
+    "pool-resume": {
+      "description": "Resume an offloaded/archived session into a fresh slot. Session ID may change.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-resume" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
+        },
+        "required": ["type", "sessionId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "resumed" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string" },
+          "termId": { "type": "integer" },
+          "slotIndex": { "type": "integer" }
+        },
+        "required": ["type", "sessionId", "termId", "slotIndex"]
+      }
+    },
+
+    "pool-followup": {
+      "description": "Send a follow-up prompt to an idle session. Errors if busy unless force=true.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-followup" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
+          "prompt": { "type": "string" },
+          "force": { "type": "boolean", "default": false }
+        },
+        "required": ["type", "sessionId", "prompt"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "started" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string" },
+          "termId": { "type": "integer" },
+          "slotIndex": { "type": "integer" }
+        },
+        "required": ["type", "sessionId", "termId", "slotIndex"]
+      }
+    },
+
+    "pool-wait": {
+      "description": "Long-poll until session (or any busy session) becomes idle.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-wait" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
+          "slotIndex": { "type": "integer", "minimum": 0 },
+          "timeout": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 300000,
+            "description": "Timeout in ms"
+          }
+        },
+        "required": ["type"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "result" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string" },
+          "buffer": { "type": "string" }
+        },
+        "required": ["type", "sessionId", "buffer"]
+      }
+    },
+
+    "pool-capture": {
+      "description": "Get terminal buffer content (works even while running).",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-capture" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
+          "slotIndex": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["type"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "buffer" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string" },
+          "slotIndex": { "type": "integer" },
+          "buffer": { "type": "string" }
+        },
+        "required": ["type", "buffer"]
+      }
+    },
+
+    "pool-result": {
+      "description": "Get terminal buffer only if session is idle. Errors if still running.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-result" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
+          "slotIndex": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["type"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "result" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string" },
+          "slotIndex": { "type": "integer" },
+          "buffer": { "type": "string" }
+        },
+        "required": ["type", "buffer"]
+      }
+    },
+
+    "pool-input": {
+      "description": "Send raw keystrokes to a session's terminal.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-input" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
+          "slotIndex": { "type": "integer", "minimum": 0 },
+          "data": { "type": "string" }
+        },
+        "required": ["type", "data"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "get-sessions": {
+      "description": "List all known sessions (live + offloaded)",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "get-sessions" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "sessions" },
+          "id": { "type": "integer" },
+          "sessions": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/sessionInfo" }
+          }
+        },
+        "required": ["type", "sessions"]
+      }
+    },
+
+    "read-intention": {
+      "description": "Read a session's intention file",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "read-intention" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
+        },
+        "required": ["type", "sessionId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "intention" },
+          "id": { "type": "integer" },
+          "content": { "type": "string" }
+        },
+        "required": ["type", "content"]
+      }
+    },
+
+    "write-intention": {
+      "description": "Write to a session's intention file",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "write-intention" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
+          "content": { "type": "string" }
+        },
+        "required": ["type", "sessionId", "content"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "archive-session": {
+      "description": "Archive a session (offloads first if live)",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "archive-session" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
+        },
+        "required": ["type", "sessionId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "unarchive-session": {
+      "description": "Move session from archived back to recent",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "unarchive-session" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
+        },
+        "required": ["type", "sessionId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "pin-session": {
+      "description": "Prevent a session from being offloaded",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pin-session" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
+          "duration": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 120,
+            "description": "Pin duration in seconds"
+          }
+        },
+        "required": ["type", "sessionId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "unpin-session": {
+      "description": "Allow a session to be offloaded again",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "unpin-session" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
+        },
+        "required": ["type", "sessionId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "stop-session": {
+      "description": "Interrupt a running session (sends Ctrl+C)",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "stop-session" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
+        },
+        "required": ["type", "sessionId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "session-terminals": {
+      "description": "List terminal tabs for a session",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "session-terminals" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
+        },
+        "required": ["type", "sessionId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "terminals" },
+          "id": { "type": "integer" },
+          "terminals": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/terminalTab" }
+          }
+        },
+        "required": ["type", "terminals"]
+      }
+    },
+
+    "session-term-read": {
+      "description": "Read a terminal tab's buffer content",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "session-term-read" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
+          "tabIndex": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["type", "sessionId", "tabIndex"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "buffer" },
+          "id": { "type": "integer" },
+          "termId": { "type": "integer" },
+          "buffer": { "type": "string" }
+        },
+        "required": ["type", "buffer"]
+      }
+    },
+
+    "session-term-write": {
+      "description": "Write data to a terminal tab",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "session-term-write" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
+          "tabIndex": { "type": "integer", "minimum": 0 },
+          "data": { "type": "string" }
+        },
+        "required": ["type", "sessionId", "tabIndex", "data"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "session-term-open": {
+      "description": "Open a new shell tab for a session",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "session-term-open" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
+          "cwd": { "type": "string" }
+        },
+        "required": ["type", "sessionId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "spawned" },
+          "id": { "type": "integer" },
+          "termId": { "type": "integer" },
+          "tabIndex": { "type": "integer" }
+        },
+        "required": ["type", "termId", "tabIndex"]
+      }
+    },
+
+    "session-term-close": {
+      "description": "Close a terminal tab (refuses TUI tab on pool sessions)",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "session-term-close" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
+          "tabIndex": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["type", "sessionId", "tabIndex"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "session-term-run": {
+      "description": "Run a command in a shell tab, wait for output, return it",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "session-term-run" },
+          "id": { "type": "integer" },
+          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
+          "tabIndex": { "type": "integer", "minimum": 0 },
+          "command": { "type": "string" },
+          "timeout": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 30000,
+            "description": "Timeout in ms"
+          }
+        },
+        "required": ["type", "sessionId", "tabIndex", "command"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "output" },
+          "id": { "type": "integer" },
+          "output": { "type": "string" },
+          "termId": { "type": "integer" }
+        },
+        "required": ["type", "output"]
+      }
+    },
+
+    "slot-read": {
+      "description": "Read slot buffer by index (for debugging)",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "slot-read" },
+          "id": { "type": "integer" },
+          "slotIndex": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["type", "slotIndex"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "buffer" },
+          "id": { "type": "integer" },
+          "slotIndex": { "type": "integer" },
+          "sessionId": { "type": ["string", "null"] },
+          "buffer": { "type": "string" }
+        },
+        "required": ["type", "slotIndex", "buffer"]
+      }
+    },
+
+    "slot-write": {
+      "description": "Write to slot by index (for debugging)",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "slot-write" },
+          "id": { "type": "integer" },
+          "slotIndex": { "type": "integer", "minimum": 0 },
+          "data": { "type": "string" }
+        },
+        "required": ["type", "slotIndex", "data"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "slot-status": {
+      "description": "Get slot details by index",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "slot-status" },
+          "id": { "type": "integer" },
+          "slotIndex": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["type", "slotIndex"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "slot" },
+          "id": { "type": "integer" },
+          "slot": {
+            "type": "object",
+            "properties": {
+              "index": { "type": "integer" },
+              "termId": { "type": ["integer", "null"] },
+              "pid": { "type": ["integer", "null"] },
+              "status": { "type": "string" },
+              "sessionId": { "type": ["string", "null"] },
+              "healthStatus": { "type": "string" },
+              "createdAt": { "type": "string" }
+            }
+          }
+        },
+        "required": ["type", "slot"]
+      }
+    },
+
+    "pty-list": {
+      "description": "List all PTY instances (low-level)",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pty-list" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ptys" },
+          "id": { "type": "integer" },
+          "ptys": { "type": "array" }
+        },
+        "required": ["type", "ptys"]
+      }
+    },
+
+    "pty-read": {
+      "description": "Read PTY buffer by terminal ID",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pty-read" },
+          "id": { "type": "integer" },
+          "termId": { "type": "integer" }
+        },
+        "required": ["type", "termId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "buffer" },
+          "id": { "type": "integer" },
+          "buffer": { "type": "string" }
+        },
+        "required": ["type", "buffer"]
+      }
+    },
+
+    "pty-write": {
+      "description": "Write to PTY by terminal ID",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pty-write" },
+          "id": { "type": "integer" },
+          "termId": { "type": "integer" },
+          "data": { "type": "string" }
+        },
+        "required": ["type", "termId", "data"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "pty-spawn": {
+      "description": "Spawn a new PTY process",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pty-spawn" },
+          "id": { "type": "integer" },
+          "cwd": { "type": "string" },
+          "cmd": { "type": "string" },
+          "args": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["type"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "spawned" },
+          "id": { "type": "integer" },
+          "termId": { "type": "integer" },
+          "pid": { "type": "integer" }
+        },
+        "required": ["type", "termId", "pid"]
+      }
+    },
+
+    "pty-kill": {
+      "description": "Kill a PTY process",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pty-kill" },
+          "id": { "type": "integer" },
+          "termId": { "type": "integer" }
+        },
+        "required": ["type", "termId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "error": {
+      "description": "Error response (returned for any failed command)",
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "error" },
+          "id": { "type": "integer" },
+          "error": { "type": "string" }
+        },
+        "required": ["type", "error"]
+      }
+    }
+  }
+}

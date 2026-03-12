@@ -1,5 +1,7 @@
 # Socket Protocol
 
+**Machine-readable contract:** [`schema/protocol.json`](../schema/protocol.json) (JSON Schema). This doc is a human-friendly summary — the schema is the source of truth.
+
 ## Transport
 
 Unix domain socket at `~/.claude-pool/pools/<name>/api.sock`.
