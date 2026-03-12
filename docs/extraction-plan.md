@@ -100,12 +100,13 @@ GOOS=linux GOARCH=amd64 go build -o claude-pool-linux ./cmd/claude-pool
 
 ### Phase 2: Advanced features
 1. Offload/restore flow
-2. Claim command (fresh session access)
-3. LRU eviction with priority
+2. Pin (fresh session allocation + auto-offload protection)
+3. LRU eviction with priority (set-priority)
 4. Queue management
-5. Pin/unpin
+5. Archive/unarchive (soft-delete with 30-day auto-cleanup)
 6. Attach server (raw PTY pipe sockets)
-7. Reconciliation loop
+7. Subscribe (event stream with filters)
+8. Reconciliation loop
 
 ### Phase 3: CLI (separate package)
 1. Pool registry (`~/.claude-pool/pools.json`)
