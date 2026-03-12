@@ -1,96 +1,84 @@
 # Extraction Plan
 
-Migrating pool management from Open Cockpit into Claude Pool.
+Taking lessons from Open Cockpit's pool implementation, but designing a cleaner system from requirements up. Open Cockpit code is a reference, not a blueprint.
 
-## Source Files to Migrate
+## What to reference from Open Cockpit
 
 From `open-cockpit/src/`:
 
-| File | Destination | Changes needed |
-|------|-------------|----------------|
-| `pool.js` | `src/pool.js` | None — pure data layer, zero Electron deps |
-| `pool-manager.js` | `src/pool-manager.js` | Remove UI callbacks. Absorb PTY spawning (previously delegated to daemon-client). All paths parameterized by pool directory. |
-| `pool-lock.js` | `src/pool-lock.js` | None — pure async mutex |
-| `api-server.js` | `src/api-server.js` | Socket path from pool directory |
-| `api-handlers.js` | `src/api-handlers.js` | **Split**: keep pool/session/PTY handlers, remove UI handlers (show, hide, screenshot, ui-state, session-select, relaunch) |
-| `session-discovery.js` | `src/session-discovery.js` | Read idle-signals/session-pids from pool directory |
-| `secure-fs.js` | `src/secure-fs.js` | None |
-| `platform.js` | `src/platform.js` | None |
+| File | Relevance | Notes |
+|------|-----------|-------|
+| `pool.js` | High | Pure data layer — good patterns for pool.json read/write, slot selection |
+| `pool-manager.js` | High | Core logic for offloading, slot claiming, LRU eviction, session spawning. Needs significant refactoring (remove UI callbacks, absorb PTY management, drop slot-index-based APIs). |
+| `pool-lock.js` | High | Async mutex — reuse directly |
+| `api-server.js` | High | Unix socket server — adapt socket path from pool directory |
+| `api-handlers.js` | Medium | Handler pattern is good. Strip UI handlers, strip slot/term commands, strip intentions. |
+| `session-discovery.js` | High | Idle detection, status tracking — adapt paths for pool directory |
+| `secure-fs.js` | Medium | Secure file writing |
+| `platform.js` | Medium | Cross-platform path resolution |
 
-**Not migrated as separate files** (absorbed into pool-manager):
-- `pty-daemon.js` → PTY management moves in-process. The daemon owns PTYs directly via `node-pty`.
-- `daemon-client.js` → No longer needed. Was the IPC layer to the separate PTY daemon.
+**Not referenced** (different scope):
+- `pty-daemon.js`, `daemon-client.js` — We use in-process PTY management, not a separate daemon
+- `main.js`, `renderer.js`, UI modules — Electron-specific
+- Terminal tab management — That's claude-term's scope
+- Intention files — That's Open Cockpit's scope
 
-### New files to create
+## New files to create
 
 | File | Purpose |
 |------|---------|
-| `src/daemon.js` | Main entry point. Receives pool name, resolves pool directory, starts API server, PTY manager, reconciliation loop. Single process. |
-| `src/pty-manager.js` | In-process PTY management (spawn, kill, read, write, list). Replaces the old PTY daemon + daemon-client pair. Re-adopts orphaned processes on restart. |
-| `src/paths.js` | All path resolution centralized. Takes pool name → returns all paths (pool.json, socket, logs/, offloaded/, etc.) |
-| `bin/claude-pool` | CLI entry point. Parses `--pool` flag, connects to correct socket, sends JSON, pretty-prints responses. |
-| `hooks/` | Hook scripts migrated from Open Cockpit, adapted to read `CLAUDE_POOL_HOME` env var for pool routing. |
+| `src/daemon.js` | Single daemon entry point. Owns PTYs in-process, runs API server, reconciliation loop. |
+| `src/pty-manager.js` | In-process PTY management (spawn, kill, read buffer, re-adopt on restart). Replaces the old two-daemon architecture. |
+| `src/paths.js` | Centralized path resolution. Pool name → all paths (config.json, pool.json, socket, logs/, offloaded/). |
+| `src/pool.js` | Pool state data layer (adapted from Open Cockpit). |
+| `src/pool-manager.js` | Pool business logic (adapted). Session-ID-only interface, no slot indices exposed. |
+| `src/pool-lock.js` | Async mutex (direct reuse). |
+| `src/api-server.js` | Unix socket server (adapted). |
+| `src/api-handlers.js` | Command handlers — pool ops, session ops, attach. No UI, no terminals, no intentions. |
+| `src/session-discovery.js` | Session state detection (adapted). |
+| `src/attach-server.js` | Per-session raw PTY pipe sockets for terminal attachment. |
+| `hooks/` | Hook scripts with `CLAUDE_POOL_HOME` env var routing. |
 
-### NOT migrated (stays in Open Cockpit)
+## Separate package: CLI
 
-- `main.js` — Electron window management, IPC wiring
-- `renderer.js` and all renderer modules — UI
-- `dock-layout.js` — UI layout
-- All window control handlers (show, hide, screenshot, etc.)
-- Non-pool session discovery (browsing all Claude sessions on device)
-
-## Hooks Isolation
-
-**Problem:** Claude Code hooks are installed globally (one plugin per installation). But each pool needs hooks that write to its own directory.
-
-**Solution:** Environment variable routing.
-
-1. When the pool daemon spawns a Claude session, it sets env vars:
-   ```
-   CLAUDE_POOL_HOME=~/.claude-pool/pools/mypool
-   CLAUDE_POOL_NAME=mypool
-   ```
-2. Hook scripts read `CLAUDE_POOL_HOME` to determine where to write (idle signals, session PIDs, intentions).
-3. If `CLAUDE_POOL_HOME` is not set, hooks fall back to Open Cockpit behavior (for non-pool sessions).
-
-This means hooks ship with claude-pool (not Open Cockpit), and Open Cockpit installs them or delegates to claude-pool's plugin.
+The CLI ships as `claude-pool-cli` (separate repo or package). It's a thin client:
+- Reads `~/.claude-pool/pools.json` registry
+- Resolves `--pool` flag to socket connection
+- Sends JSON, pretty-prints responses
+- Supports local Unix sockets and remote connections (SSH tunneling)
 
 ## Migration Strategy
 
-### Phase 1: Extract + independent pools from day one
-1. Copy source files into claude-pool repo
-2. All paths parameterized by pool name (no hardcoded paths)
-3. Each pool gets its own directory under `~/.claude-pool/pools/<name>/`
-4. Single daemon per pool — owns PTYs in-process (design decision #4)
-5. Create daemon entry point
-6. Create CLI with `--pool` flag
-7. Migrate hooks with `CLAUDE_POOL_HOME` routing
-8. Test standalone
+### Phase 1: Build claude-pool daemon
+1. Design from requirements (this doc + design principles), not by copying
+2. Reference Open Cockpit code for patterns, not structure
+3. All sessions addressed by Claude UUID — no slot indices in API
+4. Single daemon per pool — PTYs in-process
+5. Pool config.json for flags (default: `--dangerously-skip-permissions`)
+6. Hooks with `CLAUDE_POOL_HOME` routing
+7. Attach via session-level raw pipe sockets
 
-### Phase 2: Wire Open Cockpit
-1. Open Cockpit discovers running pools (scan `~/.claude-pool/pools/*/api.sock`)
-2. Open Cockpit connects as a socket client
-3. Remove duplicated pool logic from Open Cockpit
-4. Pool UI commands go through socket
+### Phase 2: Build CLI (separate package)
+1. Pool registry (`~/.claude-pool/pools.json`)
+2. Local socket connections
+3. Remote pool support (SSH tunneling)
+4. Pretty-printed output, `--json` flag for programmatic use
 
-### Phase 3: Polish
-1. Daemon auto-start on CLI use
-2. `npm install -g claude-pool`
-3. Migration tool for existing Open Cockpit users
+### Phase 3: Wire Open Cockpit
+1. Open Cockpit reads pool registry, connects to pool sockets as a client
+2. Remove pool logic from Open Cockpit
+3. Pool UI goes through socket API
+4. Attach feeds xterm.js via raw pipe sockets
 
-## Path Layout (per-pool, fully self-contained)
-
-See [design-principles.md](design-principles.md) for the canonical directory layout.
-
-## Resolved Questions
-
-- ~~Should pools share the offloaded directory?~~ **No.** Each pool owns its offloaded sessions. (invariant #1)
-- ~~Should the PTY daemon be a separate process?~~ **No.** Single daemon owns PTYs in-process. (design decision #4)
-- ~~How to handle hooks for different pools?~~ **Env var routing.** `CLAUDE_POOL_HOME` set by daemon when spawning sessions.
+### Phase 4: Extract claude-term (separate project)
+1. Per-session persistent terminal tabs
+2. Independent from claude-pool
+3. Open Cockpit depends on both
 
 ## Open Questions
 
-- [ ] Should the daemon auto-start when the CLI is used? (Like Docker)
-- [ ] How to handle migration for existing Open Cockpit users? (symlinks? migration script? detect and offer?)
+- [ ] Should the daemon auto-start when the CLI connects? (Like Docker)
+- [ ] How to handle migration for existing Open Cockpit users?
 - [ ] Should hooks ship as a claude-pool plugin or integrate with Open Cockpit's existing plugin?
-- [ ] How does Open Cockpit discover which pools exist? (scan directory? config file? registry?)
+- [ ] Pool registry format — should remote connections use SSH tunnel strings, TCP addresses, or something else?
+- [ ] Should `pool-start` block until the Claude UUID is discovered, or return immediately with a pending ID?

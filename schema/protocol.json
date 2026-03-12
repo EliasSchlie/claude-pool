@@ -1,59 +1,44 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Claude Pool Protocol",
-  "description": "Socket API contract. All requests and responses are newline-delimited JSON. Every request has a 'type' field. Responses echo back the 'id' field if provided.",
+  "description": "Socket API contract. All requests and responses are newline-delimited JSON. Every request has a 'type' field. Responses echo back the 'id' field if provided. Sessions are always addressed by Claude UUID.",
 
   "$defs": {
-    "sessionTarget": {
-      "description": "Target a session by ID, prefix, or slot index",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
-          },
-          "required": ["sessionId"]
-        },
-        {
-          "type": "object",
-          "properties": { "slotIndex": { "type": "integer", "minimum": 0 } },
-          "required": ["slotIndex"]
-        }
-      ]
+    "claudeUUID": {
+      "type": "string",
+      "pattern": "^[a-f0-9-]+$",
+      "description": "Claude Code session UUID"
     },
 
     "poolState": {
       "type": "object",
-      "description": "Contents of pool.json — slot list, settings, metadata"
+      "description": "Pool state: session list, config, metadata"
     },
 
     "healthReport": {
       "type": "object",
-      "description": "Pool health: per-slot status, counts, PID liveness"
+      "description": "Pool health: per-session status, counts, PID liveness"
     },
 
     "sessionInfo": {
       "type": "object",
       "properties": {
-        "sessionId": { "type": "string" },
-        "slotIndex": { "type": "integer" },
+        "sessionId": { "$ref": "#/$defs/claudeUUID" },
         "status": { "enum": ["fresh", "idle", "processing", "dead", "error"] },
-        "intentionHeading": { "type": ["string", "null"] },
         "cwd": { "type": ["string", "null"] },
         "createdAt": { "type": "string" },
         "pid": { "type": ["integer", "null"] }
       }
     },
 
-    "terminalTab": {
+    "poolConfig": {
       "type": "object",
       "properties": {
-        "termId": { "type": "integer" },
-        "index": { "type": "integer" },
-        "label": { "type": "string" },
-        "isTui": { "type": "boolean" },
-        "pid": { "type": ["integer", "null"] },
-        "cwd": { "type": ["string", "null"] }
+        "flags": {
+          "type": "string",
+          "description": "Claude CLI flags for all sessions"
+        },
+        "size": { "type": "integer", "minimum": 0 }
       }
     }
   },
@@ -79,13 +64,17 @@
     },
 
     "pool-init": {
-      "description": "Initialize a new pool with the given number of slots",
+      "description": "Initialize a new pool. Reads flags from config.json (or uses --flags override). Default flags: --dangerously-skip-permissions.",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "pool-init" },
           "id": { "type": "integer" },
-          "size": { "type": "integer", "minimum": 1, "default": 5 }
+          "size": { "type": "integer", "minimum": 1, "default": 5 },
+          "flags": {
+            "type": "string",
+            "description": "Override config flags for this init"
+          }
         },
         "required": ["type"]
       },
@@ -101,7 +90,7 @@
     },
 
     "pool-resize": {
-      "description": "Resize pool to a new slot count",
+      "description": "Resize pool. New slots use flags from config.json.",
       "request": {
         "type": "object",
         "properties": {
@@ -165,7 +154,7 @@
     },
 
     "pool-destroy": {
-      "description": "Kill all slots and remove pool",
+      "description": "Kill all sessions and remove pool",
       "request": {
         "type": "object",
         "properties": {
@@ -184,122 +173,39 @@
       }
     },
 
-    "pool-clean": {
-      "description": "Offload + archive all idle sessions to free slots",
+    "pool-config": {
+      "description": "Get or set pool configuration. Affects future spawns only.",
       "request": {
         "type": "object",
         "properties": {
-          "type": { "const": "pool-clean" },
-          "id": { "type": "integer" }
+          "type": { "const": "pool-config" },
+          "id": { "type": "integer" },
+          "set": {
+            "$ref": "#/$defs/poolConfig",
+            "description": "Fields to update. Omit to read current config."
+          }
         },
         "required": ["type"]
       },
       "response": {
         "type": "object",
         "properties": {
-          "type": { "const": "cleaned" },
+          "type": { "const": "config" },
           "id": { "type": "integer" },
-          "count": { "type": "integer" }
+          "config": { "$ref": "#/$defs/poolConfig" }
         },
-        "required": ["type", "count"]
-      }
-    },
-
-    "pool-get-flags": {
-      "description": "Get session spawn flags",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "pool-get-flags" },
-          "id": { "type": "integer" }
-        },
-        "required": ["type"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "flags" },
-          "id": { "type": "integer" },
-          "flags": { "type": "string" }
-        },
-        "required": ["type", "flags"]
-      }
-    },
-
-    "pool-set-flags": {
-      "description": "Set session spawn flags",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "pool-set-flags" },
-          "id": { "type": "integer" },
-          "flags": { "type": "string" }
-        },
-        "required": ["type", "flags"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "flags" },
-          "id": { "type": "integer" },
-          "flags": { "type": "string" }
-        },
-        "required": ["type", "flags"]
-      }
-    },
-
-    "pool-get-min-fresh": {
-      "description": "Get minimum fresh slots setting",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "pool-get-min-fresh" },
-          "id": { "type": "integer" }
-        },
-        "required": ["type"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "min-fresh" },
-          "id": { "type": "integer" },
-          "minFreshSlots": { "type": "integer" }
-        },
-        "required": ["type", "minFreshSlots"]
-      }
-    },
-
-    "pool-set-min-fresh": {
-      "description": "Set minimum fresh slots to maintain",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "pool-set-min-fresh" },
-          "id": { "type": "integer" },
-          "minFreshSlots": { "type": "integer", "minimum": 0 }
-        },
-        "required": ["type", "minFreshSlots"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "min-fresh" },
-          "id": { "type": "integer" },
-          "minFreshSlots": { "type": "integer" }
-        },
-        "required": ["type", "minFreshSlots"]
+        "required": ["type", "config"]
       }
     },
 
     "pool-start": {
-      "description": "Claim a fresh slot, send a prompt. Offloads LRU idle if no fresh slots.",
+      "description": "Send a prompt to a fresh session. Automatically offloads LRU idle session if no fresh slots available.",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "pool-start" },
           "id": { "type": "integer" },
-          "prompt": { "type": "string" },
-          "parentSessionId": { "type": "string" }
+          "prompt": { "type": "string" }
         },
         "required": ["type", "prompt"]
       },
@@ -308,22 +214,20 @@
         "properties": {
           "type": { "const": "started" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string" },
-          "termId": { "type": "integer" },
-          "slotIndex": { "type": "integer" }
+          "sessionId": { "$ref": "#/$defs/claudeUUID" }
         },
-        "required": ["type", "sessionId", "termId", "slotIndex"]
+        "required": ["type", "sessionId"]
       }
     },
 
     "pool-resume": {
-      "description": "Resume an offloaded/archived session into a fresh slot. Session ID may change.",
+      "description": "Resume an offloaded/archived session. Claims a fresh slot, sends /resume. Session ID may change (new Claude UUID assigned).",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "pool-resume" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
+          "sessionId": { "$ref": "#/$defs/claudeUUID" }
         },
         "required": ["type", "sessionId"]
       },
@@ -332,22 +236,23 @@
         "properties": {
           "type": { "const": "resumed" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string" },
-          "termId": { "type": "integer" },
-          "slotIndex": { "type": "integer" }
+          "sessionId": {
+            "$ref": "#/$defs/claudeUUID",
+            "description": "New session UUID (may differ from request)"
+          }
         },
-        "required": ["type", "sessionId", "termId", "slotIndex"]
+        "required": ["type", "sessionId"]
       }
     },
 
     "pool-followup": {
-      "description": "Send a follow-up prompt to an idle session. Errors if busy unless force=true.",
+      "description": "Send a follow-up prompt to an idle session. Errors if session is busy (unless force=true). Auto-resumes if session is offloaded.",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "pool-followup" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
+          "sessionId": { "$ref": "#/$defs/claudeUUID" },
           "prompt": { "type": "string" },
           "force": { "type": "boolean", "default": false }
         },
@@ -358,23 +263,20 @@
         "properties": {
           "type": { "const": "started" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string" },
-          "termId": { "type": "integer" },
-          "slotIndex": { "type": "integer" }
+          "sessionId": { "$ref": "#/$defs/claudeUUID" }
         },
-        "required": ["type", "sessionId", "termId", "slotIndex"]
+        "required": ["type", "sessionId"]
       }
     },
 
     "pool-wait": {
-      "description": "Long-poll until session (or any busy session) becomes idle.",
+      "description": "Long-poll until session becomes idle. If no sessionId, waits for any busy session.",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "pool-wait" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
-          "slotIndex": { "type": "integer", "minimum": 0 },
+          "sessionId": { "$ref": "#/$defs/claudeUUID" },
           "timeout": {
             "type": "integer",
             "minimum": 0,
@@ -389,7 +291,7 @@
         "properties": {
           "type": { "const": "result" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string" },
+          "sessionId": { "$ref": "#/$defs/claudeUUID" },
           "buffer": { "type": "string" }
         },
         "required": ["type", "sessionId", "buffer"]
@@ -397,27 +299,25 @@
     },
 
     "pool-capture": {
-      "description": "Get terminal buffer content (works even while running).",
+      "description": "Get terminal buffer content (works even while session is running).",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "pool-capture" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
-          "slotIndex": { "type": "integer", "minimum": 0 }
+          "sessionId": { "$ref": "#/$defs/claudeUUID" }
         },
-        "required": ["type"]
+        "required": ["type", "sessionId"]
       },
       "response": {
         "type": "object",
         "properties": {
           "type": { "const": "buffer" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string" },
-          "slotIndex": { "type": "integer" },
+          "sessionId": { "$ref": "#/$defs/claudeUUID" },
           "buffer": { "type": "string" }
         },
-        "required": ["type", "buffer"]
+        "required": ["type", "sessionId", "buffer"]
       }
     },
 
@@ -428,21 +328,19 @@
         "properties": {
           "type": { "const": "pool-result" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
-          "slotIndex": { "type": "integer", "minimum": 0 }
+          "sessionId": { "$ref": "#/$defs/claudeUUID" }
         },
-        "required": ["type"]
+        "required": ["type", "sessionId"]
       },
       "response": {
         "type": "object",
         "properties": {
           "type": { "const": "result" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string" },
-          "slotIndex": { "type": "integer" },
+          "sessionId": { "$ref": "#/$defs/claudeUUID" },
           "buffer": { "type": "string" }
         },
-        "required": ["type", "buffer"]
+        "required": ["type", "sessionId", "buffer"]
       }
     },
 
@@ -453,11 +351,31 @@
         "properties": {
           "type": { "const": "pool-input" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
-          "slotIndex": { "type": "integer", "minimum": 0 },
+          "sessionId": { "$ref": "#/$defs/claudeUUID" },
           "data": { "type": "string" }
         },
-        "required": ["type", "data"]
+        "required": ["type", "sessionId", "data"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
+    "pool-offload": {
+      "description": "Manually offload a specific idle session (snapshot + /clear). Errors if session is busy.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "pool-offload" },
+          "id": { "type": "integer" },
+          "sessionId": { "$ref": "#/$defs/claudeUUID" }
+        },
+        "required": ["type", "sessionId"]
       },
       "response": {
         "type": "object",
@@ -470,7 +388,7 @@
     },
 
     "get-sessions": {
-      "description": "List all known sessions (live + offloaded)",
+      "description": "List all sessions (live + offloaded)",
       "request": {
         "type": "object",
         "properties": {
@@ -493,50 +411,6 @@
       }
     },
 
-    "read-intention": {
-      "description": "Read a session's intention file",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "read-intention" },
-          "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
-        },
-        "required": ["type", "sessionId"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "intention" },
-          "id": { "type": "integer" },
-          "content": { "type": "string" }
-        },
-        "required": ["type", "content"]
-      }
-    },
-
-    "write-intention": {
-      "description": "Write to a session's intention file",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "write-intention" },
-          "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
-          "content": { "type": "string" }
-        },
-        "required": ["type", "sessionId", "content"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "ok" },
-          "id": { "type": "integer" }
-        },
-        "required": ["type"]
-      }
-    },
-
     "archive-session": {
       "description": "Archive a session (offloads first if live)",
       "request": {
@@ -544,7 +418,7 @@
         "properties": {
           "type": { "const": "archive-session" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
+          "sessionId": { "$ref": "#/$defs/claudeUUID" }
         },
         "required": ["type", "sessionId"]
       },
@@ -565,7 +439,7 @@
         "properties": {
           "type": { "const": "unarchive-session" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
+          "sessionId": { "$ref": "#/$defs/claudeUUID" }
         },
         "required": ["type", "sessionId"]
       },
@@ -580,13 +454,13 @@
     },
 
     "pin-session": {
-      "description": "Prevent a session from being offloaded",
+      "description": "Prevent a session from being auto-offloaded by LRU eviction",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "pin-session" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
+          "sessionId": { "$ref": "#/$defs/claudeUUID" },
           "duration": {
             "type": "integer",
             "minimum": 0,
@@ -607,13 +481,13 @@
     },
 
     "unpin-session": {
-      "description": "Allow a session to be offloaded again",
+      "description": "Allow a session to be auto-offloaded again",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "unpin-session" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
+          "sessionId": { "$ref": "#/$defs/claudeUUID" }
         },
         "required": ["type", "sessionId"]
       },
@@ -634,7 +508,7 @@
         "properties": {
           "type": { "const": "stop-session" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
+          "sessionId": { "$ref": "#/$defs/claudeUUID" }
         },
         "required": ["type", "sessionId"]
       },
@@ -648,342 +522,28 @@
       }
     },
 
-    "session-terminals": {
-      "description": "List terminal tabs for a session",
+    "attach": {
+      "description": "Attach to a live session's terminal. Returns a socket path for raw PTY I/O. Pipe closes automatically if session is offloaded. Only works for live (in-slot) sessions.",
       "request": {
         "type": "object",
         "properties": {
-          "type": { "const": "session-terminals" },
+          "type": { "const": "attach" },
           "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" }
+          "sessionId": { "$ref": "#/$defs/claudeUUID" }
         },
         "required": ["type", "sessionId"]
       },
       "response": {
         "type": "object",
         "properties": {
-          "type": { "const": "terminals" },
+          "type": { "const": "attached" },
           "id": { "type": "integer" },
-          "terminals": {
-            "type": "array",
-            "items": { "$ref": "#/$defs/terminalTab" }
+          "socketPath": {
+            "type": "string",
+            "description": "Path to raw PTY pipe socket"
           }
         },
-        "required": ["type", "terminals"]
-      }
-    },
-
-    "session-term-read": {
-      "description": "Read a terminal tab's buffer content",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "session-term-read" },
-          "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
-          "tabIndex": { "type": "integer", "minimum": 0 }
-        },
-        "required": ["type", "sessionId", "tabIndex"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "buffer" },
-          "id": { "type": "integer" },
-          "termId": { "type": "integer" },
-          "buffer": { "type": "string" }
-        },
-        "required": ["type", "buffer"]
-      }
-    },
-
-    "session-term-write": {
-      "description": "Write data to a terminal tab",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "session-term-write" },
-          "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
-          "tabIndex": { "type": "integer", "minimum": 0 },
-          "data": { "type": "string" }
-        },
-        "required": ["type", "sessionId", "tabIndex", "data"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "ok" },
-          "id": { "type": "integer" }
-        },
-        "required": ["type"]
-      }
-    },
-
-    "session-term-open": {
-      "description": "Open a new shell tab for a session",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "session-term-open" },
-          "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
-          "cwd": { "type": "string" }
-        },
-        "required": ["type", "sessionId"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "spawned" },
-          "id": { "type": "integer" },
-          "termId": { "type": "integer" },
-          "tabIndex": { "type": "integer" }
-        },
-        "required": ["type", "termId", "tabIndex"]
-      }
-    },
-
-    "session-term-close": {
-      "description": "Close a terminal tab (refuses TUI tab on pool sessions)",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "session-term-close" },
-          "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
-          "tabIndex": { "type": "integer", "minimum": 0 }
-        },
-        "required": ["type", "sessionId", "tabIndex"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "ok" },
-          "id": { "type": "integer" }
-        },
-        "required": ["type"]
-      }
-    },
-
-    "session-term-run": {
-      "description": "Run a command in a shell tab, wait for output, return it",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "session-term-run" },
-          "id": { "type": "integer" },
-          "sessionId": { "type": "string", "pattern": "^[a-f0-9-]+$" },
-          "tabIndex": { "type": "integer", "minimum": 0 },
-          "command": { "type": "string" },
-          "timeout": {
-            "type": "integer",
-            "minimum": 0,
-            "default": 30000,
-            "description": "Timeout in ms"
-          }
-        },
-        "required": ["type", "sessionId", "tabIndex", "command"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "output" },
-          "id": { "type": "integer" },
-          "output": { "type": "string" },
-          "termId": { "type": "integer" }
-        },
-        "required": ["type", "output"]
-      }
-    },
-
-    "slot-read": {
-      "description": "Read slot buffer by index (for debugging)",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "slot-read" },
-          "id": { "type": "integer" },
-          "slotIndex": { "type": "integer", "minimum": 0 }
-        },
-        "required": ["type", "slotIndex"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "buffer" },
-          "id": { "type": "integer" },
-          "slotIndex": { "type": "integer" },
-          "sessionId": { "type": ["string", "null"] },
-          "buffer": { "type": "string" }
-        },
-        "required": ["type", "slotIndex", "buffer"]
-      }
-    },
-
-    "slot-write": {
-      "description": "Write to slot by index (for debugging)",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "slot-write" },
-          "id": { "type": "integer" },
-          "slotIndex": { "type": "integer", "minimum": 0 },
-          "data": { "type": "string" }
-        },
-        "required": ["type", "slotIndex", "data"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "ok" },
-          "id": { "type": "integer" }
-        },
-        "required": ["type"]
-      }
-    },
-
-    "slot-status": {
-      "description": "Get slot details by index",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "slot-status" },
-          "id": { "type": "integer" },
-          "slotIndex": { "type": "integer", "minimum": 0 }
-        },
-        "required": ["type", "slotIndex"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "slot" },
-          "id": { "type": "integer" },
-          "slot": {
-            "type": "object",
-            "properties": {
-              "index": { "type": "integer" },
-              "termId": { "type": ["integer", "null"] },
-              "pid": { "type": ["integer", "null"] },
-              "status": { "type": "string" },
-              "sessionId": { "type": ["string", "null"] },
-              "healthStatus": { "type": "string" },
-              "createdAt": { "type": "string" }
-            }
-          }
-        },
-        "required": ["type", "slot"]
-      }
-    },
-
-    "pty-list": {
-      "description": "List all PTY instances (low-level)",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "pty-list" },
-          "id": { "type": "integer" }
-        },
-        "required": ["type"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "ptys" },
-          "id": { "type": "integer" },
-          "ptys": { "type": "array" }
-        },
-        "required": ["type", "ptys"]
-      }
-    },
-
-    "pty-read": {
-      "description": "Read PTY buffer by terminal ID",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "pty-read" },
-          "id": { "type": "integer" },
-          "termId": { "type": "integer" }
-        },
-        "required": ["type", "termId"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "buffer" },
-          "id": { "type": "integer" },
-          "buffer": { "type": "string" }
-        },
-        "required": ["type", "buffer"]
-      }
-    },
-
-    "pty-write": {
-      "description": "Write to PTY by terminal ID",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "pty-write" },
-          "id": { "type": "integer" },
-          "termId": { "type": "integer" },
-          "data": { "type": "string" }
-        },
-        "required": ["type", "termId", "data"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "ok" },
-          "id": { "type": "integer" }
-        },
-        "required": ["type"]
-      }
-    },
-
-    "pty-spawn": {
-      "description": "Spawn a new PTY process",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "pty-spawn" },
-          "id": { "type": "integer" },
-          "cwd": { "type": "string" },
-          "cmd": { "type": "string" },
-          "args": { "type": "array", "items": { "type": "string" } }
-        },
-        "required": ["type"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "spawned" },
-          "id": { "type": "integer" },
-          "termId": { "type": "integer" },
-          "pid": { "type": "integer" }
-        },
-        "required": ["type", "termId", "pid"]
-      }
-    },
-
-    "pty-kill": {
-      "description": "Kill a PTY process",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "pty-kill" },
-          "id": { "type": "integer" },
-          "termId": { "type": "integer" }
-        },
-        "required": ["type", "termId"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "ok" },
-          "id": { "type": "integer" }
-        },
-        "required": ["type"]
+        "required": ["type", "socketPath"]
       }
     },
 

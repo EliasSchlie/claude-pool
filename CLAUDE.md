@@ -1,10 +1,10 @@
 # Claude Pool
 
-Managed pool of Claude Code sessions — daemon, CLI, and socket API.
+Managed pool of Claude Code sessions — daemon and socket API.
 
 ## Status
 
-Early development — extracting from [Open Cockpit](https://github.com/EliasSchlie/open-cockpit). No runnable code yet.
+Early development — designing from requirements, referencing Open Cockpit (`~/projects/open-cockpit/`) for patterns. Not a 1:1 copy.
 
 ## ⚠️ Read First
 
@@ -12,17 +12,30 @@ Early development — extracting from [Open Cockpit](https://github.com/EliasSch
 
 ## Architecture
 
-- `src/` — Daemon source (pool manager, PTY daemon, API server, session discovery)
-- `bin/` — CLI entry point
+- `src/` — Daemon source (pool manager, PTY manager, API server, session discovery, attach server)
+- `schema/` — JSON Schema contract for the socket protocol (source of truth)
+- `hooks/` — Claude Code hook scripts (pool-aware via env vars)
 - `docs/` — Documentation
 
 Key docs:
 - [docs/design-principles.md](docs/design-principles.md) — **Invariants and rules** (read first)
-- [docs/architecture.md](docs/architecture.md) — Component overview, directory structure
-- [docs/protocol.md](docs/protocol.md) — Socket API specification (all commands)
-- [docs/cli.md](docs/cli.md) — CLI reference
-- [docs/extraction-plan.md](docs/extraction-plan.md) — Migration plan from Open Cockpit
+- [docs/architecture.md](docs/architecture.md) — Component overview, multi-pool access
+- [docs/protocol.md](docs/protocol.md) — Socket API summary
+- [schema/protocol.json](schema/protocol.json) — Socket API contract (machine-readable)
+- [docs/extraction-plan.md](docs/extraction-plan.md) — What to reference from Open Cockpit
+
+## Scope
+
+Claude Pool manages pools of Claude sessions: spawn, offload, restore, prompt, wait, attach.
+
+**Not in scope:** Terminal tabs (claude-term), intention files (Open Cockpit), UI (Open Cockpit), non-pool session discovery (Open Cockpit).
+
+## Related Projects
+
+- **CLI** — Separate package (`claude-pool-cli`). Thin router that resolves pool names from registry to socket connections.
+- **claude-term** — Separate project. Persistent terminal tabs for Claude sessions. Independent from claude-pool.
+- **Open Cockpit** — Electron app. Depends on claude-pool (via socket) and claude-term. Human interface.
 
 ## Origin
 
-Pool logic is being extracted from Open Cockpit (`~/projects/open-cockpit/`). See extraction plan for file mapping.
+Designed from requirements, not copied from Open Cockpit. Open Cockpit code is a reference for patterns and edge cases. See [docs/extraction-plan.md](docs/extraction-plan.md).
