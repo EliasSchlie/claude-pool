@@ -175,7 +175,7 @@ func setupCLIPool(t *testing.T, size int) *cliPool {
 	initMsg, _ := json.Marshal(Msg{"type": "init", "size": size})
 	conn.Write(append(initMsg, '\n'))
 	scanner := bufio.NewScanner(conn)
-	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	if scanner.Scan() {
 		var resp Msg
 		json.Unmarshal(scanner.Bytes(), &resp)

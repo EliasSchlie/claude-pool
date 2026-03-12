@@ -65,8 +65,8 @@ func TestSession(t *testing.T) {
 
 	t.Run("wait returns result", func(t *testing.T) {
 		resp := pool.sendLong(
-			Msg{"type": "wait", "sessionId": s1, "timeout": 120000},
-			150*time.Second,
+			Msg{"type": "wait", "sessionId": s1, "timeout": 60000},
+			75*time.Second,
 		)
 		assertNotError(t, resp)
 		assertType(t, resp, "result")
@@ -115,8 +115,8 @@ func TestSession(t *testing.T) {
 		// (Claude sessions can only access local dirs, not system dirs like /tmp)
 		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "run these bash commands: mkdir -p cwd_test_dir && cd cwd_test_dir"})
 		pool.sendLong(
-			Msg{"type": "wait", "sessionId": s1, "timeout": 120000},
-			150*time.Second,
+			Msg{"type": "wait", "sessionId": s1, "timeout": 60000},
+			75*time.Second,
 		)
 
 		info = pool.send(Msg{"type": "info", "sessionId": s1})
@@ -200,8 +200,8 @@ func TestSession(t *testing.T) {
 		assertNonEmpty(t, "followup status", strVal(resp, "status"))
 
 		waitResp := pool.sendLong(
-			Msg{"type": "wait", "sessionId": s1, "timeout": 120000},
-			150*time.Second,
+			Msg{"type": "wait", "sessionId": s1, "timeout": 60000},
+			75*time.Second,
 		)
 		assertNotError(t, waitResp)
 		assertContains(t, strVal(waitResp, "content"), "goodbye")
@@ -216,7 +216,7 @@ func TestSession(t *testing.T) {
 		s2 = strVal(startResp, "sessionId")
 
 		// Wait until s2 is actually processing before testing followup rejection
-		pool.awaitStatus(s2, "processing", 30*time.Second)
+		pool.awaitStatus(s2, "processing", 15*time.Second)
 
 		resp := pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "ignore that"})
 		assertError(t, resp)
@@ -244,8 +244,8 @@ func TestSession(t *testing.T) {
 		}
 
 		waitResp := pool.sendLong(
-			Msg{"type": "wait", "sessionId": s2, "timeout": 120000},
-			150*time.Second,
+			Msg{"type": "wait", "sessionId": s2, "timeout": 60000},
+			75*time.Second,
 		)
 		assertNotError(t, waitResp)
 		assertContains(t, strVal(waitResp, "content"), "interrupted")
@@ -277,7 +277,7 @@ func TestSession(t *testing.T) {
 		s4 := strVal(r2, "sessionId")
 
 		// No sessionId — returns the first owned session that becomes idle
-		resp := pool.sendLong(Msg{"type": "wait", "timeout": 120000}, 150*time.Second)
+		resp := pool.sendLong(Msg{"type": "wait", "timeout": 60000}, 75*time.Second)
 		assertNotError(t, resp)
 
 		sid := strVal(resp, "sessionId")
@@ -292,8 +292,8 @@ func TestSession(t *testing.T) {
 			other = s4
 		}
 		cleanup := pool.sendLong(
-			Msg{"type": "wait", "sessionId": other, "timeout": 120000},
-			150*time.Second,
+			Msg{"type": "wait", "sessionId": other, "timeout": 60000},
+			75*time.Second,
 		)
 		assertNotError(t, cleanup)
 
@@ -314,7 +314,7 @@ func TestSession(t *testing.T) {
 		assertNotError(t, startResp)
 		sid := strVal(startResp, "sessionId")
 
-		pool.awaitStatus(sid, "processing", 30*time.Second)
+		pool.awaitStatus(sid, "processing", 15*time.Second)
 
 		// 1ms timeout — guaranteed to expire before sleep finishes
 		resp := pool.sendLong(Msg{"type": "wait", "sessionId": sid, "timeout": 1}, 5*time.Second)
@@ -350,7 +350,7 @@ func TestSession(t *testing.T) {
 
 		// Restore s1 via followup so the next step can use it
 		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly the text: restored"})
-		pool.sendLong(Msg{"type": "wait", "sessionId": s1, "timeout": 120000}, 150*time.Second)
+		pool.sendLong(Msg{"type": "wait", "sessionId": s1, "timeout": 60000}, 75*time.Second)
 	})
 
 	t.Run("session prefix resolution", func(t *testing.T) {

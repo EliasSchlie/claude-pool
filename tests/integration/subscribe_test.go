@@ -44,7 +44,7 @@ func TestSubscribe(t *testing.T) {
 		// Collect events until we see idle
 		var sawCreated, sawIdle bool
 		for i := 0; i < 20; i++ {
-			ev, ok := sub.nextWithin(15 * time.Second)
+			ev, ok := sub.nextWithin(10 * time.Second)
 			if !ok {
 				break
 			}
@@ -88,7 +88,7 @@ func TestSubscribe(t *testing.T) {
 			}
 		}
 
-		pool.awaitStatus(s2, "idle", 120*time.Second)
+		pool.awaitStatus(s2, "idle", 60*time.Second)
 	})
 
 	t.Run("subscribe receives pool events", func(t *testing.T) {
@@ -139,8 +139,8 @@ func TestSubscribe(t *testing.T) {
 			t.Fatal("should not receive events for s2 with session filter")
 		}
 
-		pool.awaitStatus(s1, "idle", 120*time.Second)
-		pool.awaitStatus(s2, "idle", 120*time.Second)
+		pool.awaitStatus(s1, "idle", 60*time.Second)
+		pool.awaitStatus(s2, "idle", 60*time.Second)
 	})
 
 	t.Run("filter by events", func(t *testing.T) {
@@ -181,7 +181,7 @@ func TestSubscribe(t *testing.T) {
 
 		// Restore s2 for later steps
 		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "respond with exactly: back"})
-		pool.awaitStatus(s2, "idle", 120*time.Second)
+		pool.awaitStatus(s2, "idle", 60*time.Second)
 
 		// Archive s3 to stay within capacity
 		pool.send(Msg{"type": "archive", "sessionId": s3})
@@ -195,7 +195,7 @@ func TestSubscribe(t *testing.T) {
 		// Should only see transitions TO idle, not to processing
 		var sawIdle, sawProcessing bool
 		for i := 0; i < 10; i++ {
-			ev, ok := sub.nextWithin(15 * time.Second)
+			ev, ok := sub.nextWithin(10 * time.Second)
 			if !ok {
 				break
 			}
@@ -224,7 +224,7 @@ func TestSubscribe(t *testing.T) {
 		// Only s1→idle should arrive
 		var matched bool
 		for i := 0; i < 10; i++ {
-			ev, ok := sub.nextWithin(15 * time.Second)
+			ev, ok := sub.nextWithin(10 * time.Second)
 			if !ok {
 				break
 			}
@@ -243,8 +243,8 @@ func TestSubscribe(t *testing.T) {
 			t.Fatal("expected s1 idle event")
 		}
 
-		pool.awaitStatus(s1, "idle", 120*time.Second)
-		pool.awaitStatus(s2, "idle", 120*time.Second)
+		pool.awaitStatus(s1, "idle", 60*time.Second)
+		pool.awaitStatus(s2, "idle", 60*time.Second)
 	})
 
 	t.Run("re-subscribe replaces filters", func(t *testing.T) {
@@ -277,8 +277,8 @@ func TestSubscribe(t *testing.T) {
 			t.Fatal("expected s2 events after re-subscribe")
 		}
 
-		pool.awaitStatus(s1, "idle", 120*time.Second)
-		pool.awaitStatus(s2, "idle", 120*time.Second)
+		pool.awaitStatus(s1, "idle", 60*time.Second)
+		pool.awaitStatus(s2, "idle", 60*time.Second)
 	})
 
 	t.Run("updated event — priority change", func(t *testing.T) {
@@ -336,8 +336,8 @@ func TestSubscribe(t *testing.T) {
 
 		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "run these bash commands: mkdir -p cwd_sub_test && cd cwd_sub_test"})
 		pool.sendLong(
-			Msg{"type": "wait", "sessionId": s1, "timeout": 120000},
-			150*time.Second,
+			Msg{"type": "wait", "sessionId": s1, "timeout": 60000},
+			75*time.Second,
 		)
 
 		ev, ok := sub.nextWithin(10 * time.Second)
@@ -405,7 +405,7 @@ func TestSubscribe(t *testing.T) {
 
 		// Restore s1 for the next test
 		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: back"})
-		pool.awaitStatus(s1, "idle", 120*time.Second)
+		pool.awaitStatus(s1, "idle", 60*time.Second)
 	})
 
 	t.Run("multiple concurrent subscribers", func(t *testing.T) {
