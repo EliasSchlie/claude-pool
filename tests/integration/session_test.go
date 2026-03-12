@@ -32,6 +32,7 @@ package integration
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSession(t *testing.T) {
@@ -40,27 +41,39 @@ func TestSession(t *testing.T) {
 	var s1 string
 
 	t.Run("start returns sessionId and status", func(t *testing.T) {
-		resp := pool.startRaw("respond with exactly the text: hello world")
+		resp := pool.send(Msg{"type": "start", "prompt": "respond with exactly the text: hello world"})
 		assertNotError(t, resp)
-		if resp["type"] != "started" {
-			t.Fatalf("expected type started, got %v", resp["type"])
-		}
+		assertType(t, resp, "started")
+
 		s1 = strVal(resp, "sessionId")
 		assertNonEmpty(t, "sessionId", s1)
+
 		status := strVal(resp, "status")
-		// Should be processing or queued (processing expected with 3 slots and 1 session)
 		if status != "processing" && status != "queued" {
 			t.Fatalf("expected status processing or queued, got %q", status)
 		}
 	})
 
 	t.Run("wait returns result", func(t *testing.T) {
-		content := pool.waitIdle(s1)
-		assertContains(t, content, "hello world")
+		resp := pool.sendLong(
+			Msg{"type": "wait", "sessionId": s1, "timeout": 120000},
+			150*time.Second,
+		)
+		assertNotError(t, resp)
+		assertType(t, resp, "result")
+
+		if strVal(resp, "sessionId") != s1 {
+			t.Fatalf("wait returned wrong sessionId: got %s, want %s", strVal(resp, "sessionId"), s1)
+		}
+		assertContains(t, strVal(resp, "content"), "hello world")
 	})
 
 	t.Run("info shows session details", func(t *testing.T) {
-		info := pool.info(s1)
+		resp := pool.send(Msg{"type": "info", "sessionId": s1})
+		assertNotError(t, resp)
+		assertType(t, resp, "session")
+
+		info := parseSession(t, resp["session"])
 		if info.SessionID != s1 {
 			t.Fatalf("expected sessionId %s, got %s", s1, info.SessionID)
 		}
@@ -84,69 +97,90 @@ func TestSession(t *testing.T) {
 	})
 
 	t.Run("wait on already-idle returns immediately", func(t *testing.T) {
-		content := pool.waitIdle(s1)
-		// Should return immediately with the previous response
-		assertContains(t, content, "hello world")
+		resp := pool.sendLong(
+			Msg{"type": "wait", "sessionId": s1, "timeout": 5000},
+			10*time.Second,
+		)
+		assertNotError(t, resp)
+		assertContains(t, strVal(resp, "content"), "hello world")
 	})
 
 	t.Run("capture while idle — jsonl-short default", func(t *testing.T) {
-		content := pool.capture(s1)
-		assertNonEmpty(t, "capture content", content)
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1})
+		assertNotError(t, resp)
+		assertType(t, resp, "result")
+		assertNonEmpty(t, "capture content", strVal(resp, "content"))
 	})
 
 	t.Run("capture — jsonl-last", func(t *testing.T) {
-		content := pool.captureFormat(s1, "jsonl-last")
-		assertNonEmpty(t, "jsonl-last content", content)
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-last"})
+		assertNotError(t, resp)
+		assertNonEmpty(t, "jsonl-last content", strVal(resp, "content"))
 	})
 
 	t.Run("capture — jsonl-long", func(t *testing.T) {
-		content := pool.captureFormat(s1, "jsonl-long")
-		assertNonEmpty(t, "jsonl-long content", content)
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-long"})
+		assertNotError(t, resp)
+		assertNonEmpty(t, "jsonl-long content", strVal(resp, "content"))
 	})
 
 	t.Run("capture — jsonl-full", func(t *testing.T) {
-		content := pool.captureFormat(s1, "jsonl-full")
-		assertNonEmpty(t, "jsonl-full content", content)
+		respFull := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-full"})
+		assertNotError(t, respFull)
+		fullContent := strVal(respFull, "content")
+		assertNonEmpty(t, "jsonl-full content", fullContent)
+
 		// jsonl-full should be the longest format (complete transcript)
-		shortContent := pool.captureFormat(s1, "jsonl-short")
-		if len(content) < len(shortContent) {
+		respShort := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-short"})
+		shortContent := strVal(respShort, "content")
+		if len(fullContent) < len(shortContent) {
 			t.Fatalf("jsonl-full (%d bytes) should be >= jsonl-short (%d bytes)",
-				len(content), len(shortContent))
+				len(fullContent), len(shortContent))
 		}
 	})
 
 	t.Run("capture — buffer-last", func(t *testing.T) {
-		content := pool.captureFormat(s1, "buffer-last")
-		assertNonEmpty(t, "buffer-last content", content)
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "buffer-last"})
+		assertNotError(t, resp)
+		assertNonEmpty(t, "buffer-last content", strVal(resp, "content"))
 	})
 
 	t.Run("capture — buffer-full", func(t *testing.T) {
-		content := pool.captureFormat(s1, "buffer-full")
-		assertNonEmpty(t, "buffer-full content", content)
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "buffer-full"})
+		assertNotError(t, resp)
+		assertNonEmpty(t, "buffer-full content", strVal(resp, "content"))
 	})
 
 	t.Run("followup to idle session", func(t *testing.T) {
-		resp := pool.followup(s1, "respond with exactly the text: goodbye")
-		sid := strVal(resp, "sessionId")
-		if sid != s1 {
-			t.Fatalf("followup returned different sessionId: got %s, want %s", sid, s1)
-		}
-		// followup response should include status
-		status := strVal(resp, "status")
-		assertNonEmpty(t, "followup status", status)
+		resp := pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly the text: goodbye"})
+		assertNotError(t, resp)
+		assertType(t, resp, "started")
 
-		content := pool.waitIdle(s1)
-		assertContains(t, content, "goodbye")
+		if strVal(resp, "sessionId") != s1 {
+			t.Fatalf("followup returned different sessionId: got %s, want %s", strVal(resp, "sessionId"), s1)
+		}
+		assertNonEmpty(t, "followup status", strVal(resp, "status"))
+
+		waitResp := pool.sendLong(
+			Msg{"type": "wait", "sessionId": s1, "timeout": 120000},
+			150*time.Second,
+		)
+		assertNotError(t, waitResp)
+		assertContains(t, strVal(waitResp, "content"), "goodbye")
 	})
 
 	var s2 string
 
 	t.Run("followup on processing errors without force", func(t *testing.T) {
-		s2 = pool.start("write a 200-word essay about the history of trees in urban environments")
-		// s2 should be processing — immediately try followup
-		resp := pool.followupRaw(s2, "ignore that")
+		// Start a slow prompt
+		startResp := pool.send(Msg{"type": "start", "prompt": "write a 200-word essay about the history of trees in urban environments"})
+		assertNotError(t, startResp)
+		s2 = strVal(startResp, "sessionId")
+
+		// Immediately try followup — s2 should still be processing
+		resp := pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "ignore that"})
 		assertError(t, resp)
-		// Error message should mention processing or force
+
 		errMsg := strVal(resp, "error")
 		if !strings.Contains(strings.ToLower(errMsg), "processing") &&
 			!strings.Contains(strings.ToLower(errMsg), "force") {
@@ -155,70 +189,99 @@ func TestSession(t *testing.T) {
 	})
 
 	t.Run("followup with force on processing", func(t *testing.T) {
-		resp := pool.followupForce(s2, "respond with exactly the text: interrupted")
-		sid := strVal(resp, "sessionId")
-		if sid != s2 {
-			t.Fatalf("expected sessionId %s, got %s", s2, sid)
+		resp := pool.send(Msg{
+			"type": "followup", "sessionId": s2,
+			"prompt": "respond with exactly the text: interrupted", "force": true,
+		})
+		assertNotError(t, resp)
+		assertType(t, resp, "started")
+
+		if strVal(resp, "sessionId") != s2 {
+			t.Fatalf("expected sessionId %s, got %s", s2, strVal(resp, "sessionId"))
 		}
-		content := pool.waitIdle(s2)
-		assertContains(t, content, "interrupted")
+
+		waitResp := pool.sendLong(
+			Msg{"type": "wait", "sessionId": s2, "timeout": 120000},
+			150*time.Second,
+		)
+		assertNotError(t, waitResp)
+		assertContains(t, strVal(waitResp, "content"), "interrupted")
 	})
 
 	t.Run("wait with no sessionId — returns first idle", func(t *testing.T) {
-		s3 := pool.start("respond with exactly the text: first")
-		s4 := pool.start("respond with exactly the text: second")
+		// Start two sessions
+		r1 := pool.send(Msg{"type": "start", "prompt": "respond with exactly the text: first"})
+		assertNotError(t, r1)
+		s3 := strVal(r1, "sessionId")
 
-		sid, content := pool.waitAny()
-		// Should be one of the two
+		r2 := pool.send(Msg{"type": "start", "prompt": "respond with exactly the text: second"})
+		assertNotError(t, r2)
+		s4 := strVal(r2, "sessionId")
+
+		// Wait for any
+		resp := pool.sendLong(Msg{"type": "wait", "timeout": 120000}, 150*time.Second)
+		assertNotError(t, resp)
+
+		sid := strVal(resp, "sessionId")
 		if sid != s3 && sid != s4 {
 			t.Fatalf("waitAny returned unknown session %s (expected %s or %s)", sid, s3, s4)
 		}
-		assertNonEmpty(t, "waitAny content", content)
+		assertNonEmpty(t, "waitAny content", strVal(resp, "content"))
 
 		// Wait for the other one too (cleanup)
 		other := s3
 		if sid == s3 {
 			other = s4
 		}
-		pool.waitIdle(other)
+		cleanup := pool.sendLong(
+			Msg{"type": "wait", "sessionId": other, "timeout": 120000},
+			150*time.Second,
+		)
+		assertNotError(t, cleanup)
 	})
 
 	t.Run("wait with no sessionId — errors if none busy", func(t *testing.T) {
 		// All sessions should be idle at this point
-		resp := pool.waitWithTimeout("", 5000)
+		resp := pool.sendLong(Msg{"type": "wait", "timeout": 5000}, 10*time.Second)
 		assertError(t, resp)
 	})
 
 	t.Run("wait with timeout", func(t *testing.T) {
-		sid := pool.start("write a very long and detailed 500-word essay about quantum computing")
+		startResp := pool.send(Msg{"type": "start", "prompt": "write a very long and detailed 500-word essay about quantum computing"})
+		assertNotError(t, startResp)
+		sid := strVal(startResp, "sessionId")
+
 		// Wait with 1ms timeout — should expire immediately
-		resp := pool.waitWithTimeout(sid, 1)
+		resp := pool.sendLong(Msg{"type": "wait", "sessionId": sid, "timeout": 1}, 5*time.Second)
 		assertError(t, resp)
-		errMsg := strVal(resp, "error")
-		assertContains(t, errMsg, "timeout")
+		assertContains(t, strVal(resp, "error"), "timeout")
+
 		// Let it finish so we don't leave a processing session
-		pool.waitIdle(sid)
+		pool.sendLong(Msg{"type": "wait", "sessionId": sid, "timeout": 120000}, 150*time.Second)
 	})
 
 	t.Run("input sends raw bytes", func(t *testing.T) {
 		// s1 is idle — input should succeed
-		pool.input(s1, "\x1b") // Escape — harmless on idle
+		resp := pool.send(Msg{"type": "input", "sessionId": s1, "data": "\x1b"})
+		assertNotError(t, resp)
+		assertType(t, resp, "ok")
 
 		// Offload s1, then try input — should error
-		pool.offload(s1)
-		resp := pool.send(Msg{"type": "input", "sessionId": s1, "data": "\x1b"})
+		offloadResp := pool.send(Msg{"type": "offload", "sessionId": s1})
+		assertNotError(t, offloadResp)
+
+		resp = pool.send(Msg{"type": "input", "sessionId": s1, "data": "\x1b"})
 		assertError(t, resp)
 
 		// Restore s1 for the next test
-		pool.followup(s1, "respond with exactly the text: restored")
-		pool.waitIdle(s1)
+		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly the text: restored"})
+		pool.sendLong(Msg{"type": "wait", "sessionId": s1, "timeout": 120000}, 150*time.Second)
 	})
 
 	t.Run("session prefix resolution", func(t *testing.T) {
-		// Use first 3 chars of s1 as prefix
 		prefix := s1[:3]
-		resp := pool.infoRaw(prefix)
-		// If it resolves uniquely, should succeed
+		resp := pool.send(Msg{"type": "info", "sessionId": prefix})
+
 		if resp["type"] == "error" {
 			errMsg := strVal(resp, "error")
 			if strings.Contains(strings.ToLower(errMsg), "ambiguous") {
@@ -226,6 +289,8 @@ func TestSession(t *testing.T) {
 			}
 			t.Fatalf("prefix resolution failed: %s", errMsg)
 		}
+
+		assertType(t, resp, "session")
 		session := parseSession(t, resp["session"])
 		if session.SessionID != s1 {
 			t.Fatalf("prefix resolved to wrong session: got %s, want %s",

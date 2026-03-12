@@ -2,22 +2,15 @@ package integration
 
 // helpers_test.go — Shared test infrastructure
 //
-// Provides:
-//   - setupPool(t, size): starts a daemon with a temp pool directory, configures
-//     --model haiku and --dangerously-skip-permissions, calls init with the given
-//     size, registers t.Cleanup to destroy+kill daemon. Returns a *testPool.
-//   - testPool: wraps a socket connection with typed methods for every protocol
-//     command. Methods send JSON, parse the response, and fail the test on errors.
-//   - Assertion helpers: assertStatus, assertError, assertSessionCount, etc.
+// Keeps only what genuinely reduces noise without hiding protocol details:
+//   - setupPool: complex setup/teardown (build binary, start daemon, connect, init)
+//   - send / sendOn: socket boilerplate (marshal, write, read, unmarshal)
+//   - parseSession / parseSessions: JSON map → typed struct
+//   - subscription: subscribe has different mechanics (persistent stream)
+//   - assertion helpers: assertStatus, assertError, assertContains, etc.
 //
-// Socket communication:
-//   - newConn(socketPath) opens a new connection (for subscribe, concurrent clients)
-//   - pool.send(msg) → response: raw JSON round-trip on the default connection
-//   - pool.sendOn(conn, msg) → response: raw JSON round-trip on a specific connection
-//
-// Timeouts:
-//   - waitIdle(sessionId): calls wait with a 2-minute timeout, fails test if exceeded
-//   - All operations have a default 30s timeout for non-wait commands
+// Tests use pool.send(Msg{...}) directly for all protocol commands.
+// Every request and response is visible in the test — no hidden abstractions.
 
 import (
 	"bufio"
@@ -37,9 +30,9 @@ import (
 // JSON message types
 // --------------------------------------------------------------------
 
-// Msg is a generic JSON message for the protocol. We use map[string]any for
-// flexibility — the protocol has many command shapes and we don't want to
-// maintain parallel struct hierarchies in test code.
+// Msg is a generic JSON message. We use map[string]any for flexibility —
+// the protocol has many command shapes and we don't want parallel struct
+// hierarchies in test code.
 type Msg = map[string]any
 
 // SessionInfo holds parsed session fields from info/ls responses.
@@ -81,6 +74,19 @@ func parseSession(t *testing.T, raw any) SessionInfo {
 		}
 	}
 	return s
+}
+
+func parseSessions(t *testing.T, resp Msg) []SessionInfo {
+	t.Helper()
+	raw, ok := resp["sessions"].([]any)
+	if !ok {
+		t.Fatalf("expected sessions array, got %T", resp["sessions"])
+	}
+	var sessions []SessionInfo
+	for _, r := range raw {
+		sessions = append(sessions, parseSession(t, r))
+	}
+	return sessions
 }
 
 func strVal(m map[string]any, key string) string {
@@ -157,11 +163,21 @@ func setupPool(t *testing.T, size int) *testPool {
 		t.Fatalf("failed to start daemon: %v", err)
 	}
 
-	// Wait for socket to appear
+	// Wait for socket to appear (fast-fail if daemon exits early)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(socketPath); err == nil {
 			break
+		}
+		// Check if daemon died
+		select {
+		case <-func() chan struct{} {
+			ch := make(chan struct{})
+			go func() { daemon.Wait(); close(ch) }()
+			return ch
+		}():
+			t.Fatalf("daemon exited before socket appeared")
+		default:
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -191,7 +207,6 @@ func setupPool(t *testing.T, size int) *testPool {
 		// Best-effort destroy
 		p.sendRaw(Msg{"type": "destroy", "confirm": true})
 		p.conn.Close()
-		// Kill daemon if still running
 		daemon.Process.Kill()
 		daemon.Wait()
 	})
@@ -228,17 +243,28 @@ func findRepoRoot(t *testing.T) string {
 // Socket communication
 // --------------------------------------------------------------------
 
+// send sends a JSON message on the default connection and reads the response.
+// Auto-assigns an incrementing id field.
 func (p *testPool) send(msg Msg) Msg {
 	p.t.Helper()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
 	p.nextID++
 	msg["id"] = p.nextID
-	return p.sendOnLocked(p.conn, p.scanner, msg)
+	return p.doSend(p.conn, p.scanner, msg, 30*time.Second)
 }
 
-// sendRaw sends without expecting a response (best-effort).
+// sendLong sends a message with a custom read timeout (for long-polling commands like wait).
+func (p *testPool) sendLong(msg Msg, readTimeout time.Duration) Msg {
+	p.t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.nextID++
+	msg["id"] = p.nextID
+	return p.doSend(p.conn, p.scanner, msg, readTimeout)
+}
+
+// sendRaw sends without expecting a response (best-effort, for cleanup).
 func (p *testPool) sendRaw(msg Msg) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -247,7 +273,7 @@ func (p *testPool) sendRaw(msg Msg) {
 	p.conn.Write(data)
 }
 
-func (p *testPool) sendOnLocked(conn net.Conn, scanner *bufio.Scanner, msg Msg) Msg {
+func (p *testPool) doSend(conn net.Conn, scanner *bufio.Scanner, msg Msg, readTimeout time.Duration) Msg {
 	p.t.Helper()
 
 	data, err := json.Marshal(msg)
@@ -261,7 +287,7 @@ func (p *testPool) sendOnLocked(conn net.Conn, scanner *bufio.Scanner, msg Msg) 
 		p.t.Fatalf("write: %v", err)
 	}
 
-	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(readTimeout))
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {
 			p.t.Fatalf("read: %v", err)
@@ -277,6 +303,7 @@ func (p *testPool) sendOnLocked(conn net.Conn, scanner *bufio.Scanner, msg Msg) 
 }
 
 // newConn opens a separate socket connection (for subscribe, concurrent clients).
+// Registered for cleanup automatically.
 func (p *testPool) newConn() (net.Conn, *bufio.Scanner) {
 	p.t.Helper()
 	conn, err := net.Dial("unix", p.socketPath)
@@ -294,305 +321,7 @@ func (p *testPool) sendOn(conn net.Conn, scanner *bufio.Scanner, msg Msg) Msg {
 	defer p.mu.Unlock()
 	p.nextID++
 	msg["id"] = p.nextID
-	return p.sendOnLocked(conn, scanner, msg)
-}
-
-// --------------------------------------------------------------------
-// Protocol commands — success path (fail test on error)
-// --------------------------------------------------------------------
-
-func (p *testPool) ping() Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{"type": "ping"}), "pong")
-}
-
-func (p *testPool) initPool(size int) Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{"type": "init", "size": size}), "pool")
-}
-
-func (p *testPool) initNoRestore(size int) Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{"type": "init", "size": size, "noRestore": true}), "pool")
-}
-
-func (p *testPool) resize(size int) Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{"type": "resize", "size": size}), "pool")
-}
-
-func (p *testPool) health() Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{"type": "health"}), "health")
-}
-
-func (p *testPool) destroy() Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{"type": "destroy", "confirm": true}), "ok")
-}
-
-func (p *testPool) config() Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{"type": "config"}), "config")
-}
-
-func (p *testPool) configSet(fields Msg) Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{"type": "config", "set": fields}), "config")
-}
-
-func (p *testPool) start(prompt string) string {
-	p.t.Helper()
-	resp := p.expectOK(p.send(Msg{"type": "start", "prompt": prompt}), "started")
-	sid := strVal(resp, "sessionId")
-	if sid == "" {
-		p.t.Fatal("start: empty sessionId")
-	}
-	return sid
-}
-
-func (p *testPool) startWithParent(prompt, parentID string) string {
-	p.t.Helper()
-	resp := p.expectOK(p.send(Msg{"type": "start", "prompt": prompt, "parentId": parentID}), "started")
-	sid := strVal(resp, "sessionId")
-	if sid == "" {
-		p.t.Fatal("start: empty sessionId")
-	}
-	return sid
-}
-
-func (p *testPool) startRaw(prompt string) Msg {
-	p.t.Helper()
-	return p.send(Msg{"type": "start", "prompt": prompt})
-}
-
-func (p *testPool) followup(sessionID, prompt string) Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{
-		"type": "followup", "sessionId": sessionID, "prompt": prompt,
-	}), "started")
-}
-
-func (p *testPool) followupForce(sessionID, prompt string) Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{
-		"type": "followup", "sessionId": sessionID, "prompt": prompt, "force": true,
-	}), "started")
-}
-
-func (p *testPool) followupRaw(sessionID, prompt string) Msg {
-	p.t.Helper()
-	return p.send(Msg{"type": "followup", "sessionId": sessionID, "prompt": prompt})
-}
-
-// wait calls the wait command with a 2-minute timeout.
-func (p *testPool) wait(sessionID string) Msg {
-	p.t.Helper()
-	return p.waitWithTimeout(sessionID, 120000)
-}
-
-func (p *testPool) waitWithTimeout(sessionID string, timeoutMs int) Msg {
-	p.t.Helper()
-	msg := Msg{"type": "wait", "timeout": timeoutMs}
-	if sessionID != "" {
-		msg["sessionId"] = sessionID
-	}
-	// Use a longer read deadline for wait (it long-polls)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.nextID++
-	msg["id"] = p.nextID
-
-	data, _ := json.Marshal(msg)
-	data = append(data, '\n')
-
-	p.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-	if _, err := p.conn.Write(data); err != nil {
-		p.t.Fatalf("write: %v", err)
-	}
-
-	waitDuration := time.Duration(timeoutMs+30000) * time.Millisecond
-	p.conn.SetReadDeadline(time.Now().Add(waitDuration))
-	if !p.scanner.Scan() {
-		if err := p.scanner.Err(); err != nil {
-			p.t.Fatalf("wait read: %v", err)
-		}
-		p.t.Fatal("connection closed during wait")
-	}
-
-	var resp Msg
-	if err := json.Unmarshal(p.scanner.Bytes(), &resp); err != nil {
-		p.t.Fatalf("unmarshal wait response: %v", err)
-	}
-	return resp
-}
-
-// waitIdle waits for a specific session to become idle. Fails test on error/timeout.
-func (p *testPool) waitIdle(sessionID string) string {
-	p.t.Helper()
-	resp := p.wait(sessionID)
-	if resp["type"] == "error" {
-		p.t.Fatalf("waitIdle(%s): %v", sessionID, resp["error"])
-	}
-	return strVal(resp, "content")
-}
-
-// waitAny waits for any owned busy session. Returns (sessionId, content).
-func (p *testPool) waitAny() (string, string) {
-	p.t.Helper()
-	resp := p.wait("")
-	if resp["type"] == "error" {
-		p.t.Fatalf("waitAny: %v", resp["error"])
-	}
-	return strVal(resp, "sessionId"), strVal(resp, "content")
-}
-
-func (p *testPool) waitFormat(sessionID, format string) string {
-	p.t.Helper()
-	msg := Msg{"type": "wait", "sessionId": sessionID, "format": format, "timeout": 120000}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.nextID++
-	msg["id"] = p.nextID
-
-	data, _ := json.Marshal(msg)
-	data = append(data, '\n')
-
-	p.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-	p.conn.Write(data)
-	p.conn.SetReadDeadline(time.Now().Add(150 * time.Second))
-	if !p.scanner.Scan() {
-		p.t.Fatalf("waitFormat read failed: %v", p.scanner.Err())
-	}
-	var resp Msg
-	json.Unmarshal(p.scanner.Bytes(), &resp)
-	if resp["type"] == "error" {
-		p.t.Fatalf("waitFormat(%s, %s): %v", sessionID, format, resp["error"])
-	}
-	return strVal(resp, "content")
-}
-
-func (p *testPool) capture(sessionID string) string {
-	p.t.Helper()
-	resp := p.expectOK(p.send(Msg{"type": "capture", "sessionId": sessionID}), "result")
-	return strVal(resp, "content")
-}
-
-func (p *testPool) captureFormat(sessionID, format string) string {
-	p.t.Helper()
-	resp := p.expectOK(p.send(Msg{
-		"type": "capture", "sessionId": sessionID, "format": format,
-	}), "result")
-	return strVal(resp, "content")
-}
-
-func (p *testPool) captureRaw(sessionID, format string) Msg {
-	p.t.Helper()
-	return p.send(Msg{"type": "capture", "sessionId": sessionID, "format": format})
-}
-
-func (p *testPool) input(sessionID, data string) Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{
-		"type": "input", "sessionId": sessionID, "data": data,
-	}), "ok")
-}
-
-func (p *testPool) offload(sessionID string) Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{"type": "offload", "sessionId": sessionID}), "ok")
-}
-
-func (p *testPool) ls() []SessionInfo {
-	p.t.Helper()
-	resp := p.expectOK(p.send(Msg{"type": "ls"}), "sessions")
-	return parseSessions(p.t, resp)
-}
-
-func (p *testPool) lsAll() []SessionInfo {
-	p.t.Helper()
-	resp := p.expectOK(p.send(Msg{"type": "ls", "all": true}), "sessions")
-	return parseSessions(p.t, resp)
-}
-
-func (p *testPool) lsTree() []SessionInfo {
-	p.t.Helper()
-	resp := p.expectOK(p.send(Msg{"type": "ls", "tree": true}), "sessions")
-	return parseSessions(p.t, resp)
-}
-
-func (p *testPool) lsArchived() []SessionInfo {
-	p.t.Helper()
-	resp := p.expectOK(p.send(Msg{"type": "ls", "archived": true}), "sessions")
-	return parseSessions(p.t, resp)
-}
-
-func (p *testPool) info(sessionID string) SessionInfo {
-	p.t.Helper()
-	resp := p.expectOK(p.send(Msg{"type": "info", "sessionId": sessionID}), "session")
-	return parseSession(p.t, resp["session"])
-}
-
-func (p *testPool) infoRaw(sessionID string) Msg {
-	p.t.Helper()
-	return p.send(Msg{"type": "info", "sessionId": sessionID})
-}
-
-func (p *testPool) pin(sessionID string) (string, string) {
-	p.t.Helper()
-	resp := p.expectOK(p.send(Msg{"type": "pin", "sessionId": sessionID}), "ok")
-	return strVal(resp, "sessionId"), strVal(resp, "status")
-}
-
-func (p *testPool) pinFresh() (string, string) {
-	p.t.Helper()
-	resp := p.expectOK(p.send(Msg{"type": "pin"}), "ok")
-	return strVal(resp, "sessionId"), strVal(resp, "status")
-}
-
-func (p *testPool) unpin(sessionID string) Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{"type": "unpin", "sessionId": sessionID}), "ok")
-}
-
-func (p *testPool) stop(sessionID string) Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{"type": "stop", "sessionId": sessionID}), "ok")
-}
-
-func (p *testPool) archive(sessionID string) Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{"type": "archive", "sessionId": sessionID}), "ok")
-}
-
-func (p *testPool) archiveRecursive(sessionID string) Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{
-		"type": "archive", "sessionId": sessionID, "recursive": true,
-	}), "ok")
-}
-
-func (p *testPool) archiveRaw(sessionID string) Msg {
-	p.t.Helper()
-	return p.send(Msg{"type": "archive", "sessionId": sessionID})
-}
-
-func (p *testPool) unarchive(sessionID string) Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{"type": "unarchive", "sessionId": sessionID}), "ok")
-}
-
-func (p *testPool) setPriority(sessionID string, priority float64) Msg {
-	p.t.Helper()
-	return p.expectOK(p.send(Msg{
-		"type": "set-priority", "sessionId": sessionID, "priority": priority,
-	}), "ok")
-}
-
-func (p *testPool) attach(sessionID string) string {
-	p.t.Helper()
-	resp := p.expectOK(p.send(Msg{"type": "attach", "sessionId": sessionID}), "attached")
-	return strVal(resp, "socketPath")
+	return p.doSend(conn, scanner, msg, 30*time.Second)
 }
 
 // --------------------------------------------------------------------
@@ -605,12 +334,12 @@ type subscription struct {
 	scanner *bufio.Scanner
 }
 
+// subscribe opens a persistent event stream on a new connection.
 func (p *testPool) subscribe(opts Msg) *subscription {
 	p.t.Helper()
 	opts["type"] = "subscribe"
 	conn, scanner := p.newConn()
 
-	// Send subscribe request
 	data, _ := json.Marshal(opts)
 	data = append(data, '\n')
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
@@ -650,7 +379,7 @@ func (s *subscription) next() Msg {
 	return event
 }
 
-// nextWithin reads the next event within a custom timeout.
+// nextWithin reads the next event within a custom timeout. Returns false on timeout.
 func (s *subscription) nextWithin(timeout time.Duration) (Msg, bool) {
 	s.t.Helper()
 	s.conn.SetReadDeadline(time.Now().Add(timeout))
@@ -664,7 +393,7 @@ func (s *subscription) nextWithin(timeout time.Duration) (Msg, bool) {
 	return event, true
 }
 
-// drain reads all pending events (non-blocking drain with short timeout).
+// drain reads all pending events (non-blocking with short timeout).
 func (s *subscription) drain() []Msg {
 	s.t.Helper()
 	var events []Msg
@@ -681,17 +410,6 @@ func (s *subscription) drain() []Msg {
 // --------------------------------------------------------------------
 // Assertion helpers
 // --------------------------------------------------------------------
-
-func (p *testPool) expectOK(resp Msg, expectedType string) Msg {
-	p.t.Helper()
-	if resp["type"] == "error" {
-		p.t.Fatalf("expected %s, got error: %v", expectedType, resp["error"])
-	}
-	if resp["type"] != expectedType {
-		p.t.Fatalf("expected type %q, got %q: %v", expectedType, resp["type"], resp)
-	}
-	return resp
-}
 
 func assertStatus(t *testing.T, s SessionInfo, expected string) {
 	t.Helper()
@@ -711,6 +429,13 @@ func assertNotError(t *testing.T, resp Msg) {
 	t.Helper()
 	if resp["type"] == "error" {
 		t.Fatalf("unexpected error: %v", resp["error"])
+	}
+}
+
+func assertType(t *testing.T, resp Msg, expected string) {
+	t.Helper()
+	if resp["type"] != expected {
+		t.Fatalf("expected type %q, got %q: %v", expected, resp["type"], resp)
 	}
 }
 
@@ -746,19 +471,6 @@ func findSession(sessions []SessionInfo, id string) (SessionInfo, bool) {
 		}
 	}
 	return SessionInfo{}, false
-}
-
-func parseSessions(t *testing.T, resp Msg) []SessionInfo {
-	t.Helper()
-	raw, ok := resp["sessions"].([]any)
-	if !ok {
-		t.Fatalf("expected sessions array, got %T", resp["sessions"])
-	}
-	var sessions []SessionInfo
-	for _, r := range raw {
-		sessions = append(sessions, parseSession(t, r))
-	}
-	return sessions
 }
 
 func truncate(s string, maxLen int) string {
