@@ -27,20 +27,16 @@ import (
 var (
 	daemonBinPath string
 	cliBinPath    string
+	runDir        string
 )
 
 func TestMain(m *testing.M) {
-	tmpDir, err := os.MkdirTemp("", "claude-pool-cli-test-*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
-		os.Exit(1)
-	}
-
 	repoRoot := testutil.FindRepoRoot()
+	runDir = testutil.SetupRunDir(repoRoot, "cli")
 
 	// Build daemon and CLI in parallel — they're independent
-	daemonBinPath = filepath.Join(tmpDir, "claude-pool")
-	cliBinPath = filepath.Join(tmpDir, "claude-pool-cli")
+	daemonBinPath = filepath.Join(runDir, "claude-pool")
+	cliBinPath = filepath.Join(runDir, "claude-pool-cli")
 
 	type buildResult struct {
 		name string
@@ -65,14 +61,17 @@ func TestMain(m *testing.M) {
 	for i := 0; i < 2; i++ {
 		r := <-ch
 		if r.err != nil {
-			os.RemoveAll(tmpDir)
 			fmt.Fprintf(os.Stderr, "failed to build %s: %v\n%s\n", r.name, r.err, r.out)
 			os.Exit(1)
 		}
 	}
 
 	code := m.Run()
-	os.RemoveAll(tmpDir)
+	if code == 0 {
+		os.RemoveAll(runDir)
+	} else {
+		fmt.Fprintf(os.Stderr, "\n=== Test artifacts preserved at: %s ===\n", runDir)
+	}
 	os.Exit(code)
 }
 
@@ -98,7 +97,10 @@ type cmdResult struct {
 func setupCLIPool(t *testing.T, size int) *cliPool {
 	t.Helper()
 
-	poolDir := t.TempDir()
+	poolDir := filepath.Join(runDir, t.Name())
+	if err := os.MkdirAll(poolDir, 0755); err != nil {
+		t.Fatalf("failed to create pool dir: %v", err)
+	}
 	socketPath := filepath.Join(poolDir, "api.sock")
 	poolName := "test"
 
@@ -114,7 +116,10 @@ func setupCLIPool(t *testing.T, size int) *cliPool {
 	}
 
 	// Write registry so CLI can resolve pool name → socket
-	registryDir := t.TempDir()
+	registryDir := filepath.Join(poolDir, "registry")
+	if err := os.MkdirAll(registryDir, 0755); err != nil {
+		t.Fatalf("failed to create registry dir: %v", err)
+	}
 	registry := Msg{
 		poolName: Msg{"socket": socketPath},
 	}
