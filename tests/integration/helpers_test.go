@@ -333,10 +333,21 @@ func (p *testPool) awaitSocketGone(timeout time.Duration) {
 // awaitStatus subscribes to status events for a specific session and waits
 // until it reaches the target status. Uses subscribe rather than polling —
 // same as a production client would.
+//
+// Subscribes BEFORE checking current state to avoid the TOCTOU race where
+// a transition fires between the check and the subscribe registration.
 func (p *testPool) awaitStatus(sessionID, target string, timeout time.Duration) SessionInfo {
 	p.t.Helper()
 
-	// Check immediately — might already be at target
+	// Subscribe first — ensures no events are missed between check and listen
+	sub := p.subscribe(Msg{
+		"sessions": []string{sessionID},
+		"events":   []string{"status"},
+		"statuses": []string{target},
+	})
+	defer sub.close()
+
+	// Now check — if already at target, done
 	resp := p.send(Msg{"type": "info", "sessionId": sessionID})
 	if resp["type"] == "error" {
 		p.t.Fatalf("awaitStatus info failed: %v", resp["error"])
@@ -345,14 +356,6 @@ func (p *testPool) awaitStatus(sessionID, target string, timeout time.Duration) 
 	if info.Status == target {
 		return info
 	}
-
-	// Subscribe to status events for this specific session
-	sub := p.subscribe(Msg{
-		"sessions": []string{sessionID},
-		"events":   []string{"status"},
-		"statuses": []string{target},
-	})
-	defer sub.close()
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -381,19 +384,19 @@ func (p *testPool) awaitStatus(sessionID, target string, timeout time.Duration) 
 // awaitPoolSize subscribes to pool events and waits until the pool reaches
 // the target slot count. Uses subscribe rather than polling — same as a
 // production client would.
+//
+// Subscribes BEFORE checking current state to avoid the TOCTOU race.
 func (p *testPool) awaitPoolSize(target int, timeout time.Duration) {
 	p.t.Helper()
 
-	// Check immediately — might already be at target
+	sub := p.subscribe(Msg{"events": []string{"pool"}})
+	defer sub.close()
+
 	resp := p.send(Msg{"type": "health"})
 	health, _ := resp["health"].(map[string]any)
 	if int(numVal(health, "size")) == target {
 		return
 	}
-
-	// Subscribe to pool events (resize, init, etc.) on a dedicated connection
-	sub := p.subscribe(Msg{"events": []string{"pool"}})
-	defer sub.close()
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -412,8 +415,13 @@ func (p *testPool) awaitPoolSize(target int, timeout time.Duration) {
 
 // awaitIdleCount subscribes to status events and waits until at least n
 // sessions are idle. Uses subscribe rather than polling.
+//
+// Subscribes BEFORE checking current state to avoid the TOCTOU race.
 func (p *testPool) awaitIdleCount(n int, timeout time.Duration) {
 	p.t.Helper()
+
+	sub := p.subscribe(Msg{"events": []string{"status"}, "statuses": []string{"idle"}})
+	defer sub.close()
 
 	resp := p.send(Msg{"type": "health"})
 	health, _ := resp["health"].(map[string]any)
@@ -421,10 +429,6 @@ func (p *testPool) awaitIdleCount(n int, timeout time.Duration) {
 	if int(numVal(counts, "idle")) >= n {
 		return
 	}
-
-	// Subscribe to idle transitions — each event means a session just became idle
-	sub := p.subscribe(Msg{"events": []string{"status"}, "statuses": []string{"idle"}})
-	defer sub.close()
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
