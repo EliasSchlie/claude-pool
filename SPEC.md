@@ -18,6 +18,8 @@ These are non-negotiable. Code that violates an invariant is a bug.
 
 6. **Sessions have owners.** Every session tracks its parent (the session or external caller that spawned it). By default, API queries return only sessions owned by the caller (direct children + their descendants). An explicit flag (`all: true`) shows all pool sessions. This prevents sessions from interfering with each other's sub-agents.
 
+7. **The consumer API is session-oriented.** Slots are an internal implementation detail. No consumer API command exposes slot indices, slot states, or slot-level operations. Clients think in sessions — the pool manages slots transparently.
+
 ---
 
 ## Session States
@@ -26,14 +28,41 @@ These are non-negotiable. Code that violates an invariant is a bug.
 |-------|---------|
 | `queued` | Waiting for a slot |
 | `idle` | Finished processing, waiting for input |
-| `typing` | Un-submitted input detected in terminal buffer |
+| `typing` | Un-submitted input detected in a fresh slot's terminal buffer |
 | `processing` | Claude is working |
-| `offloaded` | Slot freed, can be resumed |
-| `dead` | Process died |
-| `error` | Slot error (crash during startup, etc.) |
+| `offloaded` | Not in a slot, can be resumed |
+| `error` | Repeatedly failed to load (broken session) |
 | `archived` | Done. Hidden from `ls` by default. Auto-cleaned after 30 days. |
 
 Offloaded sessions can become `queued` again when targeted by `followup` or `pin`.
+
+When a session's process dies, the session transitions to `offloaded` (not a separate state — the JSONL transcript still exists). The error is logged. On next `followup` or `pin`, the session is loaded normally.
+
+When a session fails to load, the error is logged and loading is retried automatically. After repeated failures (implementation decides the threshold), the session is marked `error`. Error sessions are visible but cannot be loaded without explicit action.
+
+---
+
+## Slot States (internal)
+
+Slots are the physical resources that host sessions. Consumers never interact with slots directly (invariant #7).
+
+| State | Meaning |
+|-------|---------|
+| `fresh` | Pre-warmed Claude process, never prompted. Ready for immediate use. |
+| `loading` | Starting a new session or resuming an offloaded one. |
+| `live` | Hosting an active session (idle, typing, or processing). |
+| `error` | Crashed during startup or loading. Recycled automatically (killed, replaced with fresh). |
+
+---
+
+## Eviction Policy
+
+When a slot is needed and none are free:
+
+1. Use a `fresh` slot first (no session to displace).
+2. If no fresh slots, offload the lowest-priority idle session. Within the same priority, offload the session that has been idle the longest (LRU).
+3. Pinned sessions are never evicted. If all idle sessions are pinned, the request queues until a slot frees up naturally.
+4. Processing sessions are never interrupted for eviction — they finish naturally.
 
 ---
 
@@ -50,7 +79,7 @@ Commands that return session output (`wait`, `capture`) accept a `format` field:
 | `buffer-last` | Terminal buffer since last user message. | Yes |
 | `buffer-full` | Full terminal scrollback, ANSI stripped. | Yes |
 
-JSONL formats read from Claude Code's transcript files (via Claude UUID). Work for any session with a known UUID — including offloaded, dead, archived. Buffer formats require a live terminal (idle, typing, processing only).
+JSONL formats read from Claude Code's transcript files (via Claude UUID). Work for any session with a known UUID — including offloaded and archived. Buffer formats require a live terminal (idle, typing, processing only).
 
 Empty content is valid — if a session was stopped before producing output, JSONL formats might return an empty string.
 
@@ -71,8 +100,8 @@ Transport: Unix domain socket, newline-delimited JSON. See [docs/protocol.md](do
 
 ### Session Lifecycle
 
-- **`start`** — Send a prompt to a new session. Returns an internal ID immediately. Claims a fresh slot if available, offloads an idle session if needed, or queues the request FIFO.
-- **`followup`** — Send a follow-up prompt to an existing session. Auto-resumes offloaded/dead/error sessions (queues for loading). Errors on busy sessions unless `force: true`.
+- **`start`** — Send a prompt to a new session. Returns an internal ID immediately. Claims a fresh slot if available, evicts an idle session if needed (see Eviction Policy), or queues the request FIFO.
+- **`followup`** — Send a follow-up prompt to an existing session. Auto-resumes offloaded sessions (queues for loading). Errors on busy sessions unless `force: true`.
 - **`stop`** — Interrupt or cancel. **Synchronous** — session is guaranteed idle (or removed) when `ok` returns. Cancels queued requests, sends Ctrl+C to processing sessions.
 - **`offload`** — Manually free a session's slot. Only works on idle sessions. Unpins if pinned.
 - **`archive`** — Mark a session as done. Stops live sessions first. Errors if unarchived children exist unless `recursive: true`. Auto-cleaned after 30 days.
@@ -91,8 +120,26 @@ Transport: Unix domain socket, newline-delimited JSON. See [docs/protocol.md](do
 - **`unpin`** — Remove pin, make session eligible for eviction again.
 - **`set-priority`** — Set eviction priority (default 0, lower = evicted first). Does NOT affect queue order or processing speed.
 - **`input`** — Send raw bytes to a session's PTY. No timing dance — use `followup` for safe prompt delivery.
-- **`attach`** — Get a temporary Unix socket for raw PTY I/O (live terminal streaming). Only works for live sessions. Multiple clients can attach simultaneously.
+- **`attach`** — Get a temporary Unix socket for raw PTY I/O (live terminal streaming). Only works for live sessions. Multiple clients can attach simultaneously. Attaching does not affect other operations — all API commands continue to work normally on attached sessions.
 
 ### Events
 
-- **`subscribe`** — Open a persistent event stream. Filterable by session, event type, status transition, or property change. Re-subscribing on the same connection replaces filters. Event types: `status`, `created`, `updated` (cwd/priority/pinned), `archived`, `unarchived`, `pool`.
+- **`subscribe`** — Open a persistent event stream. Filterable by session, event type, status transition, or property change. Re-subscribing on the same connection replaces filters.
+
+---
+
+## CLI
+
+The CLI is a separate package — a thin router that resolves pool names to socket connections. Each API command maps 1:1 to a CLI subcommand.
+
+- `--pool <name>` selects the pool (default: `default`).
+- Commands that send a prompt (`start`, `followup`) accept `--block`, which sends the command then automatically waits and prints the output.
+
+---
+
+## Debug API
+
+Separate from the consumer API. Provides direct access to internal pool state for debugging:
+
+- Attach to specific slots (by index) for raw PTY access.
+- View slot states and slot↔session mappings.

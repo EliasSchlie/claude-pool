@@ -18,7 +18,7 @@ Design decisions and implementation details. Invariants and API surface live in 
 8. **Write locking prevents races.** All state mutations go through a mutex.
 9. **Pool config is the single source for spawn settings.** `config.json` drives all spawn operations. No per-command flag overrides.
 10. **Requests queue when slots are full.** FIFO. Internal session ID assigned immediately.
-11. **Sessions are loaded, offloaded, or archived.** Dead/error treated like offloaded — `followup` auto-resumes.
+11. **Sessions are loaded, offloaded, or archived.** Process death → session becomes offloaded (error logged). Repeated load failures → session marked `error`. `followup` auto-resumes offloaded sessions.
 12. **Attach requires a live session.** Pin → wait → attach for offloaded sessions.
 13. **Automatic slot management.** LRU eviction when slots needed. No bulk "clean" command.
 14. **Session priority affects eviction order.** Lower = evicted first, then oldest within same priority. Does not affect queue order or processing speed.
@@ -39,9 +39,9 @@ Design decisions and implementation details. Invariants and API surface live in 
 
 ---
 
-## Internal States (not exposed via API)
+## Slot States (internal)
 
-`fresh` (pre-warmed slot, never prompted) and `starting` (Claude process spawning) are slot management details — clients see `queued` until the session is ready.
+See [SPEC.md](../SPEC.md) for the slot state table. Slots are internal — consumers never see them (invariant #7). Slot errors are recycled automatically (kill, replace with fresh).
 
 ---
 

@@ -36,7 +36,7 @@ claude-pool config set size 8
 ```bash
 claude-pool start <prompt>                    # Start new session (may queue)
 claude-pool start <prompt> --block            # Start + wait for result
-claude-pool followup <sessionId> <prompt>     # Send to idle/offloaded/dead session
+claude-pool followup <sessionId> <prompt>     # Send to idle/offloaded session
 claude-pool followup <sessionId> <prompt> --block
 claude-pool wait [sessionId]                  # Wait for idle (any owned if omitted)
 claude-pool result <sessionId>                # Get output (must be idle)
