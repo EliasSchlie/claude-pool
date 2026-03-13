@@ -105,9 +105,13 @@ func (s *Subscriber) Conn() net.Conn {
 // replay buffer so new subscribers receive events they narrowly missed
 // (race between subscribe registration and event broadcasting).
 type SubscriberHub struct {
-	mu     sync.Mutex
-	subs   map[*Subscriber]struct{}
-	recent []Msg // replay buffer for recent events
+	mu   sync.Mutex
+	subs map[*Subscriber]struct{}
+
+	// Ring buffer for recent events (fixed-size, no slice shifting)
+	ring    [replayBufferSize]Msg
+	ringPos int // next write position
+	ringLen int // number of valid entries (0..replayBufferSize)
 }
 
 const replayBufferSize = 100
@@ -115,8 +119,7 @@ const replayBufferSize = 100
 // NewSubscriberHub creates a new hub.
 func NewSubscriberHub() *SubscriberHub {
 	return &SubscriberHub{
-		subs:   make(map[*Subscriber]struct{}),
-		recent: make([]Msg, 0, replayBufferSize),
+		subs: make(map[*Subscriber]struct{}),
 	}
 }
 
@@ -126,7 +129,10 @@ func NewSubscriberHub() *SubscriberHub {
 func (h *SubscriberHub) Add(s *Subscriber) {
 	h.mu.Lock()
 	h.subs[s] = struct{}{}
-	for _, event := range h.recent {
+	// Replay recent events in chronological order
+	start := (h.ringPos - h.ringLen + replayBufferSize) % replayBufferSize
+	for i := 0; i < h.ringLen; i++ {
+		event := h.ring[(start+i)%replayBufferSize]
 		if s.Matches(event) {
 			s.Send(event)
 		}
@@ -145,10 +151,11 @@ func (h *SubscriberHub) Remove(s *Subscriber) {
 // in the replay buffer for late-arriving subscribers.
 func (h *SubscriberHub) Broadcast(event Msg) {
 	h.mu.Lock()
-	// Store in replay buffer
-	h.recent = append(h.recent, event)
-	if len(h.recent) > replayBufferSize {
-		h.recent = h.recent[1:]
+	// Store in ring buffer
+	h.ring[h.ringPos] = event
+	h.ringPos = (h.ringPos + 1) % replayBufferSize
+	if h.ringLen < replayBufferSize {
+		h.ringLen++
 	}
 	// Snapshot current subscribers
 	subs := make([]*Subscriber, 0, len(h.subs))

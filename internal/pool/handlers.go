@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log"
 	"net"
-	"os"
 	"strings"
 	"time"
 
@@ -195,20 +194,8 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 	// Try to claim a fresh/idle slot
 	if fresh := m.findFreshSlot(); fresh != nil {
 		log.Printf("[start] session %s taking over slot from %s (status=%s, pid=%d)", s.ID, fresh.ID, fresh.Status, fresh.PID)
-		// Take over the fresh session's process
-		proc := m.procs[fresh.ID]
-		if proc != nil {
-			delete(m.procs, fresh.ID)
-			delete(m.pidToSID, fresh.PID)
-			m.procs[s.ID] = proc
-			m.pidToSID[proc.PID()] = s.ID
-			s.PID = fresh.PID
-			s.ClaudeUUID = fresh.ClaudeUUID
-			s.Cwd = fresh.Cwd
-		}
+		proc := m.transferProcess(fresh, s)
 		wasFresh := fresh.Status == StatusFresh
-		// Discard the old session (its goroutines will exit when they
-		// see the session is gone from m.sessions)
 		delete(m.sessions, fresh.ID)
 
 		if wasFresh {
@@ -225,16 +212,8 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 			s.PendingPrompt = ""
 			m.deliverPrompt(s, prompt)
 		}
-		// Clear stale idle signal from the pre-warmed session before
-		// starting the watcher — otherwise it immediately fires.
-		sigPath := m.paths.IdleSignal(s.PID)
-		if err := os.Remove(sigPath); err == nil {
-			log.Printf("[start] session %s: removed stale idle signal at %s", s.ID, sigPath)
-		}
-		os.Remove(sigPath + ".pending")
-		// Start new goroutines for the new session (old ones reference stale ID)
-		go m.watchIdleSignal(s.ID, s.PID)
-		m.watchProcessDone(s.ID, proc)
+		m.clearIdleSignals(s.PID)
+		m.startWatchers(s, proc)
 		m.broadcastEvent(api.Msg{
 			"type": "event", "event": "created",
 			"sessionId": s.ID, "status": StatusProcessing, "parentId": s.ParentID,
@@ -815,23 +794,15 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 
 		if fresh := m.findFreshSlot(); fresh != nil {
 			log.Printf("[pin] session %s: taking over slot from %s (status=%s pid=%d)", s.ID, fresh.ID, fresh.Status, fresh.PID)
-			proc := m.procs[fresh.ID]
+			proc := m.transferProcess(fresh, s)
+			if fresh.Status == StatusIdle {
+				s.Status = StatusIdle
+			} else {
+				s.Status = StatusFresh
+			}
 			if proc != nil {
-				delete(m.procs, fresh.ID)
-				delete(m.pidToSID, fresh.PID)
-				m.procs[s.ID] = proc
-				m.pidToSID[proc.PID()] = s.ID
-				s.PID = fresh.PID
-				s.ClaudeUUID = fresh.ClaudeUUID
-				s.Cwd = fresh.Cwd
-				if fresh.Status == StatusIdle {
-					s.Status = StatusIdle
-				} else {
-					s.Status = StatusFresh
-				}
-				// Start watchers for the new session (old ones reference stale ID)
-				go m.watchIdleSignal(s.ID, s.PID)
-				m.watchProcessDone(s.ID, proc)
+				m.clearIdleSignals(s.PID)
+				m.startWatchers(s, proc)
 			}
 			delete(m.sessions, fresh.ID)
 		} else if evicted := m.findEvictableSession(); evicted != nil {

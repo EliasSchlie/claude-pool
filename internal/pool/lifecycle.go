@@ -315,7 +315,7 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 // --- Prompt delivery ---
 
 // deliverPrompt sends a prompt to a session's terminal.
-// Uses OC-style buffer polling: Escape → Ctrl-U → text → poll until echoed → Enter.
+// Escape → Ctrl-U → text → brief echo check → Enter.
 func (m *Manager) deliverPrompt(s *Session, prompt string) {
 	proc := m.procs[s.ID]
 	if proc == nil {
@@ -324,13 +324,29 @@ func (m *Manager) deliverPrompt(s *Session, prompt string) {
 	}
 
 	sid := s.ID
+	done := m.done
 	go func() {
-		time.Sleep(200 * time.Millisecond)
-		proc.WriteString("\x1b") // Escape
-		time.Sleep(200 * time.Millisecond)
-		proc.WriteString("\x15") // Ctrl-U (clear line)
+		// Short delay to let terminal settle after state transition
+		select {
+		case <-done:
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
+
+		if err := proc.WriteString("\x1b"); err != nil { // Escape
+			log.Printf("[deliver] session %s: write error (esc): %v", sid, err)
+			return
+		}
 		time.Sleep(100 * time.Millisecond)
-		proc.WriteString(prompt)
+		if err := proc.WriteString("\x15"); err != nil { // Ctrl-U (clear line)
+			log.Printf("[deliver] session %s: write error (ctrl-u): %v", sid, err)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		if err := proc.WriteString(prompt); err != nil {
+			log.Printf("[deliver] session %s: write error (prompt): %v", sid, err)
+			return
+		}
 
 		// Brief check that prompt text appeared in buffer (Claude's TUI uses raw
 		// mode so exact-match echo rarely works — keep timeout short).
@@ -338,7 +354,10 @@ func (m *Manager) deliverPrompt(s *Session, prompt string) {
 			log.Printf("[deliver] session %s: prompt not echoed in buffer (expected with TUI), sending Enter", sid)
 		}
 
-		proc.WriteString("\r") // Enter
+		if err := proc.WriteString("\r"); err != nil { // Enter
+			log.Printf("[deliver] session %s: write error (enter): %v", sid, err)
+			return
+		}
 		log.Printf("[deliver] session %s: prompt delivered (%d chars)", sid, len(prompt))
 	}()
 }
@@ -528,21 +547,11 @@ func (m *Manager) serveQueueFromSlot(idle *Session) {
 		if queued.PendingPrompt == "" {
 			continue
 		}
-		// Transfer the process from the idle session to the queued one
-		proc := m.procs[idle.ID]
+		proc := m.transferProcess(idle, queued)
 		if proc == nil {
 			return
 		}
-
-		delete(m.procs, idle.ID)
-		delete(m.pidToSID, idle.PID)
 		delete(m.sessions, idle.ID)
-
-		m.procs[queued.ID] = proc
-		m.pidToSID[proc.PID()] = queued.ID
-		queued.PID = idle.PID
-		queued.ClaudeUUID = idle.ClaudeUUID
-		queued.Cwd = idle.Cwd
 		queued.Status = StatusProcessing
 
 		prompt := queued.PendingPrompt
@@ -553,12 +562,9 @@ func (m *Manager) serveQueueFromSlot(idle *Session) {
 		m.queue = append(m.queue[:i], m.queue[i+1:]...)
 
 		log.Printf("[serve-queue] session %s claimed slot from %s (pid=%d)", queued.ID, idle.ID, queued.PID)
-		// Clear stale idle signal before starting watcher
-		os.Remove(m.paths.IdleSignal(queued.PID))
-		os.Remove(m.paths.IdleSignal(queued.PID) + ".pending")
+		m.clearIdleSignals(queued.PID)
 		m.deliverPrompt(queued, prompt)
-		go m.watchIdleSignal(queued.ID, queued.PID)
-		m.watchProcessDone(queued.ID, proc)
+		m.startWatchers(queued, proc)
 
 		m.broadcastEvent(api.Msg{
 			"type": "event", "event": "status",
@@ -567,6 +573,40 @@ func (m *Manager) serveQueueFromSlot(idle *Session) {
 		m.savePoolState()
 		return
 	}
+}
+
+// --- Process transfer helpers ---
+
+// transferProcess moves a process from one session to another, updating all
+// tracking maps. Returns the process (nil if source had none). Must be called
+// with m.mu held.
+func (m *Manager) transferProcess(from, to *Session) *ptyPkg.Process {
+	proc := m.procs[from.ID]
+	if proc == nil {
+		return nil
+	}
+	delete(m.procs, from.ID)
+	delete(m.pidToSID, from.PID)
+	m.procs[to.ID] = proc
+	m.pidToSID[proc.PID()] = to.ID
+	to.PID = from.PID
+	to.ClaudeUUID = from.ClaudeUUID
+	to.Cwd = from.Cwd
+	return proc
+}
+
+// startWatchers launches the idle signal and process-done watchers for a session.
+// Must be called with m.mu held (watchers acquire it internally as needed).
+func (m *Manager) startWatchers(s *Session, proc *ptyPkg.Process) {
+	go m.watchIdleSignal(s.ID, s.PID)
+	m.watchProcessDone(s.ID, proc)
+}
+
+// clearIdleSignals removes stale idle signal files for a PID. Called before
+// starting watchers for a transferred process to prevent immediate false triggers.
+func (m *Manager) clearIdleSignals(pid int) {
+	os.Remove(m.paths.IdleSignal(pid))
+	os.Remove(m.paths.IdleSignal(pid) + ".pending")
 }
 
 // --- Slot management ---
