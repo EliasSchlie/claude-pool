@@ -436,7 +436,7 @@
     },
 
     "offload": {
-      "description": "Manually offload idle session. Frees slot, saves metadata. Errors if busy or pinned.",
+      "description": "Manually offload idle session. Frees slot, saves metadata. Errors if busy. Unpins if pinned.",
       "request": {
         "type": "object",
         "properties": {
