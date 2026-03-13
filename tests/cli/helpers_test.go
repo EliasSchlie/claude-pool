@@ -200,11 +200,24 @@ func setupCLIPool(t *testing.T, size int) *cliPool {
 // run executes a CLI command and returns stdout, stderr, and exit code.
 func (p *cliPool) run(args ...string) cmdResult {
 	p.t.Helper()
+	return p.execCLI(nil, args...)
+}
+
+// runInSession executes a CLI command with CLAUDE_POOL_SESSION_ID set,
+// simulating a call from within a pool session.
+func (p *cliPool) runInSession(sessionID string, args ...string) cmdResult {
+	p.t.Helper()
+	return p.execCLI([]string{
+		fmt.Sprintf("CLAUDE_POOL_SESSION_ID=%s", sessionID),
+	}, args...)
+}
+
+// execCLI runs the CLI binary with --pool prepended and optional extra env vars.
+func (p *cliPool) execCLI(extraEnv []string, args ...string) cmdResult {
+	p.t.Helper()
 	fullArgs := append([]string{"--pool", p.poolName}, args...)
 	cmd := exec.Command(p.cliBin, fullArgs...)
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("CLAUDE_POOL_REGISTRY=%s", os.Getenv("CLAUDE_POOL_REGISTRY")),
-	)
+	cmd.Env = append(os.Environ(), extraEnv...)
 
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -241,38 +254,6 @@ func (p *cliPool) runJSON(args ...string) Msg {
 	return msg
 }
 
-// runInSession executes a CLI command with CLAUDE_POOL_SESSION_ID set,
-// simulating a call from within a pool session.
-func (p *cliPool) runInSession(sessionID string, args ...string) cmdResult {
-	p.t.Helper()
-	fullArgs := append([]string{"--pool", p.poolName}, args...)
-	cmd := exec.Command(p.cliBin, fullArgs...)
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("CLAUDE_POOL_REGISTRY=%s", os.Getenv("CLAUDE_POOL_REGISTRY")),
-		fmt.Sprintf("CLAUDE_POOL_SESSION_ID=%s", sessionID),
-	)
-
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			p.t.Fatalf("failed to run CLI: %v", err)
-		}
-	}
-
-	return cmdResult{
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
-		ExitCode: exitCode,
-	}
-}
-
 // runInSessionJSON is runInSession + JSON parsing.
 func (p *cliPool) runInSessionJSON(sessionID string, args ...string) Msg {
 	p.t.Helper()
@@ -287,9 +268,4 @@ func (p *cliPool) runInSessionJSON(sessionID string, args ...string) Msg {
 	return msg
 }
 
-func strVal(m map[string]any, key string) string {
-	if v, ok := m[key].(string); ok {
-		return v
-	}
-	return ""
-}
+var strVal = testutil.StrVal

@@ -115,26 +115,11 @@ func parseSessions(t *testing.T, resp Msg) []SessionInfo {
 	return sessions
 }
 
-func strVal(m map[string]any, key string) string {
-	if v, ok := m[key].(string); ok {
-		return v
-	}
-	return ""
-}
-
-func numVal(m map[string]any, key string) float64 {
-	if v, ok := m[key].(float64); ok {
-		return v
-	}
-	return 0
-}
-
-func boolVal(m map[string]any, key string) bool {
-	if v, ok := m[key].(bool); ok {
-		return v
-	}
-	return false
-}
+var (
+	strVal  = testutil.StrVal
+	numVal  = testutil.NumVal
+	boolVal = testutil.BoolVal
+)
 
 // --------------------------------------------------------------------
 // Test pool
