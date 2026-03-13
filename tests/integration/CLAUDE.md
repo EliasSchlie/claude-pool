@@ -42,16 +42,18 @@ Each test file = one pool, one flow, multiple subtests:
 | `pool_test.go` | 2 | Init, config, resize, health, destroy, re-init with restore |
 | `session_test.go` | 3 | Start, wait, capture, followup, output formats, input |
 | `slots_test.go` | 2 | Queue, priority, pin/eviction, queued-session behavior |
-| `offload_test.go` | 2 | Offload, capture while offloaded, restore, archive lifecycle |
+| `offload_test.go` | 2 | Offload, capture while offloaded, restore, process death → offloaded, archive lifecycle |
+| `error_test.go` | 2 | Repeated load failures → error state, followup force retry, error session visibility in ls/info |
 | `parent_child_test.go` | 3 | Ownership, ls/tree, info, recursive archive |
 | `subscribe_test.go` | 2 | Event stream, filters, re-subscribe, updated events |
-| `attach_test.go` | 2 | Attach pipe, typing detection, followup while attached, offload closes pipe, re-attach |
+| `attach_test.go` | 2 | Attach pipe, typing detection (fresh slots), followup while attached, all API commands work during attach, offload closes pipe, re-attach |
 
 Shared infrastructure:
 
 | File | Purpose |
 |------|---------|
 | `helpers_test.go` | Pool setup/teardown, socket client, assertion helpers |
+| `../testutil/testutil.go` | TestMain utilities: find repo root, build binary, setup run dir, JSON value extractors |
 
 ## Running
 

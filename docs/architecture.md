@@ -13,7 +13,7 @@ claude-pool daemon
   ├── PTY manager (in-process, owns terminal instances via creack/pty)
   ├── Attach server (per-session raw PTY pipe sockets)
   ├── Session discovery (idle detection, status tracking)
-  └── Reconciliation loop (auto-restart dead sessions, periodic health checks)
+  └── Reconciliation loop (recycle error slots, periodic health checks)
 ```
 
 ## Components
@@ -34,10 +34,10 @@ Listens on `~/.claude-pool/pools/<name>/api.sock`. Accepts newline-delimited JSO
 When a client requests `attach`, creates a temporary Unix socket for raw PTY I/O. The pipe closes when the session is offloaded or dies. Multiple clients can attach to the same session simultaneously (broadcast).
 
 ### Session Discovery
-Detects session state (idle, processing, dead) by reading Claude Code's signal files and JSONL transcripts. Caches results for performance.
+Detects session state (idle, processing) by reading Claude Code's signal files and JSONL transcripts. Process death is detected here — session transitions to offloaded, slot gets recycled. Caches results for performance.
 
 ### Reconciliation Loop
-Runs every 30s. Restarts dead/error sessions, kills orphaned processes, maintains pool health.
+Runs every 30s. Recycles error slots, kills orphaned processes, maintains pool health.
 
 ## Multi-Pool Access
 
