@@ -34,11 +34,18 @@ A **slot** is a physical resource — a running Claude Code process with a PTY. 
 |-------|---------|
 | `queued` | Waiting for a slot |
 | `idle` | Finished processing, waiting for input |
-| `typing` | Un-submitted input detected in a fresh slot's terminal buffer |
 | `processing` | Claude is working |
 | `offloaded` | Not in a slot, can be resumed |
 | `error` | Repeatedly failed to load (broken session) |
 | `archived` | Done. Hidden from `ls` by default. Auto-cleaned after 30 days. |
+
+### Session Properties
+
+| Property | Type | Meaning |
+|----------|------|---------|
+| `pinned` | boolean | Protected from LRU eviction (time-limited) |
+| `typing` | boolean | Un-submitted input detected in terminal buffer. Only true for loaded sessions. |
+| `priority` | number | Eviction priority (default 0, lower = evicted first) |
 
 Offloaded sessions can become `queued` again when targeted by `followup` or `pin`.
 
@@ -59,7 +66,7 @@ Commands that return session output (`wait`, `capture`) accept a `format` field:
 | `buffer-last` | Terminal buffer since last user message. | Yes |
 | `buffer-full` | Full terminal scrollback, ANSI stripped. | Yes |
 
-JSONL formats read from Claude Code's transcript files (via Claude UUID). Work for any session with a known UUID — including offloaded and archived. Buffer formats require a live terminal (idle, typing, processing only).
+JSONL formats read from Claude Code's transcript files (via Claude UUID). Work for any session with a known UUID — including offloaded and archived. Buffer formats require a live terminal (idle or processing only).
 
 Empty content is valid — if a session was stopped before producing output, JSONL formats might return an empty string.
 
@@ -104,7 +111,7 @@ Transport: Unix domain socket, newline-delimited JSON. See [docs/protocol.md](do
 
 ### Events
 
-- **`subscribe`** — Open a persistent event stream. Filterable by session, event type, status transition, or property change. Re-subscribing on the same connection replaces filters.
+- **`subscribe`** — Open a persistent event stream. Filterable by session, event type, status transition, or property change (including `typing`). Re-subscribing on the same connection replaces filters.
 
 ---
 
@@ -136,7 +143,7 @@ Slots are the physical resources that host sessions. Consumers never interact wi
 |-------|---------|
 | `fresh` | Pre-warmed Claude process, never prompted. Ready for immediate use. |
 | `loading` | Starting a new session or resuming an offloaded one. |
-| `live` | Hosting an active session (idle, typing, or processing). |
+| `live` | Hosting an active session (idle or processing). |
 | `error` | Crashed during startup or loading. Recycled automatically (killed, replaced with fresh). |
 
 ### Debug API

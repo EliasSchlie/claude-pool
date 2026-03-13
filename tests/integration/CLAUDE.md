@@ -46,7 +46,7 @@ Each test file = one pool, one flow, multiple subtests:
 | `error_test.go` | 2 | Repeated load failures → error state, followup force retry, error session visibility in ls/info |
 | `parent_child_test.go` | 3 | Ownership, ls/tree, info, recursive archive |
 | `subscribe_test.go` | 2 | Event stream, filters, re-subscribe, updated events |
-| `attach_test.go` | 2 | Attach pipe, typing detection (fresh slots), followup while attached, all API commands work during attach, offload closes pipe, re-attach |
+| `attach_test.go` | 2 | Attach pipe, typing property detection, followup while attached, all API commands work during attach, offload closes pipe, re-attach |
 
 Shared infrastructure:
 

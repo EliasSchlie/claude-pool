@@ -19,7 +19,6 @@
       "enum": [
         "queued",
         "idle",
-        "typing",
         "processing",
         "offloaded",
         "error",
@@ -76,7 +75,6 @@
           "properties": {
             "queued": { "type": "integer" },
             "idle": { "type": "integer" },
-            "typing": { "type": "integer" },
             "processing": { "type": "integer" },
             "offloaded": { "type": "integer" },
             "error": { "type": "integer" },
@@ -135,6 +133,10 @@
         "pinned": {
           "type": "boolean",
           "description": "Whether the session is currently pinned (prevents LRU eviction)"
+        },
+        "typing": {
+          "type": "boolean",
+          "description": "Un-submitted input detected in terminal buffer. Only true for loaded sessions."
         },
         "children": {
           "type": "array",
@@ -706,7 +708,7 @@
           "fields": {
             "type": "array",
             "items": {
-              "enum": ["cwd", "priority", "pinned"]
+              "enum": ["cwd", "priority", "pinned", "typing"]
             },
             "description": "Only updated events for these fields. Omit = all fields."
           }
