@@ -63,13 +63,16 @@ func TestOffload(t *testing.T) {
 		}
 	})
 
-	t.Run("offload pinned session errors", func(t *testing.T) {
+	t.Run("offload pinned session auto-unpins", func(t *testing.T) {
 		pool.send(Msg{"type": "pin", "sessionId": s2})
 
 		resp := pool.send(Msg{"type": "offload", "sessionId": s2})
-		assertError(t, resp)
+		assertNotError(t, resp)
+		assertType(t, resp, "ok")
 
-		pool.send(Msg{"type": "unpin", "sessionId": s2})
+		info := pool.send(Msg{"type": "info", "sessionId": s2})
+		session := parseSession(t, info["session"])
+		assertStatus(t, session, "offloaded")
 	})
 
 	t.Run("offload non-idle errors", func(t *testing.T) {
