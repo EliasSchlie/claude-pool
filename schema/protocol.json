@@ -12,7 +12,7 @@
     "claudeUUID": {
       "type": "string",
       "pattern": "^[a-f0-9-]+$",
-      "description": "Claude Code session UUID (discovered after spawn, null while queued). Use info command to look up."
+      "description": "Claude Code session UUID (null until first spawn; retained when re-queued from offloaded). Use info command to look up."
     },
 
     "sessionStatus": {

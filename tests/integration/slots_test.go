@@ -14,16 +14,17 @@ package integration
 //
 //   1.  "start fills all slots"
 //   2.  "start queues when all slots busy"
-//   3.  "stop cancels queued start"
-//   4.  "queued session gets slot when one frees"
-//   5.  "set-priority affects eviction order"
-//   6.  "LRU within same priority"
-//   7.  "pin prevents eviction"
-//   8.  "pin on offloaded triggers priority load"
-//   9.  "pin without sessionId allocates fresh"
-//  10.  "unpin clears pinned flag"
-//  11.  "followup on queued errors"
-//  12.  "followup with force on queued replaces prompt"
+//   3.  "capture on fresh-queued session errors"
+//   4.  "stop cancels queued start"
+//   5.  "queued session gets slot when one frees"
+//   6.  "set-priority affects eviction order"
+//   7.  "LRU within same priority"
+//   8.  "pin prevents eviction"
+//   9.  "pin on offloaded triggers priority load"
+//  10.  "pin without sessionId allocates fresh"
+//  11.  "unpin clears pinned flag"
+//  12.  "followup on queued errors"
+//  13.  "followup with force on queued replaces prompt"
 
 import (
 	"testing"
@@ -76,6 +77,7 @@ func TestSlots(t *testing.T) {
 		session := parseSession(t, info["session"])
 		assertStatus(t, session, "queued")
 
+		// Fresh-queued sessions (never spawned) have no UUID
 		if session.ClaudeUUID != "" {
 			t.Fatalf("queued session should have no claudeUUID, got %q", session.ClaudeUUID)
 		}
@@ -87,6 +89,14 @@ func TestSlots(t *testing.T) {
 		health, _ := healthResp["health"].(map[string]any)
 		if numVal(health, "queueDepth") != 1 {
 			t.Fatalf("expected queue depth 1, got %v", numVal(health, "queueDepth"))
+		}
+	})
+
+	t.Run("capture on fresh-queued session errors", func(t *testing.T) {
+		// s3 is queued from scratch — no UUID, no terminal. All capture formats should error.
+		for _, format := range []string{"jsonl-short", "jsonl-last", "buffer-last", "buffer-full"} {
+			resp := pool.send(Msg{"type": "capture", "sessionId": s3, "format": format})
+			assertError(t, resp)
 		}
 	})
 

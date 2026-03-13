@@ -33,6 +33,10 @@ Tradeoff: a failure mid-flow can cascade. We accept this — fixing the first fa
 fixes the cascade, and the alternative (isolated tests) would be 10x slower and
 require duplicating all the state-building logic.
 
+## Claude Code `cd` Constraint
+
+Sessions can only `cd` into **subdirectories** of their spawn directory. `cd` to paths above the spawn dir (e.g., `/tmp/`, `~/other-project/`) silently fails — cwd resets to spawn dir. All cwd-related test prompts must use relative subdirectories.
+
 ## Structure
 
 Each test file = one pool, one flow, multiple subtests:
@@ -41,9 +45,9 @@ Each test file = one pool, one flow, multiple subtests:
 |------|-----------|----------------|
 | `pool_test.go` | 2 | Init, config, resize, health, destroy, re-init with restore |
 | `session_test.go` | 3 | Start, wait, capture, followup, output formats, input |
-| `slots_test.go` | 2 | Queue, priority, pin/eviction, queued-session behavior |
-| `offload_test.go` | 2 | Offload, capture while offloaded, restore, process death → offloaded, archive lifecycle |
-| `error_test.go` | 2 | Repeated load failures → error state, followup force retry, error session visibility in ls/info |
+| `slots_test.go` | 2 | Queue, priority, pin/eviction, capture on queued, queued-session behavior |
+| `offload_test.go` | 2 | Offload, capture while offloaded, restore, process death → offloaded, wait on death, stop on offloaded/archived, archive lifecycle |
+| ~~`error_test.go`~~ | — | *Deferred: no reliable way to trigger repeated load failures in tests. Will add when a real scenario surfaces.* |
 | `parent_child_test.go` | 3 | Ownership, ls/tree, info, recursive archive |
 | `subscribe_test.go` | 2 | Event stream, filters, re-subscribe, updated events |
 | `attach_test.go` | 2 | Attach pipe, pendingInput detection, followup while attached, all API commands work during attach, offload closes pipe, re-attach |
