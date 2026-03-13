@@ -131,11 +131,18 @@ func TestAttach(t *testing.T) {
 		resp := pool.send(Msg{"type": "offload", "sessionId": s1})
 		assertNotError(t, resp)
 
-		buf := make([]byte, 1)
+		// Drain residual PTY output before expecting EOF — the kernel
+		// delivers buffered data before signaling connection close.
+		buf := make([]byte, 4096)
 		attachConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		_, err := attachConn.Read(buf)
-		if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
-			t.Fatalf("expected EOF or closed after offload, got: %v", err)
+		for {
+			_, err := attachConn.Read(buf)
+			if err != nil {
+				if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+					t.Fatalf("expected EOF or closed after offload, got: %v", err)
+				}
+				break
+			}
 		}
 	})
 
