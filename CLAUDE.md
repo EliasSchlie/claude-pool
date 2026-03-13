@@ -13,10 +13,7 @@ Early development — designing from requirements, referencing Open Cockpit (`~/
 ## ⛔ Protected Files
 
 These files require **explicit user permission** before any modification:
-- `SPEC.md` — Spec index
-- `docs/design-principles.md` — Invariants and architecture decisions
-- `docs/protocol.md` — Socket API contract
-- `schema/protocol.json` — Socket API contract (machine-readable)
+- `SPEC.md` — Invariants + socket protocol contract
 - `tests/integration/` — Integration tests. Propose changes and get approval first.
 
 ## Architecture
@@ -25,7 +22,7 @@ These files require **explicit user permission** before any modification:
 - `internal/` — Daemon packages (pool, pty, api, attach, discovery, paths)
 - `tests/integration/` — Integration tests (real Claude sessions, `--model haiku`)
 - `tests/manual/` — Manual testing directory (own `.claude/` hooks, independent per worktree)
-- `schema/` — JSON Schema contract for the socket protocol (source of truth)
+- `schema/` — JSON Schema (must match SPEC.md)
 - `hooks/` — Claude Code hook scripts (project-local, written into pool dir on init)
 - `docs/` — Documentation
 
