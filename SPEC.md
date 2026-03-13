@@ -44,8 +44,10 @@ A **slot** is a physical resource — a running Claude Code process with a PTY. 
 | Property | Type | Meaning |
 |----------|------|---------|
 | `pinned` | boolean | Protected from LRU eviction (time-limited) |
-| `typing` | boolean | Un-submitted input detected in terminal buffer. Only true for loaded sessions. |
+| `pendingInput` | string | Un-submitted text in terminal buffer. Empty string if nothing typed. Only populated for loaded sessions. |
 | `priority` | number | Eviction priority (default 0, lower = evicted first) |
+
+When `pendingInput` changes (text detected or cleared), the session's LRU timestamp is reset — it counts as recently used. Sessions with non-empty `pendingInput` are evicted after sessions with empty input (someone is actively working there).
 
 Offloaded sessions can become `queued` again when targeted by `followup` or `pin`.
 
@@ -111,7 +113,7 @@ Transport: Unix domain socket, newline-delimited JSON. See [docs/protocol.md](do
 
 ### Events
 
-- **`subscribe`** — Open a persistent event stream. Filterable by session, event type, status transition, or property change (including `typing`). Re-subscribing on the same connection replaces filters.
+- **`subscribe`** — Open a persistent event stream. Filterable by session, event type, status transition, or property change (including `pendingInput`). Re-subscribing on the same connection replaces filters.
 
 ---
 
@@ -131,7 +133,7 @@ The CLI is a separate package — a thin router that resolves pool names to sock
 When a slot is needed and none are free:
 
 1. Use a `fresh` slot first (no session to displace).
-2. If no fresh slots, offload the lowest-priority idle session. Within the same priority, offload the session that has been idle the longest (LRU).
+2. If no fresh slots, offload the lowest-priority idle session. Within the same priority, prefer sessions with empty `pendingInput` over those with pending text. Within the same input state, offload the session that has been idle the longest (LRU).
 3. Pinned sessions are never evicted. If all idle sessions are pinned, the request queues until a slot frees up naturally.
 4. Processing sessions are never interrupted for eviction — they finish naturally.
 

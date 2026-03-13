@@ -293,7 +293,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
   "createdAt": "2026-03-12T14:30:00Z",
   "pid": 12345,
   "pinned": false,
-  "typing": false,
+  "pendingInput": "",
   "children": [
     {
       "sessionId": "b3k9m2",
@@ -311,7 +311,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 `pinned` indicates whether the session is currently pinned (prevents LRU eviction).
 
-`typing` indicates whether un-submitted input has been detected in the session's terminal buffer. Only true for loaded sessions.
+`pendingInput` contains any un-submitted text detected in the session's terminal buffer. Empty string if nothing typed. Only populated for loaded sessions. Changes to `pendingInput` reset the session's LRU timestamp.
 
 `children` contains direct child session objects, each of which is a full session object with its own `children` — recursively. This gives you the full subtree rooted at this session.
 
@@ -465,7 +465,7 @@ Works for any state including offloaded, error, and archived. This is the primar
 Event types:
 - `status` — session changed state. Includes `sessionId`, `status`, `prevStatus`.
 - `created` — new session added to pool. Includes `sessionId`, `status`, `parentId`.
-- `updated` — session property changed (not status). Includes `sessionId` and `changes` object with the changed fields and their new values. Tracked fields: `cwd`, `priority`, `pinned`, `typing`. Filter with the `fields` param to only receive updates for specific properties.
+- `updated` — session property changed (not status). Includes `sessionId` and `changes` object with the changed fields and their new values. Tracked fields: `cwd`, `priority`, `pinned`, `pendingInput`. Filter with the `fields` param to only receive updates for specific properties.
 - `archived` — session archived. Includes `sessionId`.
 - `unarchived` — session unarchived. Includes `sessionId`.
 - `pool` — pool-level event (init, resize, destroy). Includes `action` and relevant details.

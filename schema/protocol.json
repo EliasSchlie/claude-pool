@@ -134,9 +134,9 @@
           "type": "boolean",
           "description": "Whether the session is currently pinned (prevents LRU eviction)"
         },
-        "typing": {
-          "type": "boolean",
-          "description": "Un-submitted input detected in terminal buffer. Only true for loaded sessions."
+        "pendingInput": {
+          "type": "string",
+          "description": "Un-submitted text in terminal buffer. Empty string if nothing typed. Only populated for loaded sessions. Changes reset LRU timestamp."
         },
         "children": {
           "type": "array",
@@ -708,7 +708,7 @@
           "fields": {
             "type": "array",
             "items": {
-              "enum": ["cwd", "priority", "pinned", "typing"]
+              "enum": ["cwd", "priority", "pinned", "pendingInput"]
             },
             "description": "Only updated events for these fields. Omit = all fields."
           }
