@@ -594,6 +594,22 @@ func (s *subscription) drain() []Msg {
 }
 
 // --------------------------------------------------------------------
+// Process helpers
+// --------------------------------------------------------------------
+
+// killPID sends SIGKILL to a process. Fatals on error.
+func killPID(t *testing.T, pid int) {
+	t.Helper()
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatalf("find process %d: %v", pid, err)
+	}
+	if err := proc.Kill(); err != nil {
+		t.Fatalf("kill process %d: %v", pid, err)
+	}
+}
+
+// --------------------------------------------------------------------
 // Assertion helpers
 // --------------------------------------------------------------------
 

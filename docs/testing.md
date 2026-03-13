@@ -30,6 +30,13 @@ Test the CLI → daemon path: arg parsing, env var propagation (`CLAUDE_POOL_SES
 
 See [tests/cli/CLAUDE.md](../tests/cli/CLAUDE.md) for philosophy and file listing.
 
+## Claude Code Constraints
+
+**`cd` only works downward.** Claude Code sessions can `cd` into subdirectories of their spawn directory, but cannot `cd` to directories above it (e.g., `/tmp/`, `~/other-project/`). The Bash tool silently resets cwd to the spawn directory when asked to go higher. This means:
+
+- Tests that verify cwd changes must use relative subdirectories, never absolute paths outside the spawn dir.
+- `cwd` tracking (via process inspection) will only ever show paths at or below `spawnCwd`.
+
 ## Running
 
 ```bash
