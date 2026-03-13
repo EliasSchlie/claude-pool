@@ -7,6 +7,12 @@ package integration
 // This flow tests the subscribe system: receiving events, applying filters, dynamically
 // updating subscriptions, and verifying the "updated" event type for property changes.
 //
+// Most steps intentionally leave their subscription open (no defer sub.close()) so that
+// connections accumulate during the flow. This exercises the daemon handling many
+// concurrent subscribers — a scenario that the explicit "multiple concurrent subscribers"
+// step only tests with 2. Connections are closed at natural phase boundaries and all
+// remaining ones are cleaned up by newConn's t.Cleanup at test-function end.
+//
 // Flow:
 //
 //   1.  "subscribe receives status events"
@@ -93,6 +99,7 @@ func TestSubscribe(t *testing.T) {
 
 	t.Run("subscribe receives pool events", func(t *testing.T) {
 		sub := pool.subscribe(Msg{"events": []string{"pool"}})
+		defer sub.close() // end of basic events phase — close to bound accumulation
 
 		pool.send(Msg{"type": "resize", "size": 3})
 
@@ -249,6 +256,7 @@ func TestSubscribe(t *testing.T) {
 
 	t.Run("re-subscribe replaces filters", func(t *testing.T) {
 		sub := pool.subscribe(Msg{"sessions": []string{s1}})
+		defer sub.close() // end of filter phase — close to bound accumulation
 
 		// Re-subscribe on same connection with different filter
 		sub.resubscribe(Msg{"sessions": []string{s2}})
