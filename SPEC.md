@@ -22,7 +22,7 @@ These are non-negotiable. Code that violates an invariant is a bug.
 
 ---
 
-## Concepts
+## Model
 
 A **session** is a logical unit of work — it has an ID, an owner, prompt history, and a lifecycle (queued → active → offloaded → archived). Sessions survive being unloaded and reloaded.
 
@@ -62,15 +62,6 @@ Commands that return session output (`wait`, `capture`) accept a `format` field:
 JSONL formats read from Claude Code's transcript files (via Claude UUID). Work for any session with a known UUID — including offloaded and archived. Buffer formats require a live terminal (idle, typing, processing only).
 
 Empty content is valid — if a session was stopped before producing output, JSONL formats might return an empty string.
-
-### Eviction Policy
-
-When a slot is needed and none are free:
-
-1. Use a `fresh` slot first (no session to displace).
-2. If no fresh slots, offload the lowest-priority idle session. Within the same priority, offload the session that has been idle the longest (LRU).
-3. Pinned sessions are never evicted. If all idle sessions are pinned, the request queues until a slot frees up naturally.
-4. Processing sessions are never interrupted for eviction — they finish naturally.
 
 ---
 
@@ -115,7 +106,9 @@ Transport: Unix domain socket, newline-delimited JSON. See [docs/protocol.md](do
 
 - **`subscribe`** — Open a persistent event stream. Filterable by session, event type, status transition, or property change. Re-subscribing on the same connection replaces filters.
 
-### CLI
+---
+
+## CLI
 
 The CLI is a separate package — a thin router that resolves pool names to socket connections. Each API command maps 1:1 to a CLI subcommand.
 
@@ -125,6 +118,15 @@ The CLI is a separate package — a thin router that resolves pool names to sock
 ---
 
 ## Internals
+
+### Eviction Policy
+
+When a slot is needed and none are free:
+
+1. Use a `fresh` slot first (no session to displace).
+2. If no fresh slots, offload the lowest-priority idle session. Within the same priority, offload the session that has been idle the longest (LRU).
+3. Pinned sessions are never evicted. If all idle sessions are pinned, the request queues until a slot frees up naturally.
+4. Processing sessions are never interrupted for eviction — they finish naturally.
 
 ### Slot States
 
