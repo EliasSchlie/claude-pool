@@ -56,7 +56,7 @@ Design decisions and implementation details. Invariants and API surface live in 
   logs/                  # All pool logs
     daemon.log           # Daemon output, lifecycle events
     error.log            # Errors and crashes
-    api.log              # API requests/responses (optional, for debugging)
+    api.log              # API requests/responses
   offloaded/             # Offloaded sessions
     <internalId>/
       meta.json

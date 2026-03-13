@@ -59,7 +59,7 @@ The default is `jsonl-short` — a concise view of Claude's responses without to
 
 **Buffer formats** require a live terminal. They only work for idle, typing, and processing sessions. Errors for queued, offloaded, dead, error, and archived sessions.
 
-**Empty content is valid.** If a session was interrupted (`stop`) before Claude produced any assistant output, or if there is no assistant message after the last user message, JSONL formats return an empty string. This is not an error — it reflects that no output was produced. Callers should handle empty content gracefully.
+**Empty content is valid.** If a session was interrupted (`stop`) before Claude produced any assistant output, or if there is no assistant message after the last user message, JSONL formats might return an empty string. This is not an error — it reflects that no output was produced. Callers should handle empty content gracefully.
 
 ---
 
@@ -104,7 +104,7 @@ If no previous state exists (first-time init), all slots get fresh pre-warmed se
 
 **Response:** `{ type: "pool", pool }`
 
-**Behavior:** Grows or shrinks the pool. When growing: spawns new slots using flags from `config.json`. When shrinking: enqueues "kill slot" tokens at the front of the internal queue — one per slot to remove. When a slot becomes available (session finishes processing, becomes idle, etc.), a kill token consumes it: the session is offloaded and the slot is permanently removed. This means processing sessions finish naturally rather than being interrupted. Pinned sessions are never evicted by resize — if all remaining sessions are pinned, resize waits until pins expire or sessions are unpinned. Queued requests are never dropped — they stay in the queue behind the kill tokens. Size 0 eventually removes all slots but keeps the pool alive and the queue intact (unlike `destroy`).
+**Behavior:** Grows or shrinks the pool. When growing: spawns new slots using flags from `config.json`. When shrinking: enqueues "kill slot" tokens at the front of the internal queue — one per slot to remove. When a slot becomes available (session finishes processing, becomes idle, etc.), a kill token consumes it: the session is offloaded and the slot is permanently removed. This means processing sessions finish naturally rather than being interrupted. Pinned sessions are never evicted by resize — if all remaining sessions are pinned, resize waits until pins expire or sessions are unpinned. Queued requests are never dropped — they stay in the queue behind the kill tokens.
 
 ---
 
