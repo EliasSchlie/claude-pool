@@ -1,7 +1,5 @@
 # Design Principles
 
-> ⛔ **Protected file.** No changes without explicit user permission.
-
 Rules that govern all design decisions. Tiered by importance — higher tiers override lower tiers.
 
 **This is not a 1:1 copy of Open Cockpit's pool logic.** We're taking lessons learned from Open Cockpit and designing a cleaner system from the requirements up. Open Cockpit code is a reference, not a blueprint.
