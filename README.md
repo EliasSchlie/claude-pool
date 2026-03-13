@@ -64,7 +64,7 @@ claude-pool attach abc123
 
 ## Protocol
 
-Newline-delimited JSON over Unix socket. See [SPEC.md](SPEC.md) and [schema/protocol.json](schema/protocol.json).
+Newline-delimited JSON over Unix socket. See [SPEC.md](SPEC.md) for the API surface and [docs/protocol.md](docs/protocol.md) for full protocol details.
 
 ```
 -> {"type":"start","prompt":"fix the bug","id":1}
