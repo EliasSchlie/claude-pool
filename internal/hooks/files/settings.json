@@ -1,0 +1,79 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_POOL_DIR}/hooks/session-pid-map.sh"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_POOL_DIR}/hooks/idle-signal.sh write session-start"
+          }
+        ]
+      },
+      {
+        "matcher": "clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_POOL_DIR}/hooks/idle-signal.sh write session-clear"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_POOL_DIR}/hooks/idle-signal.sh write stop",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion|ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_POOL_DIR}/hooks/idle-signal.sh write tool"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_POOL_DIR}/hooks/idle-signal.sh write permission"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_POOL_DIR}/hooks/idle-signal.sh clear"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_POOL_DIR}/hooks/idle-signal.sh clear"
+          }
+        ]
+      }
+    ]
+  }
+}
