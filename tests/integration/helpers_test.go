@@ -30,21 +30,25 @@ import (
 )
 
 // daemonBinPath is built once by TestMain and shared across all test functions.
-var daemonBinPath string
+// runDir holds pool directories for the current run — preserved on failure.
+var (
+	daemonBinPath string
+	runDir        string
+)
 
 func TestMain(m *testing.M) {
-	tmpDir, err := os.MkdirTemp("", "claude-pool-test-*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
-		os.Exit(1)
-	}
-
 	repoRoot := testutil.FindRepoRoot()
-	daemonBinPath = filepath.Join(tmpDir, "claude-pool")
+	runDir = testutil.SetupRunDir(repoRoot, "integ")
+
+	daemonBinPath = filepath.Join(runDir, "claude-pool")
 	testutil.BuildBinary(repoRoot, daemonBinPath, "./cmd/claude-pool")
 
 	code := m.Run()
-	os.RemoveAll(tmpDir)
+	if code == 0 {
+		os.RemoveAll(runDir)
+	} else {
+		fmt.Fprintf(os.Stderr, "\n=== Test artifacts preserved at: %s ===\n", runDir)
+	}
 	os.Exit(code)
 }
 
@@ -168,7 +172,10 @@ func setupPool(t *testing.T, size int) *testPool {
 func setupDaemon(t *testing.T, size int) *testPool {
 	t.Helper()
 
-	poolDir := t.TempDir()
+	poolDir := filepath.Join(runDir, t.Name())
+	if err := os.MkdirAll(poolDir, 0755); err != nil {
+		t.Fatalf("failed to create pool dir: %v", err)
+	}
 	socketPath := filepath.Join(poolDir, "api.sock")
 
 	configPath := filepath.Join(poolDir, "config.json")
