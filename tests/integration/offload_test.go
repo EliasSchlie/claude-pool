@@ -11,7 +11,7 @@ package integration
 //
 //   1.  "start and wait for idle"
 //   2.  "offload idle session"
-//   3.  "offload pinned session errors"
+//   3.  "offload pinned session auto-unpins"
 //   4.  "offload non-idle errors"
 //   5.  "capture JSONL on offloaded session works"
 //   6.  "capture buffer on offloaded session errors"
