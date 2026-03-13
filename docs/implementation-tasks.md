@@ -43,7 +43,7 @@ Stop hook. Template `hooks.json` for project-local hooks.
 `init` writes hooks into pool directory.
 
 ### 9. `internal/discovery/discovery.go` — Session state detection
-Idle detection via signal files. Status tracking (processing/idle/dead).
+Idle detection via signal files. Status tracking (processing/idle). Process death → session offloaded, slot recycled.
 JSONL transcript reading for Claude UUID discovery.
 **Milestone: sessions actually reach `idle` status after processing**.
 
@@ -103,7 +103,7 @@ Re-init: restore sessions from pool.json. `noRestore` flag.
 ## Layer 9: Polish
 
 ### 18. Reconciliation loop
-Auto-restart dead sessions, periodic health checks (every 30s).
+Recycle error slots, detect process death (session → offloaded, slot → recycled), periodic health checks (every 30s).
 
 ### 19. `internal/attach/server.go` — Attach server
 Per-session raw PTY pipe sockets. Multiple concurrent clients.

@@ -22,11 +22,10 @@
         "typing",
         "processing",
         "offloaded",
-        "dead",
         "error",
         "archived"
       ],
-      "description": "API-visible session states. Internal states (fresh, starting) are not exposed. Offloaded/dead/error sessions can transition to queued via followup/pin."
+      "description": "API-visible session states. Internal slot states (fresh, loading, live, error) are not exposed. Offloaded sessions can transition to queued via followup/pin."
     },
 
     "outputFormat": {
@@ -80,7 +79,6 @@
             "typing": { "type": "integer" },
             "processing": { "type": "integer" },
             "offloaded": { "type": "integer" },
-            "dead": { "type": "integer" },
             "error": { "type": "integer" },
             "archived": { "type": "integer" }
           },
@@ -126,7 +124,7 @@
         },
         "cwd": {
           "type": ["string", "null"],
-          "description": "Current working directory. Live sessions: detected via process inspection. Offloaded/dead: last known from JSONL transcript."
+          "description": "Current working directory. Live sessions: detected via process inspection. Offloaded/error: last known from JSONL transcript."
         },
         "spawnCwd": {
           "type": ["string", "null"],
@@ -335,7 +333,7 @@
     },
 
     "followup": {
-      "description": "Send prompt to session. Auto-resumes if offloaded/dead/error (queues for loading). Errors if queued/processing unless force. Errors if archived.",
+      "description": "Send prompt to session. Auto-resumes if offloaded (queues for loading). Errors if queued/processing unless force. Errors if error/archived.",
       "request": {
         "type": "object",
         "properties": {
@@ -414,7 +412,7 @@
     },
 
     "input": {
-      "description": "Send raw bytes to session PTY. No timing dance. Errors if no live terminal (queued/offloaded/dead/error/archived).",
+      "description": "Send raw bytes to session PTY. No timing dance. Errors if no live terminal (queued/offloaded/error/archived).",
       "request": {
         "type": "object",
         "properties": {
@@ -506,7 +504,7 @@
     },
 
     "pin": {
-      "description": "Prevent auto-offload. No sessionId = allocate fresh session. Offloaded/dead → queued for priority load. Queued → front of queue.",
+      "description": "Prevent auto-offload. No sessionId = allocate fresh session. Offloaded → queued for priority load. Queued → front of queue.",
       "request": {
         "type": "object",
         "properties": {

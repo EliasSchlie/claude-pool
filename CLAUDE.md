@@ -8,12 +8,12 @@ Early development — designing from requirements, referencing Open Cockpit (`~/
 
 ## ⚠️ Read First
 
-**[SPEC.md](SPEC.md)** — Product contract (invariants, protocol, schema). All code must respect it.
+**[SPEC.md](SPEC.md)** — Product contract (invariants, API surface). All code must respect it.
 
 ## ⛔ Protected Files
 
 These files require **explicit user permission** before any modification:
-- `SPEC.md` — Invariants + socket protocol contract
+- `SPEC.md` — Invariants + API surface contract
 - `tests/integration/` — Integration tests. Propose changes and get approval first.
 
 ## Architecture
@@ -28,6 +28,7 @@ These files require **explicit user permission** before any modification:
 
 Key docs:
 - [SPEC.md](SPEC.md) — **Product contract** (read first)
+- [docs/protocol.md](docs/protocol.md) — Full protocol reference (field tables, JSON shapes, per-state behavior)
 - [docs/architecture.md](docs/architecture.md) — Component overview, multi-pool access
 - [docs/testing.md](docs/testing.md) — Testing strategy (no mocking, real sessions, haiku model)
 - [docs/extraction-plan.md](docs/extraction-plan.md) — Implementation plan, OC reference notes
