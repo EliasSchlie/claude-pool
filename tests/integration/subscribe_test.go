@@ -41,10 +41,10 @@ func TestSubscribe(t *testing.T) {
 		assertNotError(t, resp)
 		s1 = strVal(resp, "sessionId")
 
-		// Collect events until we see idle
+		// Collect events until we see idle (30s per event — model may be slow to start)
 		var sawCreated, sawIdle bool
 		for i := 0; i < 20; i++ {
-			ev, ok := sub.nextWithin(10 * time.Second)
+			ev, ok := sub.nextWithin(30 * time.Second)
 			if !ok {
 				break
 			}
@@ -121,7 +121,7 @@ func TestSubscribe(t *testing.T) {
 		// Collect events — only s1 events should appear
 		var sawS1, sawS2 bool
 		for i := 0; i < 20; i++ {
-			ev, ok := sub.nextWithin(5 * time.Second)
+			ev, ok := sub.nextWithin(10 * time.Second)
 			if !ok {
 				break
 			}
@@ -157,7 +157,7 @@ func TestSubscribe(t *testing.T) {
 		// Should receive status events but NOT created events
 		var sawStatus, sawCreated bool
 		for i := 0; i < 20; i++ {
-			ev, ok := sub.nextWithin(10 * time.Second)
+			ev, ok := sub.nextWithin(30 * time.Second)
 			if !ok {
 				break
 			}
@@ -195,7 +195,7 @@ func TestSubscribe(t *testing.T) {
 		// Should only see transitions TO idle, not to processing
 		var sawIdle, sawProcessing bool
 		for i := 0; i < 10; i++ {
-			ev, ok := sub.nextWithin(10 * time.Second)
+			ev, ok := sub.nextWithin(30 * time.Second)
 			if !ok {
 				break
 			}
@@ -224,7 +224,7 @@ func TestSubscribe(t *testing.T) {
 		// Only s1→idle should arrive
 		var matched bool
 		for i := 0; i < 10; i++ {
-			ev, ok := sub.nextWithin(10 * time.Second)
+			ev, ok := sub.nextWithin(30 * time.Second)
 			if !ok {
 				break
 			}
@@ -259,7 +259,7 @@ func TestSubscribe(t *testing.T) {
 		// Should only see s2 events (filters were replaced)
 		var sawS1, sawS2 bool
 		for i := 0; i < 20; i++ {
-			ev, ok := sub.nextWithin(5 * time.Second)
+			ev, ok := sub.nextWithin(10 * time.Second)
 			if !ok {
 				break
 			}
@@ -418,7 +418,7 @@ func TestSubscribe(t *testing.T) {
 		// sub1 should only see s1, sub2 should only see s2
 		var sub1SawS1, sub1SawS2 bool
 		for i := 0; i < 10; i++ {
-			ev, ok := sub1.nextWithin(5 * time.Second)
+			ev, ok := sub1.nextWithin(10 * time.Second)
 			if !ok {
 				break
 			}
@@ -433,7 +433,7 @@ func TestSubscribe(t *testing.T) {
 
 		var sub2SawS1, sub2SawS2 bool
 		for i := 0; i < 10; i++ {
-			ev, ok := sub2.nextWithin(5 * time.Second)
+			ev, ok := sub2.nextWithin(10 * time.Second)
 			if !ok {
 				break
 			}

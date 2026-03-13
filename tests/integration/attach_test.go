@@ -34,6 +34,11 @@ func TestAttach(t *testing.T) {
 
 	var s1 string
 	var attachConn net.Conn
+	t.Cleanup(func() {
+		if attachConn != nil {
+			attachConn.Close()
+		}
+	})
 
 	t.Run("pin fresh session", func(t *testing.T) {
 		resp := pool.send(Msg{"type": "pin"})
@@ -59,8 +64,6 @@ func TestAttach(t *testing.T) {
 		if err != nil {
 			t.Fatalf("connect to attach socket: %v", err)
 		}
-		t.Cleanup(func() { attachConn.Close() })
-
 		drainAttach(attachConn)
 	})
 
