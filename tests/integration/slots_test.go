@@ -13,7 +13,7 @@ package integration
 // Flow:
 //
 //   1.  "start fills all slots"
-//   2.  "third start queues"
+//   2.  "start queues when all slots busy"
 //   3.  "stop cancels queued start"
 //   4.  "queued session gets slot when one frees"
 //   5.  "set-priority affects eviction order"
@@ -56,7 +56,13 @@ func TestSlots(t *testing.T) {
 
 	var s3 string
 
-	t.Run("third start queues", func(t *testing.T) {
+	t.Run("start queues when all slots busy", func(t *testing.T) {
+		// Both sessions must be processing — idle sessions would be evicted
+		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "run the bash command: sleep 60"})
+		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "run the bash command: sleep 60"})
+		pool.awaitStatus(s1, "processing", 15*time.Second)
+		pool.awaitStatus(s2, "processing", 15*time.Second)
+
 		resp := pool.send(Msg{"type": "start", "prompt": "respond with exactly: queued"})
 		assertNotError(t, resp)
 		s3 = strVal(resp, "sessionId")
@@ -70,7 +76,6 @@ func TestSlots(t *testing.T) {
 		session := parseSession(t, info["session"])
 		assertStatus(t, session, "queued")
 
-		// Queued session has no process yet — claudeUUID and PID should be empty
 		if session.ClaudeUUID != "" {
 			t.Fatalf("queued session should have no claudeUUID, got %q", session.ClaudeUUID)
 		}
@@ -98,11 +103,13 @@ func TestSlots(t *testing.T) {
 		if numVal(health, "queueDepth") != 0 {
 			t.Fatalf("expected queue depth 0 after stop, got %v", numVal(health, "queueDepth"))
 		}
+		// s1 and s2 stay processing — step 4 needs full slots
 	})
 
 	var s4 string
 
 	t.Run("queued session gets slot when one frees", func(t *testing.T) {
+		// s1 and s2 are still processing from step 2
 		r := pool.send(Msg{"type": "start", "prompt": "respond with exactly: dequeued"})
 		assertNotError(t, r)
 		s4 = strVal(r, "sessionId")
@@ -111,14 +118,13 @@ func TestSlots(t *testing.T) {
 			t.Fatalf("expected queued, got %q", strVal(r, "status"))
 		}
 
-		// Free a slot by offloading s1
+		// Stop+offload s1 to free its slot — s4 should dequeue into it
+		pool.send(Msg{"type": "stop", "sessionId": s1})
 		pool.send(Msg{"type": "offload", "sessionId": s1})
 		pool.awaitStatus(s1, "offloaded", 10*time.Second)
 
-		// s4 should dequeue into the freed slot
 		pool.awaitStatus(s4, "idle", 60*time.Second)
 
-		// After spawning, claudeUUID and PID should be populated
 		info := pool.send(Msg{"type": "info", "sessionId": s4})
 		session := parseSession(t, info["session"])
 		assertNonEmpty(t, "claudeUUID after dequeue", session.ClaudeUUID)
@@ -131,6 +137,10 @@ func TestSlots(t *testing.T) {
 		if numVal(health, "queueDepth") != 0 {
 			t.Fatalf("expected queue depth 0, got %v", numVal(health, "queueDepth"))
 		}
+
+		// Stop s2 so it's idle for later steps
+		pool.send(Msg{"type": "stop", "sessionId": s2})
+		pool.awaitStatus(s2, "idle", 15*time.Second)
 	})
 
 	t.Run("set-priority affects eviction order", func(t *testing.T) {

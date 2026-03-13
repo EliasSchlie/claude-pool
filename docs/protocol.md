@@ -153,8 +153,7 @@ If no previous state exists (first-time init), all slots get fresh pre-warmed se
 
 **Behavior:** Assigns an internal session ID immediately and returns it. Then:
 1. If a fresh (pre-warmed) slot is available → claims it, sends the prompt. Status: first visible state (e.g. `processing`).
-2. If no fresh slot but an idle session exists → offloads the lowest-priority idle session (LRU within same priority), claims the freed slot, sends the prompt.
-3. If all slots are busy → queues the request. Status: `queued`. The request is executed FIFO when a slot becomes available.
+2. Otherwise → queues the request. Status: `queued`. The queue processor runs asynchronously: if an evictable idle session exists, it offloads the lowest-priority one (LRU within same priority) to free a slot. If no session is evictable (all processing or pinned), the request waits until a slot frees naturally. Queued requests are served FIFO.
 
 The `parentId` is recorded on the session. If the caller is itself a pool session (detected via `CLAUDE_POOL_SESSION_ID` env var), that ID is used as parent automatically.
 

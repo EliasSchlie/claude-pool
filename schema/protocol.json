@@ -335,7 +335,7 @@
     },
 
     "followup": {
-      "description": "Send prompt to session. Auto-resumes if offloaded (queues for loading). Errors if queued/processing unless force. Errors if error/archived.",
+      "description": "Send prompt to session. Auto-resumes if offloaded (queues for loading). Errors if queued/processing unless force. Errors if error unless force (resets retry counter). Errors if archived.",
       "request": {
         "type": "object",
         "properties": {
