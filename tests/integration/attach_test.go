@@ -5,7 +5,7 @@ package integration
 // Pool size: 2
 //
 // This flow tests raw PTY attach: connecting to a session's terminal,
-// typing detection, submitting prompts through the pipe, API followup
+// pendingInput detection, submitting prompts through the pipe, API followup
 // while attached, and pipe lifecycle (offload closes pipe, re-attach
 // after reload).
 //
@@ -13,8 +13,8 @@ package integration
 //
 //   1.  "pin fresh session"
 //   2.  "attach to idle session"
-//   3.  "keystrokes detected as typing"
-//   4.  "clearing input returns to idle"
+//   3.  "keystrokes populate pendingInput"
+//   4.  "clearing input clears pendingInput"
 //   5.  "submit via attach triggers processing and completes"
 //   6.  "followup via API while attached"
 //   7.  "offload closes attach pipe"
@@ -67,21 +67,22 @@ func TestAttach(t *testing.T) {
 		drainAttach(attachConn)
 	})
 
-	t.Run("keystrokes detected as typing", func(t *testing.T) {
+	t.Run("keystrokes populate pendingInput", func(t *testing.T) {
 		if _, err := attachConn.Write([]byte("hello")); err != nil {
 			t.Fatalf("write to attach socket: %v", err)
 		}
 
-		pool.awaitStatus(s1, "typing", 10*time.Second)
+		// Session stays idle — pendingInput is a property, not a state
+		pool.awaitPendingInputSet(s1, 10*time.Second)
 	})
 
-	t.Run("clearing input returns to idle", func(t *testing.T) {
+	t.Run("clearing input clears pendingInput", func(t *testing.T) {
 		// Ctrl-U clears the input line
 		if _, err := attachConn.Write([]byte("\x15")); err != nil {
 			t.Fatalf("write Ctrl-U: %v", err)
 		}
 
-		pool.awaitStatus(s1, "idle", 10*time.Second)
+		pool.awaitPendingInputClear(s1, 10*time.Second)
 	})
 
 	t.Run("submit via attach triggers processing and completes", func(t *testing.T) {

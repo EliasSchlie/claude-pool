@@ -63,17 +63,18 @@ type Msg = map[string]any
 
 // SessionInfo holds parsed session fields from info/ls responses.
 type SessionInfo struct {
-	SessionID  string
-	ClaudeUUID string
-	Status     string
-	ParentID   string
-	Priority   float64
-	Cwd        string
-	SpawnCwd   string
-	CreatedAt  string
-	PID        float64
-	Pinned     bool
-	Children   []SessionInfo
+	SessionID    string
+	ClaudeUUID   string
+	Status       string
+	ParentID     string
+	Priority     float64
+	Cwd          string
+	SpawnCwd     string
+	CreatedAt    string
+	PID          float64
+	Pinned       bool
+	PendingInput string // empty string = nothing typed
+	Children     []SessionInfo
 }
 
 func parseSession(t *testing.T, raw any) SessionInfo {
@@ -83,16 +84,17 @@ func parseSession(t *testing.T, raw any) SessionInfo {
 		t.Fatalf("expected session object, got %T", raw)
 	}
 	s := SessionInfo{
-		SessionID:  strVal(m, "sessionId"),
-		ClaudeUUID: strVal(m, "claudeUUID"),
-		Status:     strVal(m, "status"),
-		ParentID:   strVal(m, "parentId"),
-		Priority:   numVal(m, "priority"),
-		Cwd:        strVal(m, "cwd"),
-		SpawnCwd:   strVal(m, "spawnCwd"),
-		CreatedAt:  strVal(m, "createdAt"),
-		PID:        numVal(m, "pid"),
-		Pinned:     boolVal(m, "pinned"),
+		SessionID:    strVal(m, "sessionId"),
+		ClaudeUUID:   strVal(m, "claudeUUID"),
+		Status:       strVal(m, "status"),
+		ParentID:     strVal(m, "parentId"),
+		Priority:     numVal(m, "priority"),
+		Cwd:          strVal(m, "cwd"),
+		SpawnCwd:     strVal(m, "spawnCwd"),
+		CreatedAt:    strVal(m, "createdAt"),
+		PID:          numVal(m, "pid"),
+		Pinned:       boolVal(m, "pinned"),
+		PendingInput: strVal(m, "pendingInput"),
 	}
 	if kids, ok := m["children"].([]any); ok {
 		for _, k := range kids {
@@ -444,6 +446,62 @@ func (p *testPool) awaitIdleCount(n int, timeout time.Duration) {
 		}
 	}
 	p.t.Fatalf("awaitIdleCount(%d): timed out after %v", n, timeout)
+}
+
+// awaitPendingInputSet subscribes to pendingInput field changes and waits
+// until the session has non-empty pendingInput. Returns the value.
+func (p *testPool) awaitPendingInputSet(sessionID string, timeout time.Duration) string {
+	p.t.Helper()
+	return p.awaitPendingInput(sessionID, func(v string) bool { return v != "" }, timeout)
+}
+
+// awaitPendingInputClear subscribes to pendingInput field changes and waits
+// until the session's pendingInput is empty.
+func (p *testPool) awaitPendingInputClear(sessionID string, timeout time.Duration) {
+	p.t.Helper()
+	p.awaitPendingInput(sessionID, func(v string) bool { return v == "" }, timeout)
+}
+
+// awaitPendingInput subscribes to pendingInput field changes and waits
+// until match returns true.
+func (p *testPool) awaitPendingInput(sessionID string, match func(string) bool, timeout time.Duration) string {
+	p.t.Helper()
+
+	sub := p.subscribe(Msg{
+		"sessions": []string{sessionID},
+		"events":   []string{"updated"},
+		"fields":   []string{"pendingInput"},
+	})
+	defer sub.close()
+
+	// Check current state first
+	resp := p.send(Msg{"type": "info", "sessionId": sessionID})
+	if resp["type"] == "error" {
+		p.t.Fatalf("awaitPendingInput info failed: %v", resp["error"])
+	}
+	info := parseSession(p.t, resp["session"])
+	if match(info.PendingInput) {
+		return info.PendingInput
+	}
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ev, ok := sub.nextWithin(time.Until(deadline))
+		if !ok {
+			break
+		}
+		val := strVal(ev, "pendingInput")
+		if match(val) {
+			return val
+		}
+	}
+
+	// Timeout — get actual value for the error message
+	resp = p.send(Msg{"type": "info", "sessionId": sessionID})
+	info = parseSession(p.t, resp["session"])
+	p.t.Fatalf("awaitPendingInput(%s): timed out after %v, pendingInput was %q",
+		sessionID, timeout, info.PendingInput)
+	return "" // unreachable
 }
 
 // --------------------------------------------------------------------
