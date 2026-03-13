@@ -63,6 +63,30 @@ func SetupRunDir(repoRoot, prefix string) string {
 
 const stampFormat = "0102-150405"
 
+// StrVal extracts a string from a JSON map, returning "" if missing or wrong type.
+func StrVal(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// NumVal extracts a float64 from a JSON map, returning 0 if missing or wrong type.
+func NumVal(m map[string]any, key string) float64 {
+	if v, ok := m[key].(float64); ok {
+		return v
+	}
+	return 0
+}
+
+// BoolVal extracts a bool from a JSON map, returning false if missing or wrong type.
+func BoolVal(m map[string]any, key string) bool {
+	if v, ok := m[key].(bool); ok {
+		return v
+	}
+	return false
+}
+
 // pruneOldRuns removes subdirectories of baseDir whose embedded timestamp
 // is older than maxAge. Parses the timestamp from the directory name
 // (format: <prefix>-MMDD-HHMMSS) rather than relying on mtime, which can
