@@ -179,6 +179,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 - If session is **processing** → errors, unless `force: true` (sends the prompt anyway, useful for interrupt-and-redirect).
 - If session is **typing** → errors, unless `force: true`.
 - If session is **queued** → errors, unless `force: true` (replaces the pending prompt). Use `stop` to cancel a queued request before sending a new followup.
+- If session is **error** → errors, unless `force: true` (resets retry counter, attempts loading again).
 - If session is **archived** → errors. Unarchive first.
 
 ---

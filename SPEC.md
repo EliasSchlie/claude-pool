@@ -44,7 +44,7 @@ Offloaded sessions can become `queued` again when targeted by `followup` or `pin
 
 When a session's process dies, the session transitions to `offloaded` (not a separate state — the JSONL transcript still exists). The error is logged. On next `followup` or `pin`, the session is loaded normally.
 
-When a session fails to load, the error is logged and loading is retried automatically. After repeated failures (implementation decides the threshold), the session is marked `error`. Error sessions are visible but cannot be loaded without explicit action.
+When a session fails to load, the error is logged and loading is retried automatically. After repeated failures (implementation decides the threshold), the session is marked `error`. Error sessions are visible but cannot be loaded without explicit action (`followup` with `force: true` resets the retry counter and attempts loading again).
 
 ### Output Formats
 
