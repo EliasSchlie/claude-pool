@@ -34,11 +34,20 @@ A **slot** is a physical resource — a running Claude Code process with a PTY. 
 |-------|---------|
 | `queued` | Waiting for a slot |
 | `idle` | Finished processing, waiting for input |
-| `typing` | Un-submitted input detected in a fresh slot's terminal buffer |
 | `processing` | Claude is working |
 | `offloaded` | Not in a slot, can be resumed |
 | `error` | Repeatedly failed to load (broken session) |
 | `archived` | Done. Hidden from `ls` by default. Auto-cleaned after 30 days. |
+
+### Session Properties
+
+| Property | Type | Meaning |
+|----------|------|---------|
+| `pinned` | boolean | Protected from LRU eviction (time-limited) |
+| `pendingInput` | string | Un-submitted text in terminal buffer. Empty string if nothing typed. Only populated for loaded sessions. |
+| `priority` | number | Eviction priority (default 0, lower = evicted first) |
+
+When `pendingInput` changes (text detected or cleared), the session's LRU timestamp is reset — it counts as recently used. Sessions with non-empty `pendingInput` are evicted after sessions with empty input (someone is actively working there).
 
 Offloaded sessions can become `queued` again when targeted by `followup` or `pin`.
 
@@ -59,7 +68,7 @@ Commands that return session output (`wait`, `capture`) accept a `format` field:
 | `buffer-last` | Terminal buffer since last user message. | Yes |
 | `buffer-full` | Full terminal scrollback, ANSI stripped. | Yes |
 
-JSONL formats read from Claude Code's transcript files (via Claude UUID). Work for any session with a known UUID — including offloaded and archived. Buffer formats require a live terminal (idle, typing, processing only).
+JSONL formats read from Claude Code's transcript files (via Claude UUID). Work for any session with a known UUID — including offloaded and archived. Buffer formats require a live terminal (idle or processing only).
 
 Empty content is valid — if a session was stopped before producing output, JSONL formats might return an empty string.
 
@@ -104,7 +113,7 @@ Transport: Unix domain socket, newline-delimited JSON. See [docs/protocol.md](do
 
 ### Events
 
-- **`subscribe`** — Open a persistent event stream. Filterable by session, event type, status transition, or property change. Re-subscribing on the same connection replaces filters.
+- **`subscribe`** — Open a persistent event stream. Filterable by session, event type, status transition, or property change (including `pendingInput`). Re-subscribing on the same connection replaces filters.
 
 ---
 
@@ -124,7 +133,7 @@ The CLI is a separate package — a thin router that resolves pool names to sock
 When a slot is needed and none are free:
 
 1. Use a `fresh` slot first (no session to displace).
-2. If no fresh slots, offload the lowest-priority idle session. Within the same priority, offload the session that has been idle the longest (LRU).
+2. If no fresh slots, offload the lowest-priority idle session. Within the same priority, prefer sessions with empty `pendingInput` over those with pending text. Within the same input state, offload the session that has been idle the longest (LRU).
 3. Pinned sessions are never evicted. If all idle sessions are pinned, the request queues until a slot frees up naturally.
 4. Processing sessions are never interrupted for eviction — they finish naturally.
 
@@ -136,7 +145,7 @@ Slots are the physical resources that host sessions. Consumers never interact wi
 |-------|---------|
 | `fresh` | Pre-warmed Claude process, never prompted. Ready for immediate use. |
 | `loading` | Starting a new session or resuming an offloaded one. |
-| `live` | Hosting an active session (idle, typing, or processing). |
+| `live` | Hosting an active session (idle or processing). |
 | `error` | Crashed during startup or loading. Recycled automatically (killed, replaced with fresh). |
 
 ### Debug API

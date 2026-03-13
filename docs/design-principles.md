@@ -34,7 +34,7 @@ Design decisions and implementation details. Invariants and API surface live in 
 19. Socket permissions `0600` (owner-only).
 20. Offloaded sessions stored as `meta.json` (JSONL transcripts are the persistent record).
 21. Default flags: `--dangerously-skip-permissions`.
-22. Typing detection: polls terminal buffer for un-submitted input (consecutive-miss threshold).
+22. Pending input detection: polls terminal buffer for un-submitted text (consecutive-miss threshold). Populates `pendingInput` session property.
 23. Lock discipline: hold mutex only for in-memory state mutations. Never across I/O, process spawning, or network calls.
 
 ---
