@@ -10,7 +10,7 @@ These are non-negotiable. Code that violates an invariant is a bug.
 
 2. **Clients only interact through the socket.** All clients (CLI, Python, Open Cockpit, custom tools) talk to a pool exclusively through its socket API. No client should ever directly read pool.json, write to idle-signals/, or import pool internals. The socket is the boundary — inside is the pool's business, outside is the client's business.
 
-3. **Each pool has its own logs.** All logging for a pool goes into that pool's directory. When debugging, you look at one pool's logs — never need to grep through shared log files or correlate across pools.
+3. **Each pool has its own logs.** All logging for a pool goes into that pool's directory. When debugging, you look at one pool's logs — never need to grep through shared log files or correlate across pools. Log everything by default (state changes, API requests, errors, lifecycle events). Retain logs for at least 24 hours.
 
 4. **Pools are uniform.** All sessions in a pool run with the same flags and configuration. If you need different flags, create a different pool. No mixed configurations within a pool.
 
@@ -52,7 +52,7 @@ Commands that return session output (`wait`, `capture`) accept a `format` field:
 
 JSONL formats read from Claude Code's transcript files (via Claude UUID). Work for any session with a known UUID — including offloaded, dead, archived. Buffer formats require a live terminal (idle, typing, processing only).
 
-Empty content is valid — if a session was stopped before producing output, JSONL formats return an empty string.
+Empty content is valid — if a session was stopped before producing output, JSONL formats might return an empty string.
 
 ---
 
@@ -64,7 +64,7 @@ Transport: Unix domain socket, newline-delimited JSON. See [docs/protocol.md](do
 
 - **`ping`** — Health check. Returns immediately.
 - **`init`** — Initialize the pool. Reads flags from `config.json`. Restores previously live sessions by default (skip with `noRestore`). Errors if already initialized.
-- **`resize`** — Change slot count. Growing spawns new slots. Shrinking uses kill tokens — processing sessions finish naturally, pinned sessions are never evicted, queued requests are never dropped. Size 0 removes all slots but keeps the pool alive.
+- **`resize`** — Change slot count. Growing spawns new slots. Shrinking uses kill tokens — processing sessions finish naturally, pinned sessions are never evicted, queued requests are never dropped.
 - **`health`** — Pool health report. Shows all sessions regardless of ownership.
 - **`destroy`** — Kill all sessions, daemon exits. Pool directory and config persist — can re-init later. Requires `confirm: true`.
 - **`config`** — Read or update `config.json`. Changes affect future spawns only.
