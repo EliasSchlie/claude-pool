@@ -64,7 +64,7 @@ claude-pool attach abc123
 
 ## Protocol
 
-Newline-delimited JSON over Unix socket. See [docs/protocol.md](docs/protocol.md) and [schema/protocol.json](schema/protocol.json).
+Newline-delimited JSON over Unix socket. See [SPEC.md](SPEC.md) and [schema/protocol.json](schema/protocol.json).
 
 ```
 -> {"type":"start","prompt":"fix the bug","id":1}
@@ -73,7 +73,7 @@ Newline-delimited JSON over Unix socket. See [docs/protocol.md](docs/protocol.md
 
 ## Design Principles
 
-See [docs/design-principles.md](docs/design-principles.md) for invariants and rules.
+See [SPEC.md](SPEC.md) for invariants and protocol. See [docs/design-principles.md](docs/design-principles.md) for design decisions.
 
 Key principles:
 - **Pool isolation is absolute** — each pool is a separate daemon, separate directory, zero shared state

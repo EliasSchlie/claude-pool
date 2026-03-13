@@ -1,8 +1,28 @@
-# Socket Protocol
+# Spec
 
-> ⛔ **Protected file.** No changes without explicit user permission. `schema/protocol.json` is the machine-readable version.
+> ⛔ **Protected.** No changes without explicit user permission. Flag contradictions — don't silently work around them.
 
-## Transport
+## Invariants
+
+These are non-negotiable. Code that violates an invariant is a bug.
+
+1. **Pool isolation is absolute.** Each pool runs its own daemon process, owns its own directory, and shares zero state with other pools. If one pool crashes, panics, corrupts its data, or runs buggy code — other pools are completely unaffected. No shared sockets, no shared files, no shared processes.
+
+2. **Clients only interact through the socket.** All clients (CLI, Python, Open Cockpit, custom tools) talk to a pool exclusively through its socket API. No client should ever directly read pool.json, write to idle-signals/, or import pool internals. The socket is the boundary — inside is the pool's business, outside is the client's business.
+
+3. **Each pool has its own logs.** All logging for a pool goes into that pool's directory. When debugging, you look at one pool's logs — never need to grep through shared log files or correlate across pools.
+
+4. **Pools are uniform.** All sessions in a pool run with the same flags and configuration. If you need different flags, create a different pool. No mixed configurations within a pool.
+
+5. **Internal session IDs are the primary identifier.** Each session gets a pool-assigned internal ID (short random string) at request time — before a slot is allocated, before Claude starts. This ID is stable across the session's entire lifecycle: queued → live → offloaded → resumed. The Claude UUID is discovered later and mapped 1:1. Both are queryable, but the internal ID is what clients use.
+
+6. **Sessions have owners.** Every session tracks its parent (the session or external caller that spawned it). By default, API queries return only sessions owned by the caller (direct children + their descendants). An explicit flag (`all: true`) shows all pool sessions. This prevents sessions from interfering with each other's sub-agents.
+
+---
+
+## Socket Protocol
+
+### Transport
 
 Unix domain socket at `~/.claude-pool/pools/<name>/api.sock`. Newline-delimited JSON. Each message is one JSON object + `\n`. Requests may include `id` — response echoes it back.
 
@@ -11,19 +31,19 @@ Unix domain socket at `~/.claude-pool/pools/<name>/api.sock`. Newline-delimited 
 <- {"type":"pong","id":1}\n
 ```
 
-## Errors
+### Errors
 
 All errors: `{ type: "error", error: "human-readable message", id: <echoed> }`.
 
-## Session Identity
+### Session Identity
 
 Sessions are addressed by **internal IDs** — short random strings (like `a7f2x9`) assigned at request time. The Claude UUID is discovered later and mapped 1:1. Use `info` to look up the Claude UUID for a given internal ID.
 
-## Ownership
+### Ownership
 
 Sessions track their parent. Auto-detected via `CLAUDE_POOL_SESSION_ID` env var, or set via `parentId`. `ls` returns only owned sessions by default. `all: true` shows everything.
 
-## Session States
+### Session States
 
 | State | Meaning |
 |-------|---------|
@@ -40,7 +60,7 @@ Sessions track their parent. Auto-detected via `CLAUDE_POOL_SESSION_ID` env var,
 
 ---
 
-## Output Formats
+### Output Formats
 
 Commands that return session output (`wait`, `capture`) accept a `format` field:
 
@@ -63,9 +83,9 @@ The default is `jsonl-short` — a concise view of Claude's responses without to
 
 ---
 
-## Commands
+### Commands
 
-### `ping`
+#### `ping`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -77,7 +97,7 @@ The default is `jsonl-short` — a concise view of Claude's responses without to
 
 ---
 
-### `init`
+#### `init`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -96,7 +116,7 @@ If no previous state exists (first-time init), all slots get fresh pre-warmed se
 
 ---
 
-### `resize`
+#### `resize`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -108,7 +128,7 @@ If no previous state exists (first-time init), all slots get fresh pre-warmed se
 
 ---
 
-### `health`
+#### `health`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -120,7 +140,7 @@ If no previous state exists (first-time init), all slots get fresh pre-warmed se
 
 ---
 
-### `destroy`
+#### `destroy`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -132,7 +152,7 @@ If no previous state exists (first-time init), all slots get fresh pre-warmed se
 
 ---
 
-### `config`
+#### `config`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -144,7 +164,7 @@ If no previous state exists (first-time init), all slots get fresh pre-warmed se
 
 ---
 
-### `start`
+#### `start`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -164,7 +184,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 ---
 
-### `followup`
+#### `followup`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -185,7 +205,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 ---
 
-### `wait`
+#### `wait`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -206,7 +226,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 ---
 
-### `capture`
+#### `capture`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -222,7 +242,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 ---
 
-### `input`
+#### `input`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -239,7 +259,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 ---
 
-### `offload`
+#### `offload`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -254,7 +274,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 ---
 
-### `ls`
+#### `ls`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -274,7 +294,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 ---
 
-### `info`
+#### `info`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -319,7 +339,7 @@ Works for any state including offloaded, archived, and dead. This is the primary
 
 ---
 
-### `pin`
+#### `pin`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -341,7 +361,7 @@ Works for any state including offloaded, archived, and dead. This is the primary
 
 ---
 
-### `unpin`
+#### `unpin`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -353,7 +373,7 @@ Works for any state including offloaded, archived, and dead. This is the primary
 
 ---
 
-### `stop`
+#### `stop`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -369,7 +389,7 @@ Works for any state including offloaded, archived, and dead. This is the primary
 
 ---
 
-### `archive`
+#### `archive`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -391,7 +411,7 @@ Works for any state including offloaded, archived, and dead. This is the primary
 
 ---
 
-### `unarchive`
+#### `unarchive`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -404,7 +424,7 @@ Works for any state including offloaded, archived, and dead. This is the primary
 
 ---
 
-### `set-priority`
+#### `set-priority`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -421,7 +441,7 @@ Works for any state including offloaded, archived, and dead. This is the primary
 
 ---
 
-### `attach`
+#### `attach`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -439,7 +459,7 @@ Works for any state including offloaded, archived, and dead. This is the primary
 
 ---
 
-### `subscribe`
+#### `subscribe`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|

@@ -8,15 +8,13 @@ Early development — designing from requirements, referencing Open Cockpit (`~/
 
 ## ⚠️ Read First
 
-**[docs/design-principles.md](docs/design-principles.md)** — Invariants, design decisions, and implementation details, tiered by importance. All code must respect the invariants.
+**[SPEC.md](SPEC.md)** — Product contract (invariants, protocol, schema). All code must respect it.
 
 ## ⛔ Protected Files
 
 These files require **explicit user permission** before any modification:
-- `docs/design-principles.md` — Project invariants and rules
-- `docs/protocol.md` — API contract (human-readable)
-- `schema/protocol.json` — API contract (machine-readable)
-- `tests/integration/` — All integration test files. Tests are the contract — never modify without explicit user permission. Propose changes and get approval first.
+- `SPEC.md` — Invariants + socket protocol contract
+- `tests/integration/` — Integration tests. Propose changes and get approval first.
 
 ## Architecture
 
@@ -24,17 +22,15 @@ These files require **explicit user permission** before any modification:
 - `internal/` — Daemon packages (pool, pty, api, attach, discovery, paths)
 - `tests/integration/` — Integration tests (real Claude sessions, `--model haiku`)
 - `tests/manual/` — Manual testing directory (own `.claude/` hooks, independent per worktree)
-- `schema/` — JSON Schema contract for the socket protocol (source of truth)
+- `schema/` — JSON Schema (must match SPEC.md)
 - `hooks/` — Claude Code hook scripts (project-local, written into pool dir on init)
 - `docs/` — Documentation
 
 Key docs:
-- [docs/design-principles.md](docs/design-principles.md) — **Invariants and rules** (read first)
+- [SPEC.md](SPEC.md) — **Product contract** (read first)
 - [docs/architecture.md](docs/architecture.md) — Component overview, multi-pool access
-- [docs/protocol.md](docs/protocol.md) — Socket API summary
-- [schema/protocol.json](schema/protocol.json) — Socket API contract (machine-readable)
-- [docs/extraction-plan.md](docs/extraction-plan.md) — Implementation plan, OC reference notes
 - [docs/testing.md](docs/testing.md) — Testing strategy (no mocking, real sessions, haiku model)
+- [docs/extraction-plan.md](docs/extraction-plan.md) — Implementation plan, OC reference notes
 
 ## Scope
 
