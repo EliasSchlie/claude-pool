@@ -22,7 +22,13 @@ These are non-negotiable. Code that violates an invariant is a bug.
 
 ---
 
-## Session States
+## Concepts
+
+A **session** is a logical unit of work — it has an ID, an owner, prompt history, and a lifecycle (queued → active → offloaded → archived). Sessions survive being unloaded and reloaded.
+
+A **slot** is a physical resource — a running Claude Code process with a PTY. Slots host sessions. When a slot is needed elsewhere, the session is offloaded and the slot is reused.
+
+### Session States
 
 | State | Meaning |
 |-------|---------|
@@ -40,33 +46,7 @@ When a session's process dies, the session transitions to `offloaded` (not a sep
 
 When a session fails to load, the error is logged and loading is retried automatically. After repeated failures (implementation decides the threshold), the session is marked `error`. Error sessions are visible but cannot be loaded without explicit action.
 
----
-
-## Slot States (internal)
-
-Slots are the physical resources that host sessions. Consumers never interact with slots directly (invariant #7).
-
-| State | Meaning |
-|-------|---------|
-| `fresh` | Pre-warmed Claude process, never prompted. Ready for immediate use. |
-| `loading` | Starting a new session or resuming an offloaded one. |
-| `live` | Hosting an active session (idle, typing, or processing). |
-| `error` | Crashed during startup or loading. Recycled automatically (killed, replaced with fresh). |
-
----
-
-## Eviction Policy
-
-When a slot is needed and none are free:
-
-1. Use a `fresh` slot first (no session to displace).
-2. If no fresh slots, offload the lowest-priority idle session. Within the same priority, offload the session that has been idle the longest (LRU).
-3. Pinned sessions are never evicted. If all idle sessions are pinned, the request queues until a slot frees up naturally.
-4. Processing sessions are never interrupted for eviction — they finish naturally.
-
----
-
-## Output Formats
+### Output Formats
 
 Commands that return session output (`wait`, `capture`) accept a `format` field:
 
@@ -83,9 +63,18 @@ JSONL formats read from Claude Code's transcript files (via Claude UUID). Work f
 
 Empty content is valid — if a session was stopped before producing output, JSONL formats might return an empty string.
 
+### Eviction Policy
+
+When a slot is needed and none are free:
+
+1. Use a `fresh` slot first (no session to displace).
+2. If no fresh slots, offload the lowest-priority idle session. Within the same priority, offload the session that has been idle the longest (LRU).
+3. Pinned sessions are never evicted. If all idle sessions are pinned, the request queues until a slot frees up naturally.
+4. Processing sessions are never interrupted for eviction — they finish naturally.
+
 ---
 
-## API Surface
+## Consumer API
 
 Transport: Unix domain socket, newline-delimited JSON. See [docs/protocol.md](docs/protocol.md) for full field-level details.
 
@@ -126,9 +115,7 @@ Transport: Unix domain socket, newline-delimited JSON. See [docs/protocol.md](do
 
 - **`subscribe`** — Open a persistent event stream. Filterable by session, event type, status transition, or property change. Re-subscribing on the same connection replaces filters.
 
----
-
-## CLI
+### CLI
 
 The CLI is a separate package — a thin router that resolves pool names to socket connections. Each API command maps 1:1 to a CLI subcommand.
 
@@ -137,7 +124,20 @@ The CLI is a separate package — a thin router that resolves pool names to sock
 
 ---
 
-## Debug API
+## Internals
+
+### Slot States
+
+Slots are the physical resources that host sessions. Consumers never interact with slots directly (invariant #7).
+
+| State | Meaning |
+|-------|---------|
+| `fresh` | Pre-warmed Claude process, never prompted. Ready for immediate use. |
+| `loading` | Starting a new session or resuming an offloaded one. |
+| `live` | Hosting an active session (idle, typing, or processing). |
+| `error` | Crashed during startup or loading. Recycled automatically (killed, replaced with fresh). |
+
+### Debug API
 
 Separate from the consumer API. Provides direct access to internal pool state for debugging:
 
