@@ -212,9 +212,9 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 **Response:** `{ type: "result", sessionId, content }` — session output.
 
 **Behavior:** Returns the current session output, regardless of session state.
-- **JSONL formats** work for any session with a known Claude UUID: **idle**, **processing**, **offloaded**, **error**, **archived**. Reads from Claude Code's transcript files.
+- **JSONL formats** work for any session with a known Claude UUID: **idle**, **processing**, **queued** (if re-queued from offloaded), **offloaded**, **error**, **archived**. Reads from Claude Code's transcript files.
 - **Buffer formats** only work for live sessions (**idle**, **processing**). Errors for all other states.
-- Errors if session is **queued** (no UUID or terminal yet).
+- **Queued** sessions: JSONL formats work if the session has a UUID (re-queued from offloaded). Buffer formats error (no live terminal). Sessions queued from scratch (never spawned) have no UUID, so all formats error.
 
 ---
 

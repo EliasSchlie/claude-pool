@@ -68,7 +68,7 @@ Commands that return session output (`wait`, `capture`) accept a `format` field:
 | `buffer-last` | Terminal buffer since last user message. | Yes |
 | `buffer-full` | Full terminal scrollback, ANSI stripped. | Yes |
 
-JSONL formats read from Claude Code's transcript files (via Claude UUID). Work for any session with a known UUID — including offloaded and archived. Buffer formats require a live terminal (idle or processing only).
+JSONL formats read from Claude Code's transcript files (via Claude UUID). Work for any session with a known UUID — including offloaded, archived, and re-queued sessions that retain their UUID. Buffer formats require a live terminal (idle or processing only).
 
 Empty content is valid — if a session was stopped before producing output, JSONL formats might return an empty string.
 
@@ -101,7 +101,7 @@ Transport: Unix domain socket, newline-delimited JSON. See [docs/protocol.md](do
 - **`ls`** — List sessions. Default: owned sessions only. `all: true` for everything. `tree: true` for nested descendants. `archived: true` to include archived.
 - **`info`** — Full session details including Claude UUID, cwd, priority, pin status, and recursive children tree.
 - **`wait`** — Long-poll until a session becomes idle. Returns session output. Without a sessionId, waits for any owned busy session.
-- **`capture`** — Return session output immediately, regardless of state. JSONL formats work for any session with a UUID; buffer formats require a live terminal.
+- **`capture`** — Return session output immediately, regardless of state. JSONL formats work for any session with a UUID (including queued sessions re-queued via `followup`/`pin` that retain their UUID); buffer formats require a live terminal (errors on queued and offloaded sessions).
 
 ### Session Control
 
@@ -147,6 +147,10 @@ Slots are the physical resources that host sessions. Consumers never interact wi
 | `loading` | Starting a new session or resuming an offloaded one. |
 | `live` | Hosting an active session (idle or processing). |
 | `error` | Crashed during startup or loading. Recycled automatically (killed, replaced with fresh). |
+
+### Session Lifecycle Mechanics
+
+All Claude sessions are persistent and headful — the pool never spawns throwaway processes. When a slot needs to host a new session, the pool sends `/clear` to reset the existing Claude process's context. When resuming an offloaded session, the pool sends `/resume <uuid>` to restore it into the cleared slot. This reuse model exists because spawning a new Claude CLI process kills bash command output for all other running Claude processes on the same machine.
 
 ### Debug API
 

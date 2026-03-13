@@ -11,21 +11,25 @@ package integration
 //
 //   1.  "start and wait for idle"
 //   2.  "offload idle session"
-//   3.  "offload pinned session auto-unpins"
-//   4.  "offload non-idle errors"
-//   5.  "capture JSONL on offloaded session works"
-//   6.  "capture buffer on offloaded session errors"
-//   7.  "followup restores offloaded session"
-//   8.  "archive idle session"
-//   9.  "archived session hidden from ls"
-//  10.  "capture JSONL on archived session works"
-//  11.  "capture buffer on archived session errors"
-//  12.  "followup on archived errors"
-//  13.  "pin on archived errors"
-//  14.  "unarchive restores to offloaded"
-//  15.  "unarchive on non-archived errors"
-//  16.  "archive stops active session first"
-//  17.  "archive is idempotent"
+//   3.  "stop on offloaded errors"
+//   4.  "offload pinned session auto-unpins"
+//   5.  "offload non-idle errors"
+//   6.  "capture JSONL on offloaded session works"
+//   7.  "capture buffer on offloaded session errors"
+//   8.  "followup restores offloaded session"
+//   9.  "process death transitions to offloaded"
+//  10.  "wait returns error on session death"
+//  11.  "archive idle session"
+//  12.  "stop on archived errors"
+//  13.  "archived session hidden from ls"
+//  14.  "capture JSONL on archived session works"
+//  15.  "capture buffer on archived session errors"
+//  16.  "followup on archived errors"
+//  17.  "pin on archived errors"
+//  18.  "unarchive restores to offloaded"
+//  19.  "unarchive on non-archived errors"
+//  20.  "archive stops active session first"
+//  21.  "archive is idempotent"
 
 import (
 	"testing"
@@ -61,6 +65,12 @@ func TestOffload(t *testing.T) {
 		if session.PID != 0 {
 			t.Fatalf("offloaded session should have no PID, got %v", session.PID)
 		}
+	})
+
+	t.Run("stop on offloaded errors", func(t *testing.T) {
+		// s1 is offloaded — nothing to stop
+		resp := pool.send(Msg{"type": "stop", "sessionId": s1})
+		assertError(t, resp)
 	})
 
 	t.Run("offload pinned session auto-unpins", func(t *testing.T) {
@@ -125,9 +135,50 @@ func TestOffload(t *testing.T) {
 		}
 	})
 
+	t.Run("process death transitions to offloaded", func(t *testing.T) {
+		// s2 is idle with a live PID — kill it directly
+		info := pool.send(Msg{"type": "info", "sessionId": s2})
+		session := parseSession(t, info["session"])
+		pid := int(session.PID)
+		if pid <= 0 {
+			t.Fatalf("expected live PID for s2, got %v", pid)
+		}
+
+		killPID(t, pid)
+
+		s := pool.awaitStatus(s2, "offloaded", 15*time.Second)
+		if s.PID != 0 {
+			t.Fatalf("dead session should have PID 0, got %v", s.PID)
+		}
+	})
+
+	t.Run("wait returns error on session death", func(t *testing.T) {
+		// s1 is idle — start a long-running task, then kill the process mid-wait
+		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "run the bash command: sleep 120"})
+		pool.awaitStatus(s1, "processing", 15*time.Second)
+
+		info := pool.send(Msg{"type": "info", "sessionId": s1})
+		session := parseSession(t, info["session"])
+		pid := int(session.PID)
+
+		// Use a separate connection for the concurrent wait (main conn isn't thread-safe)
+		waitConn, waitScanner := pool.newConn()
+		ch := make(chan Msg, 1)
+		go func() {
+			ch <- pool.sendOn(waitConn, waitScanner,
+				Msg{"type": "wait", "sessionId": s1, "timeout": 30000},
+			)
+		}()
+
+		// Give wait a moment to register on the server before killing
+		time.Sleep(500 * time.Millisecond)
+		killPID(t, pid)
+
+		assertError(t, <-ch)
+	})
+
 	t.Run("archive idle session", func(t *testing.T) {
-		// Offload first so it frees the slot, then archive
-		pool.send(Msg{"type": "offload", "sessionId": s1})
+		// s1 is offloaded after process death — archive directly
 		pool.awaitStatus(s1, "offloaded", 10*time.Second)
 
 		resp := pool.send(Msg{"type": "archive", "sessionId": s1})
@@ -137,6 +188,12 @@ func TestOffload(t *testing.T) {
 		info := pool.send(Msg{"type": "info", "sessionId": s1})
 		session := parseSession(t, info["session"])
 		assertStatus(t, session, "archived")
+	})
+
+	t.Run("stop on archived errors", func(t *testing.T) {
+		// s1 is archived — nothing to stop
+		resp := pool.send(Msg{"type": "stop", "sessionId": s1})
+		assertError(t, resp)
 	})
 
 	t.Run("archived session hidden from ls", func(t *testing.T) {
