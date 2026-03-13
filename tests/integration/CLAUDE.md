@@ -52,6 +52,7 @@ Shared infrastructure:
 | File | Purpose |
 |------|---------|
 | `helpers_test.go` | Pool setup/teardown, socket client, assertion helpers |
+| `../testutil/testutil.go` | TestMain utilities: find repo root, build binary, setup run dir, JSON value extractors |
 
 ## Running
 
