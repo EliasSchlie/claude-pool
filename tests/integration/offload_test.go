@@ -30,6 +30,8 @@ package integration
 //  19.  "unarchive on non-archived errors"
 //  20.  "archive stops active session first"
 //  21.  "archive is idempotent"
+//  22.  "archive pinned session unpins first"
+//  23.  "archive queued session cancels and archives"
 
 import (
 	"testing"
@@ -274,5 +276,57 @@ func TestOffload(t *testing.T) {
 		resp := pool.send(Msg{"type": "archive", "sessionId": s2})
 		assertNotError(t, resp)
 		assertType(t, resp, "ok")
+	})
+
+	// State: s1 offloaded, s2 archived
+
+	t.Run("archive pinned session unpins first", func(t *testing.T) {
+		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: pin test"})
+		pool.awaitStatus(s1, "idle", 60*time.Second)
+
+		pool.send(Msg{"type": "pin", "sessionId": s1})
+
+		resp := pool.send(Msg{"type": "archive", "sessionId": s1})
+		assertNotError(t, resp)
+		assertType(t, resp, "ok")
+
+		info := pool.send(Msg{"type": "info", "sessionId": s1})
+		session := parseSession(t, info["session"])
+		assertStatus(t, session, "archived")
+		if session.Pinned {
+			t.Fatal("archived session should not still be pinned")
+		}
+	})
+
+	// State: s1 archived, s2 archived, both slots free
+
+	t.Run("archive queued session cancels and archives", func(t *testing.T) {
+		pool.send(Msg{"type": "unarchive", "sessionId": s1})
+		pool.send(Msg{"type": "unarchive", "sessionId": s2})
+		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: fill1"})
+		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "respond with exactly: fill2"})
+		pool.awaitStatus(s1, "idle", 60*time.Second)
+		pool.awaitStatus(s2, "idle", 60*time.Second)
+
+		// Pin both so the new session can't evict them — forces queuing
+		pool.send(Msg{"type": "pin", "sessionId": s1})
+		pool.send(Msg{"type": "pin", "sessionId": s2})
+
+		// Pool is full (2/2), both pinned — new session must queue
+		r := pool.send(Msg{"type": "start", "prompt": "respond with exactly: queued"})
+		assertNotError(t, r)
+		s3 := strVal(r, "sessionId")
+
+		info := pool.send(Msg{"type": "info", "sessionId": s3})
+		session := parseSession(t, info["session"])
+		assertStatus(t, session, "queued")
+
+		resp := pool.send(Msg{"type": "archive", "sessionId": s3})
+		assertNotError(t, resp)
+		assertType(t, resp, "ok")
+
+		info = pool.send(Msg{"type": "info", "sessionId": s3})
+		session = parseSession(t, info["session"])
+		assertStatus(t, session, "archived")
 	})
 }
