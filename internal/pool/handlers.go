@@ -548,7 +548,24 @@ func (m *Manager) handleStop(id any, req api.Msg) api.Msg {
 }
 
 // parseCaptureParams extracts source/turns/detail from a request with defaults.
+// Also supports the legacy "format" field (e.g., "jsonl-short", "buffer-full")
+// which maps to the equivalent source/turns/detail combination.
 func parseCaptureParams(req api.Msg) (source string, turns int, detail string) {
+	if format, ok := req["format"].(string); ok && format != "" {
+		switch format {
+		case "jsonl-short", "jsonl-last": // aliases — both mean last turn, last assistant response
+			return "jsonl", 1, "last"
+		case "jsonl-long":
+			return "jsonl", 1, "tools"
+		case "jsonl-full":
+			return "jsonl", 0, "raw"
+		case "buffer-last":
+			return "buffer", 1, "last"
+		case "buffer-full":
+			return "buffer", 0, "last"
+		}
+	}
+
 	source, _ = req["source"].(string)
 	if source == "" {
 		source = "jsonl"
