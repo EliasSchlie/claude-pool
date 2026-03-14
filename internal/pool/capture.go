@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -11,12 +12,12 @@ func (m *Manager) captureContent(s *Session, format string) string {
 	switch format {
 	case "buffer-full":
 		if proc := m.procs[s.ID]; proc != nil {
-			return string(proc.Buffer())
+			return stripANSI(string(proc.Buffer()))
 		}
 		return ""
 	case "buffer-last":
 		if proc := m.procs[s.ID]; proc != nil {
-			return extractLastSection(string(proc.Buffer()))
+			return extractLastSection(stripANSI(string(proc.Buffer())))
 		}
 		return ""
 	case "jsonl-full":
@@ -170,4 +171,11 @@ func extractLastSection(buf string) string {
 		lines = lines[len(lines)-50:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// stripANSI removes ANSI escape sequences from terminal output.
+var ansiRegexp = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[[0-9;]*[mGKHJ]|\x1b[()][0-9A-B]`)
+
+func stripANSI(s string) string {
+	return ansiRegexp.ReplaceAllString(s, "")
 }

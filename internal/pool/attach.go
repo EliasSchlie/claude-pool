@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	ptyPkg "github.com/EliasSchlie/claude-pool/internal/pty"
 )
@@ -19,11 +20,12 @@ type attachPipe struct {
 	listener   net.Listener
 	proc       *ptyPkg.Process
 	sub        chan []byte
-	onInput    func([]byte) // called with raw bytes from client → PTY
+	onInput    func([]byte) // called with raw bytes from client → PTY (for state tracking)
 
-	mu    sync.Mutex
-	conns map[net.Conn]struct{}
-	done  chan struct{}
+	mu      sync.Mutex
+	conns   map[net.Conn]struct{}
+	done    chan struct{}
+	stopped chan struct{} // closed when broadcastLoop exits
 }
 
 func newAttachPipe(sessionID, socketDir string, proc *ptyPkg.Process) (*attachPipe, error) {
@@ -47,6 +49,7 @@ func newAttachPipe(sessionID, socketDir string, proc *ptyPkg.Process) (*attachPi
 		sub:        proc.Subscribe(),
 		conns:      make(map[net.Conn]struct{}),
 		done:       make(chan struct{}),
+		stopped:    make(chan struct{}),
 	}
 
 	go ap.acceptLoop()
@@ -99,11 +102,15 @@ func (ap *attachPipe) acceptLoop() {
 }
 
 // broadcastLoop reads PTY output from the subscriber channel and writes to all clients.
+// On shutdown it closes all client connections, ensuring no stale data is
+// delivered after the pipe is told to stop.
 func (ap *attachPipe) broadcastLoop() {
+	defer close(ap.stopped)
 	for {
 		select {
 		case data, ok := <-ap.sub:
 			if !ok {
+				ap.closeConns()
 				return
 			}
 			// Snapshot connections to avoid holding lock during writes
@@ -121,9 +128,20 @@ func (ap *attachPipe) broadcastLoop() {
 				}
 			}
 		case <-ap.done:
+			ap.closeConns()
 			return
 		}
 	}
+}
+
+// closeConns closes all tracked client connections.
+func (ap *attachPipe) closeConns() {
+	ap.mu.Lock()
+	for conn := range ap.conns {
+		conn.Close()
+		delete(ap.conns, conn)
+	}
+	ap.mu.Unlock()
 }
 
 func (ap *attachPipe) removeConn(conn net.Conn) {
@@ -140,18 +158,26 @@ func (ap *attachPipe) Close() {
 	case <-ap.done:
 		return // already closed
 	default:
-		close(ap.done)
 	}
 
-	ap.listener.Close()
-	ap.proc.Unsubscribe(ap.sub)
-
+	// Set immediate write deadline on all connections to unblock any
+	// pending writes in broadcastLoop (prevents deadlock when the
+	// client isn't reading — e.g., test is waiting for the offload response).
 	ap.mu.Lock()
 	for conn := range ap.conns {
-		conn.Close()
-		delete(ap.conns, conn)
+		conn.SetWriteDeadline(time.Now())
 	}
 	ap.mu.Unlock()
+
+	// Unsubscribe closes the sub channel. The broadcastLoop will see
+	// the closed channel, close all client connections, and exit.
+	ap.proc.Unsubscribe(ap.sub)
+	close(ap.done)
+	ap.listener.Close()
+
+	// Wait for broadcastLoop to finish closing connections. This ensures
+	// the offload response isn't sent until clients have been disconnected.
+	<-ap.stopped
 
 	os.Remove(ap.socketPath)
 	log.Printf("[attach] session %s: pipe closed", ap.sessionID)

@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/EliasSchlie/claude-pool/internal/hooks"
@@ -53,6 +54,7 @@ func (m *Manager) savePoolState() {
 			"spawnCwd":   s.SpawnCwd,
 			"cwd":        s.Cwd,
 			"createdAt":  s.CreatedAt.UTC().Format(time.RFC3339),
+			"lastUsedAt": s.LastUsedAt.UTC().Format(time.RFC3339),
 			"flags":      s.Flags,
 			"pinned":     s.Pinned,
 		}
@@ -65,8 +67,14 @@ func (m *Manager) savePoolState() {
 		log.Printf("[persist] error marshaling pool state: %v", err)
 		return
 	}
-	if err := os.WriteFile(m.paths.PoolJSON(), append(data, '\n'), 0644); err != nil {
-		log.Printf("[persist] error writing pool.json: %v", err)
+	// Atomic write: temp file + rename prevents corruption on crash mid-write
+	tmpPath := m.paths.PoolJSON() + ".tmp"
+	if err := os.WriteFile(tmpPath, append(data, '\n'), 0644); err != nil {
+		log.Printf("[persist] error writing pool.json.tmp: %v", err)
+		return
+	}
+	if err := os.Rename(tmpPath, m.paths.PoolJSON()); err != nil {
+		log.Printf("[persist] error renaming pool.json.tmp → pool.json: %v", err)
 	}
 }
 
@@ -107,6 +115,11 @@ func (m *Manager) loadPoolState() (live, offloaded []*Session) {
 			m.sessions[s.ID] = s
 		}
 	}
+	// Sort offloaded sessions: most recently used first, so user-started
+	// sessions get restored into slots before unused pre-warmed ones.
+	sort.Slice(offloaded, func(i, j int) bool {
+		return offloaded[i].LastUsedAt.After(offloaded[j].LastUsedAt)
+	})
 	return live, offloaded
 }
 
@@ -130,6 +143,11 @@ func (m *Manager) sessionFromMap(sm map[string]any) *Session {
 	if t := strVal(sm, "createdAt"); t != "" {
 		if parsed, err := time.Parse(time.RFC3339, t); err == nil {
 			s.CreatedAt = parsed
+		}
+	}
+	if t := strVal(sm, "lastUsedAt"); t != "" {
+		if parsed, err := time.Parse(time.RFC3339, t); err == nil {
+			s.LastUsedAt = parsed
 		}
 	}
 	if s.CreatedAt.IsZero() {

@@ -113,9 +113,13 @@ func (p *Process) Exited() bool {
 
 // ExitCode returns the process exit code, or -1 if not yet exited.
 func (p *Process) ExitCode() int {
-	if p.cmd.ProcessState == nil {
+	p.mu.Lock()
+	exited := p.exited
+	p.mu.Unlock()
+	if !exited {
 		return -1
 	}
+	// Safe: ProcessState is immutable after cmd.Wait() returns.
 	return p.cmd.ProcessState.ExitCode()
 }
 
@@ -140,10 +144,17 @@ func (p *Process) Kill() error {
 	if p.cmd.Process == nil {
 		return nil
 	}
-	return p.cmd.Process.Kill()
+	// Best-effort: process may have already exited.
+	err := p.cmd.Process.Kill()
+	if err != nil && p.Exited() {
+		return nil
+	}
+	return err
 }
 
-// Close cleans up the PTY.
+// Close cleans up the PTY. Closing the fd causes readLoop to exit,
+// which stops broadcasting. Subscribers should be cleaned up via
+// Unsubscribe before or after Close.
 func (p *Process) Close() {
 	p.ptmx.Close()
 }
