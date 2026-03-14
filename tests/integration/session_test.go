@@ -25,18 +25,19 @@ package integration
 //   10. "capture: turns=1 detail=last returns only last turn"
 //   11. "capture: turns=0 detail=last returns all turns"
 //   12. "capture: detail=raw returns unfiltered JSONL with metadata"
-//   13. "capture: default params match turns=1 detail=last"
-//   14. "capture: buffer turns=1 excludes earlier turn content"
-//   15. "capture: buffer turns=0 contains all terminal output"
-//   16. "capture: buffer ignores detail parameter"
-//   17. "followup on processing errors without force"
-//   18. "followup with force on processing"
-//   19. "wait on offloaded session errors"
-//   20. "wait with no sessionId — returns first idle"
-//   21. "wait with no sessionId — errors if none busy"
-//   22. "wait with timeout"
-//   23. "input sends raw bytes and verifiable text"
-//   24. "session prefix resolution"
+//   13. "capture: detail=assistant returns all assistant text"
+//   14. "capture: default params match turns=1 detail=last"
+//   15. "capture: buffer turns=1 excludes earlier turn content"
+//   16. "capture: buffer turns=0 contains all terminal output"
+//   17. "capture: buffer ignores detail parameter"
+//   18. "followup on processing errors without force"
+//   19. "followup with force on processing"
+//   20. "wait on offloaded session errors"
+//   21. "wait with no sessionId — returns first idle"
+//   22. "wait with no sessionId — errors if none busy"
+//   23. "wait with timeout"
+//   24. "input sends raw bytes and verifiable text"
+//   25. "session prefix resolution"
 
 import (
 	"strings"
@@ -231,6 +232,22 @@ func TestSession(t *testing.T) {
 		content := strVal(resp, "content")
 		// Raw should have metadata fields that other detail levels strip
 		assertContains(t, content, "stop_reason")
+	})
+
+	t.Run("capture: detail=assistant returns all assistant text", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "turns": 1, "detail": "assistant"})
+		assertNotError(t, resp)
+		content := strVal(resp, "content")
+		assertContains(t, content, "goodbye")
+
+		// detail=assistant should be smaller than detail=raw (no metadata)
+		rawResp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "turns": 1, "detail": "raw"})
+		assertNotError(t, rawResp)
+		rawContent := strVal(rawResp, "content")
+		if len(content) >= len(rawContent) {
+			t.Fatalf("detail=assistant (%d bytes) should be smaller than detail=raw (%d bytes)",
+				len(content), len(rawContent))
+		}
 	})
 
 	t.Run("capture: default params match turns=1 detail=last", func(t *testing.T) {
