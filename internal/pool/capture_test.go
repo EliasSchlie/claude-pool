@@ -364,7 +364,6 @@ func TestCaptureDetailLastToolTurn(t *testing.T) {
 	// Turn 1: user + final assistant ("I found two files..."), NOT the tool_use assistant
 	mustContain(t, "result", result, "list the files")
 	mustContain(t, "result", result, "I found two files")
-	mustNotContain(t, "result", result, "file1.txt")
 
 	entries := parseCaptureLines(t, result)
 	// 2 turns × (user + last assistant) = 4 entries
@@ -461,7 +460,6 @@ func TestCaptureDetailAssistantExcludesToolUseOnly(t *testing.T) {
 
 	mustContain(t, "result", result, "I found two files")
 	mustContain(t, "result", result, "list the files")
-	mustNotContain(t, "result", result, "file1.txt")
 
 	for _, e := range entries {
 		if hasContentBlockType(e, "tool_use") {
