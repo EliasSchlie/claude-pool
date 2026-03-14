@@ -28,8 +28,6 @@ func (p *Pool) ArchivedDir() string    { return filepath.Join(p.Root, "archived"
 func (p *Pool) SessionPIDsDir() string { return filepath.Join(p.Root, "session-pids") }
 func (p *Pool) IdleSignalsDir() string { return filepath.Join(p.Root, "idle-signals") }
 func (p *Pool) HooksDir() string       { return filepath.Join(p.Root, "hooks") }
-func (p *Pool) ClaudeDir() string      { return filepath.Join(p.Root, ".claude") }
-func (p *Pool) SettingsJSON() string   { return filepath.Join(p.Root, ".claude", "settings.json") }
 
 // SessionOffloaded returns the directory for an offloaded session's metadata.
 func (p *Pool) SessionOffloaded(id string) string {
@@ -59,8 +57,6 @@ func (p *Pool) EnsureDirs() error {
 		p.ArchivedDir(),
 		p.SessionPIDsDir(),
 		p.IdleSignalsDir(),
-		p.ClaudeDir(),
-		p.HooksDir(),
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0755); err != nil {

@@ -2,13 +2,14 @@ package pool
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"time"
 
-	"github.com/EliasSchlie/claude-pool/internal/hooks"
+	"github.com/EliasSchlie/claude-pool/internal/hookfiles"
 )
 
 func (m *Manager) saveOffloadMeta(s *Session) {
@@ -163,41 +164,28 @@ func (m *Manager) sessionFromMap(sm map[string]any) *Session {
 	return s
 }
 
-func (m *Manager) deployHooks() {
+// deployHooks writes hook scripts to the pool directory.
+// Called on every init — each pool owns its hook scripts, so different pools
+// (or different branches under test) can run different hook versions independently.
+// The global hook-runner.sh (installed via `claude-pool install`) delegates to
+// these pool-local scripts via $CLAUDE_POOL_DIR at runtime.
+func (m *Manager) deployHooks() error {
 	log.Printf("[hooks] deploying hooks to %s", m.paths.Root)
-	// Write settings.json to .claude/settings.json (Claude Code loads hooks from here)
-	data, err := hooks.Files.ReadFile("files/settings.json")
-	if err != nil {
-		log.Printf("[hooks] error: embedded settings.json not found: %v", err)
-		return
-	}
-	if err := os.MkdirAll(m.paths.ClaudeDir(), 0755); err != nil {
-		log.Printf("[hooks] error creating .claude dir: %v", err)
-		return
-	}
-	if err := os.WriteFile(m.paths.SettingsJSON(), data, 0644); err != nil {
-		log.Printf("[hooks] error writing settings.json: %v", err)
-		return
-	}
-	log.Printf("[hooks] wrote settings.json to %s", m.paths.SettingsJSON())
 
-	// Write hook scripts to pool dir/hooks/
 	if err := os.MkdirAll(m.paths.HooksDir(), 0755); err != nil {
-		log.Printf("[hooks] error creating hooks dir: %v", err)
-		return
+		return fmt.Errorf("create hooks dir: %w", err)
 	}
 
 	for _, name := range []string{"common.sh", "idle-signal.sh", "session-pid-map.sh"} {
-		data, err := hooks.Files.ReadFile("files/" + name)
+		data, err := hookfiles.Scripts.ReadFile(name)
 		if err != nil {
-			log.Printf("[hooks] error: embedded %s not found: %v", name, err)
-			continue
+			return fmt.Errorf("read embedded %s: %w", name, err)
 		}
-		dst := filepath.Join(m.paths.HooksDir(), name)
-		if err := os.WriteFile(dst, data, 0755); err != nil {
-			log.Printf("[hooks] error writing %s: %v", name, err)
-			continue
+		if err := os.WriteFile(filepath.Join(m.paths.HooksDir(), name), data, 0755); err != nil {
+			return fmt.Errorf("write %s: %w", name, err)
 		}
-		log.Printf("[hooks] wrote %s", dst)
 	}
+
+	log.Printf("[hooks] hooks deployed")
+	return nil
 }

@@ -3,12 +3,20 @@
 # Shared constants and helpers for claude-pool hooks.
 #
 # Usage: source "$(dirname "$0")/common.sh"
+#
+# Silently exits if CLAUDE_POOL_DIR is not set — this happens when the hook
+# fires in a non-pool Claude session. The hook-runner.sh wrapper normally
+# prevents this, but the guard is here as a safety net.
 
 set -euo pipefail
 umask 077
 
-# CLAUDE_POOL_DIR is set by the daemon when spawning sessions.
-POOL_DIR="${CLAUDE_POOL_DIR:?CLAUDE_POOL_DIR not set}"
+# Guard: exit silently for non-pool sessions
+if [ -z "${CLAUDE_POOL_DIR:-}" ]; then
+    exit 0
+fi
+
+POOL_DIR="$CLAUDE_POOL_DIR"
 SESSION_PIDS_DIR="$POOL_DIR/session-pids"
 SIGNAL_DIR="$POOL_DIR/idle-signals"
 
