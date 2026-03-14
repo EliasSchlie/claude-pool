@@ -43,13 +43,6 @@ func TestMain(m *testing.M) {
 	daemonBinPath = filepath.Join(runDir, "claude-pool")
 	testutil.BuildBinary(repoRoot, daemonBinPath, "./cmd/claude-pool")
 
-	// Ensure global hooks are installed (init checks for them)
-	install := exec.Command(daemonBinPath, "install")
-	if out, err := install.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to install hooks: %v\n%s\n", err, out)
-		os.Exit(1)
-	}
-
 	code := m.Run()
 	if code == 0 {
 		os.RemoveAll(runDir)
@@ -151,7 +144,7 @@ func setupPool(t *testing.T, size int) *testPool {
 	t.Helper()
 	p := setupDaemon(t, size)
 
-	resp := p.send(Msg{"type": "init", "size": size})
+	resp := p.send(Msg{"type": "init", "size": size, "localHooks": true})
 	if resp["type"] == "error" {
 		t.Fatalf("init failed: %v", resp["error"])
 	}

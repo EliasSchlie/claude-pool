@@ -66,13 +66,6 @@ func TestMain(m *testing.M) {
 		}
 	}
 
-	// Ensure global hooks are installed (init checks for them)
-	install := exec.Command(daemonBinPath, "install")
-	if out, err := install.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to install hooks: %v\n%s\n", err, out)
-		os.Exit(1)
-	}
-
 	code := m.Run()
 	if code == 0 {
 		os.RemoveAll(runDir)
@@ -184,7 +177,7 @@ func setupCLIPool(t *testing.T, size int) *cliPool {
 		daemon.Process.Kill()
 		t.Fatalf("failed to connect: %v", err)
 	}
-	initMsg, _ := json.Marshal(Msg{"type": "init", "size": size})
+	initMsg, _ := json.Marshal(Msg{"type": "init", "size": size, "localHooks": true})
 	conn.Write(append(initMsg, '\n'))
 	scanner := bufio.NewScanner(conn)
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))

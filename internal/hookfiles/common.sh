@@ -15,6 +15,11 @@ if [ -z "${CLAUDE_POOL_DIR:-}" ]; then
     exit 0
 fi
 
+# Defer to local hooks if deployed (avoids double-firing with global hooks)
+if [ -f "$CLAUDE_POOL_DIR/.claude/settings.json" ]; then
+    exit 0
+fi
+
 POOL_DIR="$CLAUDE_POOL_DIR"
 SESSION_PIDS_DIR="$POOL_DIR/session-pids"
 SIGNAL_DIR="$POOL_DIR/idle-signals"

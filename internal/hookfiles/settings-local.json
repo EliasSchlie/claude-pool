@@ -6,6 +6,10 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_POOL_DIR}/hooks/session-pid-map.sh"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_POOL_DIR}/hooks/idle-signal.sh write session-start"
           }
         ]
       },

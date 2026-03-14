@@ -7,13 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/EliasSchlie/claude-pool/internal/hookfiles"
 )
 
 //go:embed embedded/skill.md
-//go:embed embedded/common.sh
-//go:embed embedded/idle-signal.sh
-//go:embed embedded/session-pid-map.sh
-var embeddedFiles embed.FS
+var embeddedSkill embed.FS
 
 const hookMarker = "/.claude-pool/hooks/"
 
@@ -38,7 +37,7 @@ func cmdInstall() error {
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		return fmt.Errorf("create skill dir: %w", err)
 	}
-	skillContent, err := embeddedFiles.ReadFile("embedded/skill.md")
+	skillContent, err := embeddedSkill.ReadFile("embedded/skill.md")
 	if err != nil {
 		return fmt.Errorf("read embedded skill: %w", err)
 	}
@@ -54,7 +53,7 @@ func cmdInstall() error {
 	}
 	hookScripts := []string{"common.sh", "idle-signal.sh", "session-pid-map.sh"}
 	for _, name := range hookScripts {
-		content, err := embeddedFiles.ReadFile("embedded/" + name)
+		content, err := hookfiles.Global.ReadFile(name)
 		if err != nil {
 			return fmt.Errorf("read embedded %s: %w", name, err)
 		}

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/EliasSchlie/claude-pool/internal/hookfiles"
 )
 
 func (m *Manager) saveOffloadMeta(s *Session) {
@@ -176,5 +178,46 @@ func checkGlobalInstall() error {
 			return fmt.Errorf("claude-pool is not installed (missing %s). Run: claude-pool install", name)
 		}
 	}
+	return nil
+}
+
+// deployLocalHooks writes hook scripts and settings.json to the pool directory.
+// Used when localHooks is true — provides full isolation from the global install.
+// Global hooks defer to local hooks when they detect pool-dir/.claude/settings.json.
+func (m *Manager) deployLocalHooks() error {
+	log.Printf("[hooks] deploying local hooks to %s", m.paths.Root)
+
+	// Write settings.json to pool-dir/.claude/
+	claudeDir := filepath.Join(m.paths.Root, ".claude")
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		return fmt.Errorf("create .claude dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), hookfiles.LocalSettings, 0644); err != nil {
+		return fmt.Errorf("write local settings.json: %w", err)
+	}
+
+	// Write hook scripts to pool-dir/hooks/
+	hookDir := filepath.Join(m.paths.Root, "hooks")
+	if err := os.MkdirAll(hookDir, 0755); err != nil {
+		return fmt.Errorf("create hooks dir: %w", err)
+	}
+
+	// common-local.sh is deployed as common.sh (the scripts source "common.sh")
+	localScripts := map[string]string{
+		"common-local.sh":    "common.sh",
+		"idle-signal.sh":     "idle-signal.sh",
+		"session-pid-map.sh": "session-pid-map.sh",
+	}
+	for src, dst := range localScripts {
+		data, err := hookfiles.LocalScripts.ReadFile(src)
+		if err != nil {
+			return fmt.Errorf("read embedded %s: %w", src, err)
+		}
+		if err := os.WriteFile(filepath.Join(hookDir, dst), data, 0755); err != nil {
+			return fmt.Errorf("write %s: %w", dst, err)
+		}
+	}
+
+	log.Printf("[hooks] local hooks deployed")
 	return nil
 }
