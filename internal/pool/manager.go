@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/EliasSchlie/claude-pool/internal/api"
 	"github.com/EliasSchlie/claude-pool/internal/paths"
@@ -28,34 +29,51 @@ type Manager struct {
 	config *ConfigManager
 	hub    *api.SubscriberHub
 
-	mu          sync.Mutex
-	initialized bool
-	poolSize    int
-	sessions    map[string]*Session
-	procs       map[string]*ptyPkg.Process
-	pidToSID    map[int]string
-	pipes       map[string]*attachPipe // sessionID → attach pipe
-	queue       []*Session
-	killTokens  int
-	done        chan struct{}
+	// connAcceptedAt returns when a connection was accepted by the server.
+	connAcceptedAt func(net.Conn) time.Time
+
+	mu           sync.Mutex
+	initialized  bool
+	poolSize     int
+	sessions     map[string]*Session
+	procs        map[string]*ptyPkg.Process
+	pidToSID     map[int]string
+	pipes        map[string]*attachPipe   // sessionID → attach pipe
+	attachTyping map[string][]byte        // sessionID → text typed via attach (for prompt delivery on Enter)
+	delivering   map[string]chan struct{} // sessionID → closed when in-flight deliverPrompt completes
+	queue        []*Session
+	killTokens   int
+	done         chan struct{}
 }
 
 func NewManager(p *paths.Pool, cfg *ConfigManager) *Manager {
 	return &Manager{
-		paths:    p,
-		config:   cfg,
-		hub:      api.NewSubscriberHub(),
-		sessions: make(map[string]*Session),
-		procs:    make(map[string]*ptyPkg.Process),
-		pidToSID: make(map[int]string),
-		pipes:    make(map[string]*attachPipe),
-		done:     make(chan struct{}),
+		paths:        p,
+		config:       cfg,
+		hub:          api.NewSubscriberHub(),
+		sessions:     make(map[string]*Session),
+		procs:        make(map[string]*ptyPkg.Process),
+		pidToSID:     make(map[int]string),
+		pipes:        make(map[string]*attachPipe),
+		attachTyping: make(map[string][]byte),
+		delivering:   make(map[string]chan struct{}),
+		done:         make(chan struct{}),
 	}
+}
+
+// SetConnAcceptedAt provides the function that returns when a connection was accepted.
+func (m *Manager) SetConnAcceptedAt(fn func(net.Conn) time.Time) {
+	m.connAcceptedAt = fn
 }
 
 // Done returns a channel that's closed when the pool is destroyed.
 func (m *Manager) Done() <-chan struct{} {
 	return m.done
+}
+
+// HandleDisconnect cleans up subscriber state when a connection closes.
+func (m *Manager) HandleDisconnect(conn net.Conn) {
+	m.hub.RemoveByConn(conn)
 }
 
 // Shutdown performs cleanup on daemon exit.
