@@ -18,12 +18,11 @@ These files require **explicit user permission** before any modification:
 
 ## Architecture
 
-- `cmd/claude-pool/` — Daemon entry point
-- `internal/` — Daemon packages (pool, pty, api, attach, discovery, paths)
+- `cmd/claude-pool/` — Daemon entry point + install/uninstall commands
+- `internal/` — Daemon packages (pool, pty, api, attach, discovery, paths, hookfiles)
 - `tests/integration/` — Integration tests (real Claude sessions, `--model haiku`)
 - `tests/manual/` — Manual testing directory (own `.claude/` hooks, independent per worktree)
 - `schema/` — JSON Schema (must match SPEC.md)
-- `hooks/` — Claude Code hook scripts (project-local, written into pool dir on init)
 - `docs/` — Documentation
 
 Key docs:
