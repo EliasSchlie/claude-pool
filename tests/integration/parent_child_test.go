@@ -26,9 +26,10 @@ package integration
 //   8.  "ls with all shows all pool sessions"
 //   9.  "ls with all + tree shows all sessions as tree"
 //  10.  "archive with unarchived children errors"
-//  11.  "archive leaf session succeeds"
-//  12.  "archive parent after children archived"
-//  13.  "recursive archive archives entire subtree"
+//  11.  "archive offloaded parent with unarchived children errors"
+//  12.  "archive leaf session succeeds"
+//  13.  "archive parent after children archived"
+//  14.  "recursive archive archives entire subtree"
 
 import (
 	"testing"
@@ -216,6 +217,22 @@ func TestParentChild(t *testing.T) {
 		session := parseSession(t, info["session"])
 		if session.Status == "archived" {
 			t.Fatal("s2 should not be archived — it has unarchived children")
+		}
+	})
+
+	t.Run("archive offloaded parent with unarchived children errors", func(t *testing.T) {
+		// Regression guard: the children check must apply regardless of
+		// whether the parent is live or offloaded.
+		pool.send(Msg{"type": "offload", "sessionId": s2})
+		pool.awaitStatus(s2, "offloaded", 10*time.Second)
+
+		resp := pool.send(Msg{"type": "archive", "sessionId": s2})
+		assertError(t, resp)
+
+		info := pool.send(Msg{"type": "info", "sessionId": s2})
+		session := parseSession(t, info["session"])
+		if session.Status == "archived" {
+			t.Fatal("offloaded parent with unarchived children should not be archived")
 		}
 	})
 

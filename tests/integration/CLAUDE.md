@@ -3,8 +3,9 @@
 ## Philosophy
 
 These tests run against **real Claude Code sessions** through the full socket API.
-No mocking, no stubs, no fakes. The pool's value is orchestrating real processes —
-so that's what we test.
+No mocking here — these validate end-to-end behavior with real processes. Pure logic
+tests (parsing, filtering, state transitions) belong in unit tests co-located with
+the source (`internal/*/`).
 
 Every test pool uses `--model haiku` to keep API costs low.
 

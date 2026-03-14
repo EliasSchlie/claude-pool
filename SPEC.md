@@ -91,7 +91,7 @@ Transport: Unix domain socket, newline-delimited JSON. See [docs/protocol.md](do
 
 - **`start`** — Send a prompt to a new session. Returns an internal ID immediately. Claims a fresh slot if available, or queues the request. Queued requests trigger eviction of idle sessions when possible (see Eviction Policy); if no session is evictable (all processing or pinned), the request waits until a slot frees naturally.
 - **`followup`** — Send a follow-up prompt to an existing session. Auto-resumes offloaded sessions (queues for loading). Errors on busy sessions unless `force: true`.
-- **`stop`** — Interrupt or cancel. **Synchronous** — session is guaranteed idle (or removed) when `ok` returns. Cancels queued requests, sends Ctrl+C to processing sessions.
+- **`stop`** — Interrupt or cancel. **Synchronous** — session is guaranteed idle (or removed) when `ok` returns. Cancels queued requests, sends Ctrl+C to processing sessions. Queued sessions that were never loaded (no slot, no UUID) are deleted entirely — there is no state to preserve.
 - **`offload`** — Manually free a session's slot. Only works on idle sessions. Unpins if pinned.
 - **`archive`** — Mark a session as done. Stops live sessions first. Errors if unarchived children exist unless `recursive: true`. Auto-cleaned after 30 days.
 - **`unarchive`** — Restore an archived session to offloaded state.

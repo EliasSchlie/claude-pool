@@ -121,13 +121,17 @@ func (m *Manager) readJSONLLast(s *Session) string {
 }
 
 func (m *Manager) findTranscript(claudeUUID string) string {
-	home, _ := os.UserHomeDir()
-
-	// Claude stores transcripts at ~/.claude/projects/<project-key>/<UUID>.jsonl
-	pattern := filepath.Join(home, ".claude", "projects", "*", claudeUUID+".jsonl")
-	matches, _ := filepath.Glob(pattern)
-	if len(matches) > 0 {
-		return matches[0]
+	dirs := m.transcriptDirs
+	if len(dirs) == 0 {
+		home, _ := os.UserHomeDir()
+		dirs = []string{filepath.Join(home, ".claude", "projects")}
+	}
+	// Claude stores transcripts at <dir>/<project-key>/<UUID>.jsonl
+	for _, dir := range dirs {
+		pattern := filepath.Join(dir, "*", claudeUUID+".jsonl")
+		if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
+			return matches[0]
+		}
 	}
 	return ""
 }

@@ -28,16 +28,17 @@ type Manager struct {
 	config *ConfigManager
 	hub    *api.SubscriberHub
 
-	mu          sync.Mutex
-	initialized bool
-	poolSize    int
-	sessions    map[string]*Session
-	procs       map[string]*ptyPkg.Process
-	pidToSID    map[int]string
-	pipes       map[string]*attachPipe // sessionID → attach pipe
-	queue       []*Session
-	killTokens  int
-	done        chan struct{}
+	mu             sync.Mutex
+	initialized    bool
+	poolSize       int
+	sessions       map[string]*Session
+	procs          map[string]*ptyPkg.Process
+	pidToSID       map[int]string
+	pipes          map[string]*attachPipe // sessionID → attach pipe
+	queue          []*Session
+	killTokens     int
+	done           chan struct{}
+	transcriptDirs []string // override transcript search dirs (for testing; empty = default ~/.claude/projects)
 }
 
 func NewManager(p *paths.Pool, cfg *ConfigManager) *Manager {
