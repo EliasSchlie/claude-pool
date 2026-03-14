@@ -17,6 +17,13 @@ const (
 	StatusArchived   = "archived"
 )
 
+// SessionMetadata holds user-defined session labels.
+type SessionMetadata struct {
+	Name        string            `json:"name,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Tags        map[string]string `json:"tags,omitempty"`
+}
+
 // Session represents a managed Claude Code session.
 type Session struct {
 	ID           string
@@ -32,6 +39,7 @@ type Session struct {
 	LastUsedAt   time.Time // updated on prompt delivery, used for LRU eviction
 	PID          int
 	PendingInput string // Un-submitted text in terminal buffer (attach pipe)
+	Metadata     SessionMetadata
 
 	// Internal: pool-owned pre-warmed session (can be claimed by start/pin)
 	PreWarmed bool
@@ -96,6 +104,18 @@ func (s *Session) ToMsg() map[string]any {
 	if s.IsLive() {
 		m["pendingInput"] = s.PendingInput
 	}
+	// Always include metadata (empty object if unset)
+	meta := map[string]any{}
+	if s.Metadata.Name != "" {
+		meta["name"] = s.Metadata.Name
+	}
+	if s.Metadata.Description != "" {
+		meta["description"] = s.Metadata.Description
+	}
+	if len(s.Metadata.Tags) > 0 {
+		meta["tags"] = s.Metadata.Tags
+	}
+	m["metadata"] = meta
 	return m
 }
 
