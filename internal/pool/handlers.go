@@ -1,7 +1,6 @@
 package pool
 
 import (
-	"encoding/json"
 	"log"
 	"net"
 	"strings"
@@ -225,33 +224,17 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 		})
 	}
 
-	// Try to evict an idle session with strictly lower priority
-	if evicted := m.findEvictableSessionBelow(s.Priority); evicted != nil {
-		log.Printf("[start] session %s: evicting idle session %s (priority=%.1f) to free slot", s.ID, evicted.ID, evicted.Priority)
-		m.offloadSessionLocked(evicted)
-		s.Status = StatusFresh
-		m.spawnSession(s, false)
-		s.PendingPrompt = prompt
-		m.deliverPromptWhenReady(s)
-		m.broadcastEvent(api.Msg{
-			"type": "event", "event": "created",
-			"sessionId": s.ID, "status": StatusProcessing, "parentId": s.ParentID,
-		})
-		m.savePoolState()
-		return api.Response(id, "started", api.Msg{
-			"sessionId": s.ID,
-			"status":    StatusProcessing,
-		})
-	}
-
-	// Queue it
-	log.Printf("[start] session %s: no slots available, queuing (queue depth=%d)", s.ID, len(m.queue)+1)
+	// No fresh slot available — queue the request, then try to fill from
+	// available slots. Only evict if all slots are occupied.
+	log.Printf("[start] session %s: no fresh slots, queuing (queue depth=%d)", s.ID, len(m.queue)+1)
 	s.Status = StatusQueued
 	m.queue = append(m.queue, s)
 	m.broadcastEvent(api.Msg{
 		"type": "event", "event": "created",
 		"sessionId": s.ID, "status": s.Status, "parentId": s.ParentID,
 	})
+
+	m.tryDequeueWithEviction(s, "")
 	m.savePoolState()
 
 	return api.Response(id, "started", api.Msg{
@@ -309,20 +292,14 @@ func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 			"status":    s.Status,
 		})
 
-	case StatusOffloaded, StatusDead, StatusError:
+	case StatusOffloaded, StatusError:
 		log.Printf("[followup] session %s: %s → queued for respawn", s.ID, s.Status)
 		s.PendingPrompt = prompt
 		prevStatus := s.Status
 		s.Status = StatusQueued
 		m.queue = append(m.queue, s)
 		m.broadcastStatus(s, prevStatus)
-		// Try to free a slot by offloading the lowest-priority idle session.
-		// Restored sessions have "earned" their slot from prior use.
-		if evicted := m.findEvictableSession(); evicted != nil && evicted.ID != s.ID {
-			log.Printf("[followup] session %s: evicting idle session %s (priority=%.1f) to free slot for respawn", s.ID, evicted.ID, evicted.Priority)
-			m.offloadSessionLocked(evicted)
-		}
-		m.tryDequeue()
+		m.tryDequeueWithEviction(s, s.ID)
 		m.savePoolState()
 		m.mu.Unlock()
 		return api.Response(id, "started", api.Msg{
@@ -330,29 +307,45 @@ func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 			"status":    s.Status,
 		})
 
-	case StatusProcessing, StatusTyping:
+	case StatusProcessing:
 		if !force {
 			m.mu.Unlock()
 			return api.ErrorResponse(id, "session is processing; use force: true to override")
 		}
 		log.Printf("[followup] session %s: force-interrupting %s, sending Ctrl-C (pid=%d)", s.ID, s.Status, s.PID)
-		s.PendingPrompt = prompt
-		s.PendingForce = true
-		pid := s.PID
-		if proc := m.procs[s.ID]; proc != nil {
-			proc.WriteString("\x03")
-		}
+		s.LastUsedAt = time.Now()
+		sid := s.ID
 		m.savePoolState()
 		m.mu.Unlock()
-		// Ctrl-C doesn't trigger a hook — manually write idle signal
-		// so watchIdleSignal picks up the pending force prompt.
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			m.writeIdleSignal(pid, "ctrl-c")
-		}()
+
+		// Wait for any in-flight prompt delivery to finish before
+		// sending Ctrl-C — otherwise the old prompt's Enter keystroke
+		// arrives after Ctrl-C, starting the old command.
+		m.awaitDelivery(sid)
+
+		m.mu.Lock()
+		proc := m.procs[sid]
+		if proc != nil {
+			proc.WriteString("\x03")
+		}
+		m.mu.Unlock()
+
+		// Give Claude time to process the Ctrl-C: cancel the current
+		// task, write "[Request interrupted by user]", and return to
+		// its prompt. Then deliver the new prompt directly — don't
+		// rely on Stop hook (may not fire reliably for shell builtins).
+		time.Sleep(3 * time.Second)
+
+		m.mu.Lock()
+		s = m.sessions[sid]
+		if s != nil {
+			m.deliverPrompt(s, prompt)
+		}
+		m.mu.Unlock()
+
 		return api.Response(id, "started", api.Msg{
-			"sessionId": s.ID,
-			"status":    s.Status,
+			"sessionId": sid,
+			"status":    StatusProcessing,
 		})
 
 	case StatusQueued:
@@ -429,9 +422,6 @@ func (m *Manager) handleWait(id any, req api.Msg) api.Msg {
 	case StatusArchived:
 		m.mu.Unlock()
 		return api.ErrorResponse(id, "session is archived")
-	case StatusDead:
-		m.mu.Unlock()
-		return api.ErrorResponse(id, "session died")
 	case StatusError:
 		m.mu.Unlock()
 		return api.ErrorResponse(id, "session has error")
@@ -472,9 +462,9 @@ func (m *Manager) handleWait(id any, req api.Msg) api.Msg {
 					"sessionId": sid,
 					"content":   content,
 				})
-			case StatusDead:
+			case StatusOffloaded:
 				m.mu.Unlock()
-				return api.ErrorResponse(id, "session died")
+				return api.ErrorResponse(id, "session is offloaded; use followup to resume")
 			case StatusError:
 				m.mu.Unlock()
 				return api.ErrorResponse(id, "session error")
@@ -503,7 +493,7 @@ func (m *Manager) handleStop(id any, req api.Msg) api.Msg {
 	log.Printf("[stop] session %s: status=%s pid=%d", s.ID, s.Status, s.PID)
 
 	switch s.Status {
-	case StatusIdle, StatusTyping, StatusFresh:
+	case StatusIdle, StatusFresh:
 		log.Printf("[stop] session %s: already %s, nothing to stop", s.ID, s.Status)
 		m.mu.Unlock()
 		return api.OkResponse(id)
@@ -522,41 +512,38 @@ func (m *Manager) handleStop(id any, req api.Msg) api.Msg {
 
 	case StatusProcessing:
 		log.Printf("[stop] session %s: sending Ctrl-C to pid %d", s.ID, s.PID)
-		proc := m.procs[s.ID]
-		if proc != nil {
+		sid := s.ID
+		// Transition directly — Ctrl-C interrupts the bash tool, and we
+		// don't need to wait for a hook round-trip. The next prompt delivery
+		// (Escape → Ctrl-U → text → Enter) resets Claude's input line anyway.
+		prevStatus := s.Status
+		s.Status = StatusIdle
+		s.PendingInput = ""
+		log.Printf("[stop] session %s: processing → idle", s.ID)
+		m.broadcastStatus(s, prevStatus)
+		m.savePoolState()
+		m.mu.Unlock()
+
+		// Wait for any in-flight delivery to finish, then send Ctrl-C
+		m.awaitDelivery(sid)
+		m.mu.Lock()
+		if proc := m.procs[sid]; proc != nil {
 			proc.WriteString("\x03")
 		}
-		// Ctrl-C doesn't trigger a Claude hook — manually transition to idle.
-		// Give Claude a moment to process the interrupt, then write a fresh
-		// idle signal so watchIdleSignal picks it up.
-		pid := s.PID
-		m.mu.Unlock()
-
-		time.Sleep(500 * time.Millisecond)
-		m.writeIdleSignal(pid, "ctrl-c")
-
-		// Wait for watchIdleSignal to pick up the signal and transition status
-		deadline := time.After(10 * time.Second)
-		ticker := time.NewTicker(200 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-deadline:
-				return api.ErrorResponse(id, "stop timeout")
-			case <-ticker.C:
-				m.mu.Lock()
-				s := m.sessions[sessionID]
-				if s == nil || s.Status == StatusIdle || s.Status == StatusDead {
-					m.mu.Unlock()
-					return api.OkResponse(id)
+		// Check if a queued session can claim this now-idle slot.
+		if s := m.sessions[sid]; s != nil && s.Status == StatusIdle {
+			m.serveQueueFromSlot(s)
+			// If the queue still has entries, evict an idle session to
+			// make room — the stopped session is now evictable.
+			if len(m.queue) > 0 {
+				if evicted := m.findEvictableSession(); evicted != nil {
+					m.offloadSessionLocked(evicted)
 				}
-				m.mu.Unlock()
 			}
 		}
-
-	case StatusOffloaded, StatusDead, StatusError, StatusArchived:
+		m.tryDequeue()
 		m.mu.Unlock()
-		return api.ErrorResponse(id, "cannot stop session in state: "+s.Status)
+		return api.OkResponse(id)
 
 	default:
 		m.mu.Unlock()
@@ -683,16 +670,14 @@ func (m *Manager) handleOffload(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "session not found: "+sessionID)
 	}
 
-	if s.Pinned {
-		log.Printf("[offload] session %s: rejected, session is pinned", s.ID)
-		return api.ErrorResponse(id, "cannot offload pinned session; unpin first")
-	}
-
-	if s.Status != StatusIdle && s.Status != StatusTyping {
-		log.Printf("[offload] session %s: rejected, status=%s (need idle or typing)", s.ID, s.Status)
+	if s.Status != StatusIdle {
+		log.Printf("[offload] session %s: rejected, status=%s (need idle)", s.ID, s.Status)
 		return api.ErrorResponse(id, "can only offload idle sessions (current: "+s.Status+")")
 	}
 
+	if s.Pinned {
+		log.Printf("[offload] session %s: auto-unpinning before offload", s.ID)
+	}
 	log.Printf("[offload] session %s: offloading (pid=%d claude=%s)", s.ID, s.PID, s.ClaudeUUID)
 	m.offloadSessionLocked(s)
 	m.savePoolState()
@@ -731,7 +716,7 @@ func (m *Manager) handleArchive(id any, req api.Msg) api.Msg {
 				return api.ErrorResponse(id, "session has unarchived children; use recursive: true")
 			}
 		}
-	} else {
+	} else if recursive {
 		m.archiveDescendants(s.ID)
 	}
 
@@ -839,17 +824,14 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 	s.Pinned = true
 	s.PinExpiry = time.Now().Add(time.Duration(duration) * time.Second)
 
-	if s.Status == StatusOffloaded || s.Status == StatusDead || s.Status == StatusError {
+	responseStatus := s.Status
+	if s.Status == StatusOffloaded || s.Status == StatusError {
 		prevStatus := s.Status
 		s.Status = StatusQueued
+		responseStatus = StatusQueued
 		m.queue = append([]*Session{s}, m.queue...)
 		m.broadcastStatus(s, prevStatus)
-		// Evict an idle session if needed to free a slot for priority load
-		if evicted := m.findEvictableSession(); evicted != nil && evicted.ID != s.ID {
-			log.Printf("[pin] session %s: evicting idle session %s to free slot for reload", s.ID, evicted.ID)
-			m.offloadSessionLocked(evicted)
-		}
-		m.tryDequeue()
+		m.tryDequeueWithEviction(s, s.ID)
 	} else if s.Status == StatusQueued {
 		m.removeFromQueue(s)
 		m.queue = append([]*Session{s}, m.queue...)
@@ -863,7 +845,7 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 
 	return api.Response(id, "ok", api.Msg{
 		"sessionId": s.ID,
-		"status":    s.Status,
+		"status":    responseStatus,
 	})
 }
 
@@ -1058,7 +1040,16 @@ func (m *Manager) handleAttach(id any, req api.Msg) api.Msg {
 	})
 }
 
-// handleAttachInput processes raw input from attach pipe clients for typing detection.
+// handleAttachInput processes raw input from attach pipe clients for typing
+// detection and prompt delivery.
+//
+// When Enter is detected, the accumulated text is delivered via deliverPrompt
+// (Escape → Ctrl-U → text → Enter with proper timing) to ensure Claude Code's
+// TUI processes the prompt reliably. Raw PTY writes without this ceremony can
+// be lost when text + Enter arrive in a single chunk.
+// handleAttachInput classifies raw bytes from an attach client and manages
+// pendingInput property and state transitions. Raw bytes always pass through
+// to the PTY (the attach pipe writes them directly).
 func (m *Manager) handleAttachInput(sessionID string, data []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1068,25 +1059,66 @@ func (m *Manager) handleAttachInput(sessionID string, data []byte) {
 		return
 	}
 
-	// Classify input
+	// Classify input and extract printable text
 	hasCtrlU := false
-	hasPrintable := false
+	hasEnter := false
+	var printable []byte
 	for _, b := range data {
-		if b == 0x15 { // Ctrl-U
+		switch {
+		case b == 0x15: // Ctrl-U
 			hasCtrlU = true
-		} else if b >= 0x20 && b != 0x7f { // printable (not DEL)
-			hasPrintable = true
+		case b == '\r' || b == '\n': // Enter
+			hasEnter = true
+		case b >= 0x20 && b != 0x7f: // printable (not DEL)
+			printable = append(printable, b)
 		}
 	}
 
 	switch {
-	case hasCtrlU && s.Status == StatusTyping:
-		s.Status = StatusIdle
-		m.broadcastStatus(s, StatusTyping)
-	case hasPrintable && (s.Status == StatusIdle || s.Status == StatusFresh):
+	case hasCtrlU && s.PendingInput != "":
+		// Clear pending input
+		s.PendingInput = ""
+		s.LastUsedAt = time.Now()
+		delete(m.attachTyping, sessionID)
+		m.broadcastEvent(api.Msg{
+			"type": "event", "event": "updated",
+			"sessionId": s.ID, "changes": api.Msg{"pendingInput": ""},
+		})
+
+	case hasEnter && (s.PendingInput != "" || ((s.Status == StatusIdle || s.Status == StatusFresh) && len(printable) > 0)):
+		// Submit prompt
+		buf := m.attachTyping[sessionID]
+		buf = append(buf, printable...)
+		prompt := string(buf)
+		delete(m.attachTyping, sessionID)
+
+		if prompt == "" {
+			return
+		}
+
+		// Clear pendingInput and transition to processing
+		s.PendingInput = ""
 		prev := s.Status
-		s.Status = StatusTyping
+		s.Status = StatusProcessing
+		s.LastUsedAt = time.Now()
 		m.broadcastStatus(s, prev)
+		m.clearIdleSignals(s.PID)
+		log.Printf("[attach] session %s: prompt submitted via attach (%d chars)", sessionID, len(prompt))
+
+		// Also deliver via the reliable prompt mechanism (Escape → Ctrl-U → text → Enter).
+		// Raw bytes reach the PTY too, but Claude's TUI may not reliably process
+		// raw input without the Escape/Ctrl-U reset sequence.
+		go m.deliverPromptAsync(sessionID, prompt)
+
+	case len(printable) > 0 && (s.Status == StatusIdle || s.Status == StatusFresh):
+		// Accumulate typed text as pendingInput
+		m.attachTyping[sessionID] = append(m.attachTyping[sessionID], printable...)
+		s.PendingInput = string(m.attachTyping[sessionID])
+		s.LastUsedAt = time.Now()
+		m.broadcastEvent(api.Msg{
+			"type": "event", "event": "updated",
+			"sessionId": s.ID, "changes": api.Msg{"pendingInput": s.PendingInput},
+		})
 	}
 }
 
@@ -1112,6 +1144,11 @@ func (m *Manager) handleDestroy(id any, req api.Msg) api.Msg {
 		delete(m.procs, sid)
 		if s := m.sessions[sid]; s != nil {
 			delete(m.pidToSID, s.PID)
+			if s.IsLive() {
+				s.Status = StatusOffloaded
+			}
+			s.PID = 0
+			s.PendingInput = ""
 		}
 	}
 
@@ -1132,21 +1169,21 @@ func (m *Manager) handleDestroy(id any, req api.Msg) api.Msg {
 // --- Subscribe ---
 
 func (m *Manager) handleSubscribe(conn net.Conn, req api.Msg) {
-	log.Printf("[subscribe] new subscriber from %s", conn.RemoteAddr())
-	sub := api.NewSubscriber(conn, req)
-	m.hub.Add(sub)
+	if existing := m.hub.FindByConn(conn); existing != nil {
+		log.Printf("[subscribe] re-subscribe from %s", conn.RemoteAddr())
+		existing.UpdateFilters(req) // clears pending buffer, commits
+		return
+	}
 
-	go func() {
-		defer m.hub.Remove(sub)
-		scanner := json.NewDecoder(conn)
-		for {
-			var msg api.Msg
-			if err := scanner.Decode(&msg); err != nil {
-				return
-			}
-			if t, _ := msg["type"].(string); t == "subscribe" {
-				sub.UpdateFilters(msg)
-			}
-		}
-	}()
+	connectedAt := time.Now()
+	if m.connAcceptedAt != nil {
+		connectedAt = m.connAcceptedAt(conn)
+	}
+
+	log.Printf("[subscribe] new subscriber from %s", conn.RemoteAddr())
+	sub := api.NewSubscriber(conn, req, connectedAt)
+	m.hub.Add(sub)
+	// Commit after a short delay to allow a potential re-subscribe to
+	// clear the buffer and update filters before events are flushed.
+	api.CommitAfter(sub, 10*time.Millisecond)
 }

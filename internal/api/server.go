@@ -8,21 +8,25 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 )
 
 // Handler processes a request and returns a response.
-// For subscribe requests, it should return nil and handle the connection directly.
+// Returning nil means "no response to write" (e.g., subscribe mode).
 type Handler func(conn net.Conn, req Msg) Msg
 
 // Server is the Unix socket API server.
 type Server struct {
-	socketPath string
-	listener   net.Listener
-	handler    Handler
-	wg         sync.WaitGroup
-	done       chan struct{}
-	conns      map[net.Conn]struct{}
-	connsMu    sync.Mutex
+	socketPath   string
+	listener     net.Listener
+	handler      Handler
+	onDisconnect func(net.Conn) // called when a connection closes
+	wg           sync.WaitGroup
+	done         chan struct{}
+
+	connsMu   sync.Mutex
+	conns     map[net.Conn]struct{}
+	connTimes map[net.Conn]time.Time // when each connection was accepted
 }
 
 func NewServer(socketPath string, handler Handler) *Server {
@@ -31,20 +35,35 @@ func NewServer(socketPath string, handler Handler) *Server {
 		handler:    handler,
 		done:       make(chan struct{}),
 		conns:      make(map[net.Conn]struct{}),
+		connTimes:  make(map[net.Conn]time.Time),
 	}
+}
+
+// OnDisconnect registers a callback invoked when a connection closes.
+func (s *Server) OnDisconnect(fn func(net.Conn)) {
+	s.onDisconnect = fn
+}
+
+// ConnAcceptedAt returns when a connection was accepted. Used by subscribers
+// to determine the replay boundary — only events after this time are replayed.
+func (s *Server) ConnAcceptedAt(conn net.Conn) time.Time {
+	s.connsMu.Lock()
+	t := s.connTimes[conn]
+	s.connsMu.Unlock()
+	if t.IsZero() {
+		return time.Now()
+	}
+	return t
 }
 
 // Start begins listening on the Unix socket.
 func (s *Server) Start() error {
-	// Remove stale socket if it exists
 	os.Remove(s.socketPath)
 
 	ln, err := net.Listen("unix", s.socketPath)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.socketPath, err)
 	}
-
-	// Owner-only permissions
 	if err := os.Chmod(s.socketPath, 0600); err != nil {
 		ln.Close()
 		return fmt.Errorf("chmod socket: %w", err)
@@ -61,8 +80,7 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Stop closes the listener, removes the socket (so clients see it's gone immediately),
-// then waits for active connections to drain.
+// Stop closes the listener, removes the socket, then waits for connections to drain.
 func (s *Server) Stop() {
 	close(s.done)
 	if s.listener != nil {
@@ -70,7 +88,6 @@ func (s *Server) Stop() {
 	}
 	os.Remove(s.socketPath)
 
-	// Close all tracked connections so handleConn goroutines unblock
 	s.connsMu.Lock()
 	for conn := range s.conns {
 		conn.Close()
@@ -92,6 +109,13 @@ func (s *Server) acceptLoop() {
 				continue
 			}
 		}
+
+		now := time.Now()
+		s.connsMu.Lock()
+		s.conns[conn] = struct{}{}
+		s.connTimes[conn] = now
+		s.connsMu.Unlock()
+
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
@@ -101,22 +125,18 @@ func (s *Server) acceptLoop() {
 }
 
 func (s *Server) handleConn(conn net.Conn) {
-	s.connsMu.Lock()
-	s.conns[conn] = struct{}{}
-	s.connsMu.Unlock()
-
-	owned := false // set when handler takes ownership (e.g., subscribe)
 	defer func() {
-		if !owned {
-			s.connsMu.Lock()
-			delete(s.conns, conn)
-			s.connsMu.Unlock()
-			conn.Close()
+		if s.onDisconnect != nil {
+			s.onDisconnect(conn)
 		}
+		s.connsMu.Lock()
+		delete(s.conns, conn)
+		delete(s.connTimes, conn)
+		s.connsMu.Unlock()
+		conn.Close()
 	}()
 
 	scanner := bufio.NewScanner(conn)
-	// Allow large messages (16MB)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 
 	for scanner.Scan() {
@@ -134,10 +154,7 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		resp := s.handler(conn, req)
 		if resp == nil {
-			// Handler took ownership of connection (e.g., subscribe).
-			// Don't close or untrack — the handler manages it now.
-			owned = true
-			return
+			continue
 		}
 		s.writeMsg(conn, resp)
 	}

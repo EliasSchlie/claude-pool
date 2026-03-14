@@ -11,28 +11,27 @@ const (
 	StatusQueued     = "queued"
 	StatusFresh      = "fresh" // Pre-warmed, not yet idle (startup in progress)
 	StatusIdle       = "idle"
-	StatusTyping     = "typing"
 	StatusProcessing = "processing"
 	StatusOffloaded  = "offloaded"
-	StatusDead       = "dead"
 	StatusError      = "error"
 	StatusArchived   = "archived"
 )
 
 // Session represents a managed Claude Code session.
 type Session struct {
-	ID         string
-	ClaudeUUID string
-	Status     string
-	ParentID   string
-	Priority   float64
-	Pinned     bool
-	PinExpiry  time.Time // TODO: not yet enforced — no goroutine checks for expiration
-	SpawnCwd   string
-	Cwd        string
-	CreatedAt  time.Time
-	LastUsedAt time.Time // updated on prompt delivery, used for LRU eviction
-	PID        int
+	ID           string
+	ClaudeUUID   string
+	Status       string
+	ParentID     string
+	Priority     float64
+	Pinned       bool
+	PinExpiry    time.Time // TODO: not yet enforced — no goroutine checks for expiration
+	SpawnCwd     string
+	Cwd          string
+	CreatedAt    time.Time
+	LastUsedAt   time.Time // updated on prompt delivery, used for LRU eviction
+	PID          int
+	PendingInput string // Un-submitted text in terminal buffer (attach pipe)
 
 	// Internal: pool-owned pre-warmed session (can be claimed by start/pin)
 	PreWarmed bool
@@ -48,7 +47,7 @@ type Session struct {
 // IsLive returns true if the session has a live terminal.
 func (s *Session) IsLive() bool {
 	switch s.Status {
-	case StatusFresh, StatusIdle, StatusTyping, StatusProcessing:
+	case StatusFresh, StatusIdle, StatusProcessing:
 		return true
 	}
 	return false
@@ -92,6 +91,10 @@ func (s *Session) ToMsg() map[string]any {
 	}
 	if s.PID != 0 {
 		m["pid"] = float64(s.PID)
+	}
+	// Always include pendingInput for loaded sessions (empty string = nothing typed)
+	if s.IsLive() {
+		m["pendingInput"] = s.PendingInput
 	}
 	return m
 }

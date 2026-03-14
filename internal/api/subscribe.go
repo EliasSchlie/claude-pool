@@ -5,42 +5,107 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 )
 
 // Subscriber receives filtered events on a persistent connection.
+//
+// New subscribers start in "pending" mode: events are buffered instead of sent
+// immediately. This handles two cases:
+//   - Race window: a command on another connection may be processed before the
+//     subscribe message, so its event needs to be captured and delivered later.
+//   - Re-subscribe: if the client sends a second subscribe (with different
+//     filters) before the pending buffer is flushed, the buffer is cleared so
+//     events matched by the old filters are discarded.
+//
+// The subscriber transitions to "committed" mode (direct delivery) either when
+// Commit() is called explicitly or after a short timeout.
 type Subscriber struct {
-	conn     net.Conn
-	mu       sync.Mutex
-	sessions map[string]bool // nil = all sessions
-	events   map[string]bool // nil = all events
-	statuses map[string]bool // nil = all statuses (only for "status" events)
-	fields   map[string]bool // nil = all fields (only for "updated" events)
+	conn        net.Conn
+	connectedAt time.Time // connection accept time — replay boundary
+
+	mu        sync.Mutex
+	sessions  map[string]bool // nil = all sessions
+	events    map[string]bool // nil = all events
+	statuses  map[string]bool // nil = all statuses; restricts to "status" events only
+	fields    map[string]bool // nil = all fields; restricts to "updated" events only
+	committed bool
+	pending   []Msg
 }
 
 // NewSubscriber creates a subscriber from subscribe request options.
-func NewSubscriber(conn net.Conn, opts Msg) *Subscriber {
-	s := &Subscriber{conn: conn}
-	s.UpdateFilters(opts)
+// The subscriber starts in pending mode (events are buffered).
+// connectedAt is the time the connection was accepted — only events after
+// this time are replayed from the ring buffer.
+func NewSubscriber(conn net.Conn, opts Msg, connectedAt time.Time) *Subscriber {
+	s := &Subscriber{conn: conn, connectedAt: connectedAt}
+	s.applyFilters(opts)
 	return s
 }
 
-// UpdateFilters replaces the subscriber's filters.
+// UpdateFilters replaces the subscriber's filters, clears any buffered events
+// (which matched the old filters), and commits (switches to direct delivery).
 func (s *Subscriber) UpdateFilters(opts Msg) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.applyFilters(opts)
+	s.pending = nil
+	s.committed = true
+}
+
+// Commit flushes buffered events (re-checking against current filters) and
+// switches to direct delivery. Safe to call multiple times.
+func (s *Subscriber) Commit() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.committed {
+		return
+	}
+	s.committed = true
+
+	for _, event := range s.pending {
+		if s.matchesLocked(event) {
+			s.directSend(event)
+		}
+	}
+	s.pending = nil
+}
+
+// Matches returns true if the event passes all filters (ANDed).
+func (s *Subscriber) Matches(event Msg) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.matchesLocked(event)
+}
+
+// Send delivers an event. In pending mode, events are buffered.
+// In committed mode, events are sent directly to the connection.
+func (s *Subscriber) Send(event Msg) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.committed {
+		s.pending = append(s.pending, event)
+		return nil
+	}
+	return s.directSend(event)
+}
+
+// Conn returns the underlying connection.
+func (s *Subscriber) Conn() net.Conn {
+	return s.conn
+}
+
+func (s *Subscriber) applyFilters(opts Msg) {
 	s.sessions = toStringSet(opts["sessions"])
 	s.events = toStringSet(opts["events"])
 	s.statuses = toStringSet(opts["statuses"])
 	s.fields = toStringSet(opts["fields"])
 }
 
-// Matches returns true if the event passes all filters.
-func (s *Subscriber) Matches(event Msg) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Session filter
+func (s *Subscriber) matchesLocked(event Msg) bool {
 	if s.sessions != nil {
 		sid, _ := event["sessionId"].(string)
 		if !s.sessions[sid] {
@@ -48,7 +113,6 @@ func (s *Subscriber) Matches(event Msg) bool {
 		}
 	}
 
-	// Event type filter
 	eventType, _ := event["event"].(string)
 	if s.events != nil {
 		if !s.events[eventType] {
@@ -56,16 +120,20 @@ func (s *Subscriber) Matches(event Msg) bool {
 		}
 	}
 
-	// Status filter (only for "status" events)
-	if s.statuses != nil && eventType == "status" {
+	if s.statuses != nil {
+		if eventType != "status" {
+			return false
+		}
 		status, _ := event["status"].(string)
 		if !s.statuses[status] {
 			return false
 		}
 	}
 
-	// Fields filter (only for "updated" events)
-	if s.fields != nil && eventType == "updated" {
+	if s.fields != nil {
+		if eventType != "updated" {
+			return false
+		}
 		changes, ok := event["changes"].(Msg)
 		if !ok {
 			return false
@@ -85,8 +153,7 @@ func (s *Subscriber) Matches(event Msg) bool {
 	return true
 }
 
-// Send writes an event to the subscriber's connection.
-func (s *Subscriber) Send(event Msg) error {
+func (s *Subscriber) directSend(event Msg) error {
 	data, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -96,25 +163,25 @@ func (s *Subscriber) Send(event Msg) error {
 	return err
 }
 
-// Conn returns the underlying connection.
-func (s *Subscriber) Conn() net.Conn {
-	return s.conn
+// recentEvent pairs an event with its broadcast timestamp.
+type recentEvent struct {
+	event Msg
+	at    time.Time
 }
 
-// SubscriberHub manages all active subscribers and maintains a short
-// replay buffer so new subscribers receive events they narrowly missed
-// (race between subscribe registration and event broadcasting).
+// SubscriberHub manages active subscribers, broadcasts events, and maintains
+// a short ring buffer so that events from the race window between connection
+// accept and subscribe processing can be replayed.
 type SubscriberHub struct {
 	mu   sync.Mutex
 	subs map[*Subscriber]struct{}
 
-	// Ring buffer for recent events (fixed-size, no slice shifting)
-	ring    [replayBufferSize]Msg
-	ringPos int // next write position
-	ringLen int // number of valid entries (0..replayBufferSize)
+	ring    [replayBufferSize]recentEvent
+	ringPos int
+	ringLen int
 }
 
-const replayBufferSize = 100
+const replayBufferSize = 64
 
 // NewSubscriberHub creates a new hub.
 func NewSubscriberHub() *SubscriberHub {
@@ -123,21 +190,29 @@ func NewSubscriberHub() *SubscriberHub {
 	}
 }
 
-// Add registers a subscriber and replays recent events that match its filters.
-// Holding the lock during both registration and replay ensures no event is
-// delivered twice (via both replay and live broadcast).
+// Add registers a subscriber and replays recent events from the ring buffer.
+// Replayed events go to the subscriber's pending buffer (not sent directly).
+// Call Commit() after a short delay to flush; if a re-subscribe arrives first,
+// UpdateFilters() clears the buffer so stale-filter events are discarded.
 func (h *SubscriberHub) Add(s *Subscriber) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	h.subs[s] = struct{}{}
-	// Replay recent events in chronological order
+
+	// Replay events from the race window (after connection accept) into
+	// the subscriber's pending buffer. The pending buffer is flushed on
+	// Commit() or cleared on re-subscribe (UpdateFilters).
 	start := (h.ringPos - h.ringLen + replayBufferSize) % replayBufferSize
 	for i := 0; i < h.ringLen; i++ {
-		event := h.ring[(start+i)%replayBufferSize]
-		if s.Matches(event) {
-			s.Send(event)
+		re := h.ring[(start+i)%replayBufferSize]
+		if !re.at.After(s.connectedAt) {
+			continue // event predates this connection
+		}
+		if s.Matches(re.event) {
+			s.Send(re.event) // goes to pending buffer (subscriber is uncommitted)
 		}
 	}
-	h.mu.Unlock()
 }
 
 // Remove unregisters a subscriber.
@@ -147,24 +222,45 @@ func (h *SubscriberHub) Remove(s *Subscriber) {
 	h.mu.Unlock()
 }
 
-// Broadcast sends an event to all matching subscribers and stores it
-// in the replay buffer for late-arriving subscribers.
+// FindByConn returns the subscriber for a given connection, or nil.
+func (h *SubscriberHub) FindByConn(conn net.Conn) *Subscriber {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for s := range h.subs {
+		if s.Conn() == conn {
+			return s
+		}
+	}
+	return nil
+}
+
+// RemoveByConn removes the subscriber for a given connection, if any.
+func (h *SubscriberHub) RemoveByConn(conn net.Conn) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for s := range h.subs {
+		if s.Conn() == conn {
+			delete(h.subs, s)
+			return
+		}
+	}
+}
+
+// Broadcast sends an event to all matching subscribers and stores it in
+// the ring buffer for replay to future subscribers.
 func (h *SubscriberHub) Broadcast(event Msg) {
 	h.mu.Lock()
-	// Store in ring buffer
-	h.ring[h.ringPos] = event
+	h.ring[h.ringPos] = recentEvent{event: event, at: time.Now()}
 	h.ringPos = (h.ringPos + 1) % replayBufferSize
 	if h.ringLen < replayBufferSize {
 		h.ringLen++
 	}
-	// Snapshot current subscribers
 	subs := make([]*Subscriber, 0, len(h.subs))
 	for s := range h.subs {
 		subs = append(subs, s)
 	}
 	h.mu.Unlock()
 
-	// Send outside the lock to avoid blocking other operations
 	for _, s := range subs {
 		if s.Matches(event) {
 			if err := s.Send(event); err != nil {
@@ -173,6 +269,16 @@ func (h *SubscriberHub) Broadcast(event Msg) {
 			}
 		}
 	}
+}
+
+// CommitAfter schedules a subscriber commit after a short delay.
+// This gives the connection time to process a potential re-subscribe
+// (which clears the buffer and changes filters) before flushing.
+func CommitAfter(s *Subscriber, d time.Duration) {
+	go func() {
+		time.Sleep(d)
+		s.Commit()
+	}()
 }
 
 func toStringSet(v any) map[string]bool {

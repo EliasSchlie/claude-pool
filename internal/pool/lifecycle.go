@@ -2,7 +2,6 @@ package pool
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -133,6 +132,8 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 	s.Status = StatusOffloaded
 	s.PID = 0
 	s.Pinned = false
+	s.PendingInput = ""
+	delete(m.attachTyping, s.ID)
 	m.broadcastStatus(s, prevStatus)
 }
 
@@ -184,20 +185,45 @@ func (m *Manager) watchProcessDone(sessionID string, proc *ptyPkg.Process) {
 		log.Printf("process exited: session=%s pid=%d exit=%d", sessionID, proc.PID(), exitCode)
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		if sess := m.sessions[sessionID]; sess != nil && sess.IsLive() {
-			prevStatus := sess.Status
-			sess.Status = StatusDead
-			m.broadcastStatus(sess, prevStatus)
+
+		// If the session has been respawned with a new process, this watcher
+		// is stale — don't modify session state or clean up the new process.
+		// This happens when: offload kills process → followup respawns session
+		// → old watchProcessDone fires after new process is already running.
+		currentProc := m.procs[sessionID]
+		stale := currentProc != nil && currentProc != proc
+
+		// Track whether the process was still live (unexpected death) before
+		// we transition status. Intentional exits (offload, archive, destroy)
+		// set the session status before killing — IsLive() is already false.
+		unexpectedDeath := false
+		if !stale {
+			if sess := m.sessions[sessionID]; sess != nil && sess.IsLive() {
+				unexpectedDeath = true
+				prevStatus := sess.Status
+				sess.Status = StatusOffloaded
+				sess.PID = 0
+				sess.PendingInput = ""
+				log.Printf("[process-exit] session %s: %s → offloaded (process died)", sessionID, prevStatus)
+				m.broadcastStatus(sess, prevStatus)
+			}
+			if pipe := m.pipes[sessionID]; pipe != nil {
+				pipe.Close()
+				delete(m.pipes, sessionID)
+			}
+			delete(m.procs, sessionID)
 		}
-		// Close attach pipe on process death
-		if pipe := m.pipes[sessionID]; pipe != nil {
-			pipe.Close()
-			delete(m.pipes, sessionID)
+
+		// Only clean up pidToSID if this watcher still owns the PID.
+		// After transferProcess, the PID maps to the new session —
+		// the old watcher must not remove it.
+		if m.pidToSID[proc.PID()] == sessionID {
+			delete(m.pidToSID, proc.PID())
 		}
-		delete(m.pidToSID, proc.PID())
-		delete(m.procs, sessionID)
 		m.tryDequeue()
-		m.tryReplaceDeadSessions()
+		if unexpectedDeath {
+			m.tryReplaceDeadSessions()
+		}
 	}()
 }
 
@@ -225,58 +251,72 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 			}
 			m.mu.Unlock()
 
-			// Check for Claude UUID from PID mapping
-			if data, err := os.ReadFile(pidMapPath); err == nil {
-				claudeUUID := strings.TrimSpace(string(data))
-				if claudeUUID != "" {
-					m.mu.Lock()
-					if s := m.sessions[sessionID]; s != nil && s.ClaudeUUID == "" {
-						log.Printf("[idle-watch] session %s: discovered claude UUID %s from pid map", sessionID, claudeUUID)
-						s.ClaudeUUID = claudeUUID
+			// Check for Claude UUID from PID mapping (skip if already known)
+			m.mu.Lock()
+			needUUID := m.sessions[sessionID] != nil && m.sessions[sessionID].ClaudeUUID == ""
+			m.mu.Unlock()
+			if needUUID {
+				if data, err := os.ReadFile(pidMapPath); err == nil {
+					claudeUUID := strings.TrimSpace(string(data))
+					if claudeUUID != "" {
+						m.mu.Lock()
+						if s := m.sessions[sessionID]; s != nil && s.ClaudeUUID == "" {
+							log.Printf("[idle-watch] session %s: discovered claude UUID %s from pid map", sessionID, claudeUUID)
+							s.ClaudeUUID = claudeUUID
+						}
+						m.mu.Unlock()
 					}
-					m.mu.Unlock()
 				}
 			}
 
-			// Check idle signal
+			// Read and process idle signal atomically under the mutex.
+			// This prevents races with handleAttachInput's clearIdleSignals —
+			// without this, the idle-watch could read a stale signal file,
+			// then handleAttachInput sets Processing + clears the file, then
+			// the idle-watch acquires the mutex and falsely transitions to Idle.
+			m.mu.Lock()
 			data, err := os.ReadFile(signalPath)
 			if err != nil {
+				m.mu.Unlock()
 				continue
 			}
+			os.Remove(signalPath)
+			log.Printf("[idle-watch] session %s: read signal file (pid=%d): %s", sessionID, pid, strings.TrimSpace(string(data)))
 
-			// Parse signal JSON for cwd and transcript
-			var sig map[string]any
-			if err := json.Unmarshal(data, &sig); err == nil {
-				if cwd, ok := sig["cwd"].(string); ok && cwd != "" {
-					m.mu.Lock()
-					if s := m.sessions[sessionID]; s != nil && s.Cwd != cwd {
-						s.Cwd = cwd
-						m.broadcastEvent(api.Msg{
-							"type": "event", "event": "updated",
-							"sessionId": s.ID, "changes": api.Msg{"cwd": cwd},
-						})
-					}
-					m.mu.Unlock()
-				}
-				if transcript, ok := sig["transcript"].(string); ok && transcript != "" {
-					m.mu.Lock()
-					if s := m.sessions[sessionID]; s != nil && s.ClaudeUUID == "" {
-						base := filepath.Base(transcript)
-						if uuid := strings.TrimSuffix(base, ".jsonl"); uuid != base {
-							s.ClaudeUUID = uuid
-						}
-					}
-					m.mu.Unlock()
-				}
-			}
-
-			// Session is idle
-			m.mu.Lock()
 			s = m.sessions[sessionID]
 			if s == nil {
 				log.Printf("[idle-watch] session %s: gone, stopping watcher", sessionID)
 				m.mu.Unlock()
 				return
+			}
+
+			// Parse signal JSON for cwd and transcript
+			var sig map[string]any
+			if err := json.Unmarshal(data, &sig); err == nil {
+				if cwd, ok := sig["cwd"].(string); ok && cwd != "" && s.Cwd != cwd {
+					s.Cwd = cwd
+					m.broadcastEvent(api.Msg{
+						"type": "event", "event": "updated",
+						"sessionId": s.ID, "changes": api.Msg{"cwd": cwd},
+					})
+				}
+				if transcript, ok := sig["transcript"].(string); ok && transcript != "" && s.ClaudeUUID == "" {
+					base := filepath.Base(transcript)
+					if uuid := strings.TrimSuffix(base, ".jsonl"); uuid != base {
+						s.ClaudeUUID = uuid
+					}
+				}
+			}
+
+			// Startup signals (session-start, session-clear) are only valid for
+			// Fresh → Idle transitions. If the session is Processing, a startup
+			// signal is stale (arrived after handleAttachInput set Processing)
+			// and must not cause a false Processing → Idle transition.
+			trigger, _ := sig["trigger"].(string)
+			if s.Status == StatusProcessing && (trigger == "session-start" || trigger == "session-clear") {
+				log.Printf("[idle-watch] session %s: ignoring stale %s signal (status=%s)", sessionID, trigger, s.Status)
+				m.mu.Unlock()
+				continue
 			}
 
 			if s.Status == StatusFresh || s.Status == StatusProcessing {
@@ -291,9 +331,10 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 					s.LastUsedAt = time.Now()
 					log.Printf("[idle-watch] session %s: idle signal received, delivering pending prompt (%d chars)", sessionID, len(prompt))
 					m.broadcastStatus(s, prevStatus)
+					// Register delivery under the lock so awaitDelivery
+					// can't miss it between unlock and goroutine start.
+					m.deliverPrompt(s, prompt)
 					m.mu.Unlock()
-					os.Remove(signalPath)
-					m.deliverPromptAsync(sessionID, prompt)
 					continue
 				}
 
@@ -302,10 +343,11 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 				log.Printf("[idle-watch] session %s: %s → idle (pid=%d)", sessionID, prevStatus, s.PID)
 				m.broadcastStatus(s, prevStatus)
 				m.savePoolState()
-				os.Remove(signalPath)
 
 				// Check if a queued session can claim this slot
 				m.serveQueueFromSlot(s)
+			} else {
+				log.Printf("[idle-watch] session %s: consumed stale signal (status=%s)", sessionID, s.Status)
 			}
 			m.mu.Unlock()
 		}
@@ -314,9 +356,18 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 
 // --- Prompt delivery ---
 
-// deliverPrompt sends a prompt to a session's terminal.
+// deliverPrompt sends a prompt to a session's terminal asynchronously.
 // Escape → Ctrl-U → text → brief echo check → Enter.
+// Must be called with m.mu held. Callers that need to wait for delivery
+// can select on m.delivering[s.ID] (closed when the goroutine finishes).
 func (m *Manager) deliverPrompt(s *Session, prompt string) {
+	m.deliverPromptWithSettle(s, prompt, 200*time.Millisecond)
+}
+
+// deliverPromptWithSettle is like deliverPrompt but with a custom settle delay.
+// Use a longer delay after Ctrl-C interrupts, since Claude needs time to
+// process the cancellation and return to its prompt.
+func (m *Manager) deliverPromptWithSettle(s *Session, prompt string, settleDelay time.Duration) {
 	proc := m.procs[s.ID]
 	if proc == nil {
 		log.Printf("[deliver] session %s: no process, skipping prompt delivery", s.ID)
@@ -325,12 +376,23 @@ func (m *Manager) deliverPrompt(s *Session, prompt string) {
 
 	sid := s.ID
 	done := m.done
+	ch := make(chan struct{})
+	m.delivering[sid] = ch
 	go func() {
-		// Short delay to let terminal settle after state transition
+		defer func() {
+			close(ch)
+			m.mu.Lock()
+			if m.delivering[sid] == ch {
+				delete(m.delivering, sid)
+			}
+			m.mu.Unlock()
+		}()
+
+		// Delay to let terminal settle after state transition
 		select {
 		case <-done:
 			return
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(settleDelay):
 		}
 
 		if err := proc.WriteString("\x1b"); err != nil { // Escape
@@ -362,6 +424,17 @@ func (m *Manager) deliverPrompt(s *Session, prompt string) {
 	}()
 }
 
+// awaitDelivery waits for any in-flight prompt delivery on a session.
+// Must be called WITHOUT m.mu held (it blocks on the goroutine).
+func (m *Manager) awaitDelivery(sessionID string) {
+	m.mu.Lock()
+	ch := m.delivering[sessionID]
+	m.mu.Unlock()
+	if ch != nil {
+		<-ch
+	}
+}
+
 // waitForBufferContent polls the process buffer until it contains the given text,
 // checking only the tail to avoid false matches in scrollback.
 func waitForBufferContent(proc *ptyPkg.Process, text string, timeout time.Duration) bool {
@@ -390,12 +463,13 @@ func waitForBufferContent(proc *ptyPkg.Process, text string, timeout time.Durati
 func (m *Manager) deliverPromptAsync(sessionID, prompt string) {
 	m.mu.Lock()
 	s := m.sessions[sessionID]
-	m.mu.Unlock()
 	if s == nil {
+		m.mu.Unlock()
 		log.Printf("[deliver] session %s gone before prompt delivery", sessionID)
 		return
 	}
 	m.deliverPrompt(s, prompt)
+	m.mu.Unlock()
 }
 
 func (m *Manager) deliverPromptWhenReady(s *Session) {
@@ -429,8 +503,8 @@ func (m *Manager) deliverPromptWhenReady(s *Session) {
 					sess.Status = StatusProcessing
 					log.Printf("[deliver] session %s: idle → processing, delivering queued prompt (%d chars)", sid, len(prompt))
 					m.broadcastStatus(sess, StatusIdle)
-					m.mu.Unlock()
 					m.deliverPrompt(sess, prompt)
+					m.mu.Unlock()
 					return
 				}
 				m.mu.Unlock()
@@ -476,15 +550,35 @@ func (m *Manager) waitForSessionReady(id any, sid string, timeout time.Duration)
 // (e.g., after Ctrl-C interrupts processing).
 func (m *Manager) writeIdleSignal(pid int, trigger string) {
 	signalPath := m.paths.IdleSignal(pid)
-	signal := fmt.Sprintf(`{"cwd":"%s","session_id":"","transcript":"","ts":%d,"trigger":"%s"}`,
-		m.paths.Root, time.Now().Unix(), trigger)
+	signal := map[string]any{
+		"cwd":        m.paths.Root,
+		"session_id": "",
+		"transcript": "",
+		"ts":         time.Now().Unix(),
+		"trigger":    trigger,
+	}
+	data, _ := json.Marshal(signal)
 	log.Printf("[idle-signal] writing synthetic idle signal for pid %d (trigger=%s)", pid, trigger)
-	if err := os.WriteFile(signalPath, []byte(signal+"\n"), 0600); err != nil {
+	if err := os.WriteFile(signalPath, append(data, '\n'), 0600); err != nil {
 		log.Printf("[idle-signal] error writing signal for pid %d: %v", pid, err)
 	}
 }
 
 // --- Queue management ---
+
+// tryDequeueWithEviction attempts to dequeue a session by first trying free
+// slots, then evicting an idle session if needed. excludeID prevents evicting
+// the session itself (e.g., during followup/pin). Must be called with m.mu held.
+func (m *Manager) tryDequeueWithEviction(s *Session, excludeID string) {
+	m.tryDequeue()
+	if s.Status == StatusQueued {
+		if evicted := m.findEvictableSession(); evicted != nil && evicted.ID != excludeID {
+			log.Printf("[evict] evicting idle session %s (priority=%.1f) to free slot for %s", evicted.ID, evicted.Priority, s.ID)
+			m.offloadSessionLocked(evicted)
+		}
+		m.tryDequeue()
+	}
+}
 
 func (m *Manager) removeFromQueue(s *Session) {
 	for i, q := range m.queue {
@@ -614,40 +708,54 @@ func (m *Manager) clearIdleSignals(pid int) {
 func (m *Manager) findFreshSlot() *Session {
 	// Only claim pre-warmed sessions (pool-owned, never used by a client).
 	// Prefer idle (ready) over fresh (still starting).
+	var freshCandidate *Session
 	for _, s := range m.sessions {
-		if s.PreWarmed && s.Status == StatusIdle && !s.Pinned {
-			return s
+		if !s.PreWarmed || s.Pinned {
+			continue
+		}
+		if s.Status == StatusIdle {
+			return s // best case — immediately ready
+		}
+		if s.Status == StatusFresh && freshCandidate == nil {
+			freshCandidate = s
 		}
 	}
-	for _, s := range m.sessions {
-		if s.PreWarmed && s.Status == StatusFresh && !s.Pinned {
-			return s
-		}
-	}
-	return nil
+	return freshCandidate
 }
 
+// findEvictableSession returns the lowest-priority idle unpinned session,
+// or nil if none qualifies. Among equal-priority sessions, pre-warmed sessions
+// are evicted first, then empty pendingInput, then oldest LRU.
 func (m *Manager) findEvictableSession() *Session {
-	return m.findEvictableSessionBelow(float64(1 << 53)) // effectively no ceiling
-}
-
-// findEvictableSessionBelow returns the lowest-priority idle unpinned session
-// with priority strictly below maxPriority, or nil if none qualifies.
-func (m *Manager) findEvictableSessionBelow(maxPriority float64) *Session {
 	var best *Session
 	for _, s := range m.sessions {
 		if s.Status != StatusIdle || s.Pinned {
 			continue
 		}
-		if s.Priority >= maxPriority {
-			continue
-		}
-		if best == nil || s.Priority < best.Priority ||
-			(s.Priority == best.Priority && s.LastUsedAt.Before(best.LastUsedAt)) {
+		if best == nil || evictsBefore(s, best) {
 			best = s
 		}
 	}
 	return best
+}
+
+// evictsBefore returns true if a should be evicted before b.
+// Order: lower priority → pre-warmed → empty pendingInput → oldest LRU.
+func evictsBefore(a, b *Session) bool {
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
+	}
+	// Pre-warmed sessions evicted before user sessions
+	if a.PreWarmed != b.PreWarmed {
+		return a.PreWarmed
+	}
+	// Sessions with empty pendingInput evicted before those with pending text
+	aHasInput := a.PendingInput != ""
+	bHasInput := b.PendingInput != ""
+	if aHasInput != bHasInput {
+		return !aHasInput // evict the one WITHOUT input first
+	}
+	return a.LastUsedAt.Before(b.LastUsedAt)
 }
 
 // tryReplaceDeadSessions spawns new sessions to maintain pool size when

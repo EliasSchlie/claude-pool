@@ -41,6 +41,8 @@ func main() {
 	mgr := pool.NewManager(p, cfgMgr)
 
 	srv := api.NewServer(p.Socket(), mgr.Handle)
+	srv.OnDisconnect(mgr.HandleDisconnect)
+	mgr.SetConnAcceptedAt(srv.ConnAcceptedAt)
 	if err := srv.Start(); err != nil {
 		log.Fatalf("failed to start API server: %v", err)
 	}
