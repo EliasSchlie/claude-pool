@@ -15,6 +15,25 @@ import (
 )
 
 func main() {
+	// Handle install/uninstall subcommands before flag parsing —
+	// they don't need --pool-dir and operate on ~/.claude/ instead.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "install":
+			if err := cmdInstall(); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "uninstall":
+			if err := cmdUninstall(); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
+
 	poolDir := flag.String("pool-dir", "", "Pool directory (required)")
 	flag.Parse()
 
