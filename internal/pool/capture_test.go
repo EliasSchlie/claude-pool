@@ -13,7 +13,6 @@ import (
 
 // --- Test helpers ---
 
-// mustContain fails the test if s does not contain substr (case-insensitive).
 func mustContain(t *testing.T, label, s, substr string) {
 	t.Helper()
 	if !strings.Contains(strings.ToLower(s), strings.ToLower(substr)) {
@@ -21,7 +20,6 @@ func mustContain(t *testing.T, label, s, substr string) {
 	}
 }
 
-// mustNotContain fails the test if s contains substr (case-insensitive).
 func mustNotContain(t *testing.T, label, s, substr string) {
 	t.Helper()
 	if strings.Contains(strings.ToLower(s), strings.ToLower(substr)) {
@@ -36,72 +34,150 @@ func truncateStr(s string, max int) string {
 	return s[:max] + "..."
 }
 
-// buildTranscript creates a fake JSONL transcript from a sequence of messages.
-// Each entry is a (type, text) pair — e.g., ("user", "hello"), ("assistant", "hi").
-func buildTranscript(t *testing.T, messages ...string) string {
+func assertTypeCount(t *testing.T, entries []map[string]any, msgType string, expected int) {
 	t.Helper()
-	if len(messages)%2 != 0 {
-		t.Fatal("buildTranscript requires (type, text) pairs")
+	got := countByType(entries, msgType)
+	if got != expected {
+		t.Fatalf("expected %d %q entries, got %d", expected, msgType, got)
 	}
-	var lines []string
-	for i := 0; i < len(messages); i += 2 {
-		msgType := messages[i]
-		text := messages[i+1]
+}
 
-		var entry map[string]any
-		switch msgType {
-		case "assistant":
-			entry = map[string]any{
-				"type":  "assistant",
-				"model": "claude-sonnet-4-20250514",
-				"usage": map[string]any{
-					"input_tokens":  100,
-					"output_tokens": 50,
-				},
-				"message": map[string]any{
-					"id":    "msg_fake",
-					"model": "claude-sonnet-4-20250514",
-					"usage": map[string]any{
-						"input_tokens":  100,
-						"output_tokens": 50,
-					},
-					"stop_reason": "end_turn",
-					"content": []any{
-						map[string]any{"type": "text", "text": text},
-					},
-				},
-			}
-		case "user", "human":
-			entry = map[string]any{
-				"type": msgType,
-				"message": map[string]any{
-					"content": []any{
-						map[string]any{"type": "text", "text": text},
-					},
-				},
-			}
-		default:
-			entry = map[string]any{
-				"type":    msgType,
-				"content": text,
-			}
-		}
-		data, err := json.Marshal(entry)
-		if err != nil {
-			t.Fatalf("buildTranscript: marshal error: %v", err)
-		}
-		lines = append(lines, string(data))
+// baseEntry returns common metadata fields shared by all realistic JSONL entries.
+func baseEntry() map[string]any {
+	return map[string]any{
+		"parentUuid":  nil,
+		"isSidechain": false,
+		"cwd":         "/tmp/test",
+		"sessionId":   "fake-session-uuid",
+		"version":     "2.1.72",
 	}
-	return strings.Join(lines, "\n")
+}
+
+// buildEntry creates a single realistic JSONL entry matching Claude Code's actual format.
+func buildEntry(t *testing.T, entryType string, content any) string {
+	t.Helper()
+	entry := baseEntry()
+
+	switch entryType {
+	case "user":
+		text, _ := content.(string)
+		entry["userType"] = "external"
+		entry["type"] = "user"
+		entry["message"] = map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "text", "text": text},
+			},
+		}
+		entry["uuid"] = "user-uuid-fake"
+		entry["timestamp"] = "2026-03-14T10:00:00Z"
+
+	case "assistant":
+		text, _ := content.(string)
+		entry["parentUuid"] = "user-uuid-fake"
+		entry["type"] = "assistant"
+		entry["message"] = map[string]any{
+			"model": "claude-haiku-4-5-20251001",
+			"id":    "msg_fake",
+			"type":  "message",
+			"role":  "assistant",
+			"content": []any{
+				map[string]any{"type": "text", "text": text},
+			},
+			"stop_reason":   "end_turn",
+			"stop_sequence": nil,
+			"usage": map[string]any{
+				"input_tokens":                100,
+				"output_tokens":               50,
+				"cache_creation_input_tokens": 0,
+				"cache_read_input_tokens":     0,
+			},
+		}
+		entry["requestId"] = "req_fake"
+		entry["uuid"] = "assistant-uuid-fake"
+		entry["timestamp"] = "2026-03-14T10:00:01Z"
+
+	case "assistant_tool_use":
+		toolName, _ := content.(string)
+		entry["parentUuid"] = "user-uuid-fake"
+		entry["type"] = "assistant"
+		entry["message"] = map[string]any{
+			"model": "claude-haiku-4-5-20251001",
+			"id":    "msg_fake_tool",
+			"type":  "message",
+			"role":  "assistant",
+			"content": []any{
+				map[string]any{
+					"type":  "tool_use",
+					"id":    "toolu_fake",
+					"name":  toolName,
+					"input": map[string]any{"command": "echo test"},
+				},
+			},
+			"stop_reason": "tool_use",
+			"usage": map[string]any{
+				"input_tokens":  100,
+				"output_tokens": 30,
+			},
+		}
+		entry["requestId"] = "req_fake_tool"
+		entry["uuid"] = "assistant-tool-uuid-fake"
+		entry["timestamp"] = "2026-03-14T10:00:02Z"
+
+	case "tool_result":
+		// Tool result: top-level type=user, message.content contains tool_result block
+		text, _ := content.(string)
+		entry["parentUuid"] = "assistant-tool-uuid-fake"
+		entry["userType"] = "external"
+		entry["type"] = "user"
+		entry["message"] = map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{
+					"type":        "tool_result",
+					"tool_use_id": "toolu_fake",
+					"content":     text,
+				},
+			},
+		}
+		entry["uuid"] = "tool-result-uuid-fake"
+		entry["timestamp"] = "2026-03-14T10:00:03Z"
+
+	case "progress":
+		entry["parentUuid"] = "assistant-uuid-fake"
+		entry["type"] = "progress"
+		entry["data"] = map[string]any{
+			"type":      "hook_progress",
+			"hookEvent": "Stop",
+		}
+		entry["timestamp"] = "2026-03-14T10:00:04Z"
+
+	case "system":
+		entry["type"] = "system"
+		entry["timestamp"] = "2026-03-14T10:00:00Z"
+
+	default:
+		t.Fatalf("buildEntry: unknown type %q", entryType)
+	}
+
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("buildEntry: marshal error: %v", err)
+	}
+	return string(data)
+}
+
+// buildTranscript joins multiple JSONL entries into a transcript string.
+func buildTranscript(t *testing.T, entries ...string) string {
+	t.Helper()
+	return strings.Join(entries, "\n")
 }
 
 // setupFakeTranscript writes a transcript to a temp directory and returns a
-// Manager configured to find it via transcriptDirs. Fully isolated — no
-// writes to ~/.claude/.
+// Manager configured to find it via transcriptDirs.
 func setupFakeTranscript(t *testing.T, uuid, transcript string) (*Manager, *Session) {
 	t.Helper()
 
-	// Create <tmpdir>/project-key/<uuid>.jsonl — findTranscript globs */<uuid>.jsonl
 	projectDir := filepath.Join(t.TempDir(), "test-project")
 	if err := os.MkdirAll(projectDir, 0755); err != nil {
 		t.Fatalf("setupFakeTranscript: MkdirAll: %v", err)
@@ -123,111 +199,310 @@ func setupFakeTranscript(t *testing.T, uuid, transcript string) (*Manager, *Sess
 	return m, s
 }
 
-// --- Bug #1: jsonl-short must filter since last user message ---
-
-func TestJsonlShortFiltersSinceLastUser(t *testing.T) {
-	// SPEC: jsonl-short = "All assistant messages since last user message."
-	//
-	// Bug: captureContent dispatches jsonl-short as readJSONL(s, false, true)
-	// — sinceLastUser=false. Should be readJSONL(s, true, true).
-
-	transcript := buildTranscript(t,
-		"user", "what is 2+2",
-		"assistant", "4",
-		"user", "what is 3+3",
-		"assistant", "6",
-	)
-
-	m, s := setupFakeTranscript(t, "test-short-uuid", transcript)
-
-	t.Run("readJSONL with sinceLastUser=true excludes earlier turns", func(t *testing.T) {
-		result := m.readJSONL(s, true, true) // sinceLastUser=true, shortOnly=true
-		mustContain(t, "result", result, "6")
-		mustNotContain(t, "result", result, "4")
-	})
-
-	t.Run("captureContent jsonl-short excludes earlier turns", func(t *testing.T) {
-		result := m.captureContent(s, "jsonl-short")
-		mustContain(t, "jsonl-short", result, "6")
-		mustNotContain(t, "jsonl-short", result, "4")
-	})
-}
-
-// --- Bug #3: jsonl-long must strip repetitive fields ---
-
-func TestJsonlLongStripsFields(t *testing.T) {
-	// SPEC: jsonl-long = "Full JSONL since last user message, repetitive
-	// fields stripped."
-	//
-	// Bug: readJSONL with shortOnly=false returns raw JSONL unchanged —
-	// no field stripping.
-
-	transcript := buildTranscript(t,
-		"user", "hello",
-		"assistant", "world",
-	)
-
-	m, s := setupFakeTranscript(t, "test-long-uuid", transcript)
-
-	t.Run("jsonl-long should strip model and usage fields", func(t *testing.T) {
-		longResult := m.captureContent(s, "jsonl-long")
-		fullResult := m.captureContent(s, "jsonl-full")
-
-		if strings.Contains(longResult, `"stop_reason"`) {
-			t.Error("jsonl-long should strip 'stop_reason' from messages")
+// parseCaptureLines splits JSONL content and parses each line.
+func parseCaptureLines(t *testing.T, content string) []map[string]any {
+	t.Helper()
+	if content == "" {
+		return nil
+	}
+	var result []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(content), "\n") {
+		if line == "" {
+			continue
 		}
-
-		if len(longResult) >= len(fullResult) {
-			t.Errorf("jsonl-long (%d bytes) should be smaller than jsonl-full (%d bytes) after stripping repetitive fields",
-				len(longResult), len(fullResult))
+		var msg map[string]any
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			t.Fatalf("parseCaptureLines: invalid JSON line: %v\nline: %s", err, line)
 		}
-	})
-
-	t.Run("jsonl-long preserves content", func(t *testing.T) {
-		longResult := m.captureContent(s, "jsonl-long")
-		mustContain(t, "jsonl-long", longResult, "world")
-	})
+		result = append(result, msg)
+	}
+	return result
 }
 
-// --- Verify jsonl-full is unfiltered ---
+func countByType(entries []map[string]any, msgType string) int {
+	n := 0
+	for _, e := range entries {
+		if typ, _ := e["type"].(string); typ == msgType {
+			n++
+		}
+	}
+	return n
+}
 
-func TestJsonlFullReturnsEverything(t *testing.T) {
+// hasContentBlockType checks if an entry's message.content contains a block of the given type.
+func hasContentBlockType(entry map[string]any, blockType string) bool {
+	msg, _ := entry["message"].(map[string]any)
+	if msg == nil {
+		return false
+	}
+	content, _ := msg["content"].([]any)
+	for _, c := range content {
+		if block, ok := c.(map[string]any); ok {
+			if typ, _ := block["type"].(string); typ == blockType {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ============================================================
+// New capture API tests: captureOutput(s, source, turns, detail)
+//
+// These tests will fail until captureOutput is implemented.
+// ============================================================
+
+// --- Simple two-turn transcript (no tool calls) ---
+
+func twoTurnTranscript(t *testing.T) string {
+	return buildTranscript(t,
+		buildEntry(t, "user", "what is 2+2"),
+		buildEntry(t, "assistant", "4"),
+		buildEntry(t, "user", "what is 3+3"),
+		buildEntry(t, "assistant", "6"),
+	)
+}
+
+// --- Tool-use turn transcript ---
+// Turn 1: user asks, assistant calls bash, gets result, responds with final text
+// Turn 2: simple follow-up
+
+func toolUseTranscript(t *testing.T) string {
+	return buildTranscript(t,
+		buildEntry(t, "user", "list the files"),
+		buildEntry(t, "assistant_tool_use", "Bash"),
+		buildEntry(t, "tool_result", "file1.txt\nfile2.txt"),
+		buildEntry(t, "assistant", "I found two files: file1.txt and file2.txt"),
+		buildEntry(t, "user", "thanks"),
+		buildEntry(t, "assistant", "you are welcome"),
+	)
+}
+
+// --- Transcript with progress/system entries ---
+
+func noisyTranscript(t *testing.T) string {
+	return buildTranscript(t,
+		buildEntry(t, "system", ""),
+		buildEntry(t, "user", "hello"),
+		buildEntry(t, "progress", ""),
+		buildEntry(t, "assistant", "hi there"),
+	)
+}
+
+// === turns parameter ===
+
+func TestCaptureTurns1(t *testing.T) {
+	m, s := setupFakeTranscript(t, "turns-1", twoTurnTranscript(t))
+	result := m.captureOutput(s, "jsonl", 1, "last")
+	entries := parseCaptureLines(t, result)
+
+	// Last turn only: "what is 3+3" → "6"
+	assertTypeCount(t, entries, "user", 1)
+	assertTypeCount(t, entries, "assistant", 1)
+	mustContain(t, "result", result, "3+3")
+	mustContain(t, "result", result, "6")
+	mustNotContain(t, "result", result, "2+2")
+}
+
+func TestCaptureTurns2(t *testing.T) {
 	transcript := buildTranscript(t,
-		"user", "first",
-		"assistant", "one",
-		"user", "second",
-		"assistant", "two",
+		buildEntry(t, "user", "turn one"),
+		buildEntry(t, "assistant", "response one"),
+		buildEntry(t, "user", "turn two"),
+		buildEntry(t, "assistant", "response two"),
+		buildEntry(t, "user", "turn three"),
+		buildEntry(t, "assistant", "response three"),
 	)
 
-	m, s := setupFakeTranscript(t, "test-full-uuid", transcript)
-	result := m.captureContent(s, "jsonl-full")
+	m, s := setupFakeTranscript(t, "turns-2", transcript)
+	result := m.captureOutput(s, "jsonl", 2, "last")
 
-	mustContain(t, "jsonl-full", result, "one")
-	mustContain(t, "jsonl-full", result, "two")
-	mustContain(t, "jsonl-full", result, "first")
+	mustContain(t, "result", result, "turn two")
+	mustContain(t, "result", result, "response two")
+	mustContain(t, "result", result, "turn three")
+	mustContain(t, "result", result, "response three")
+	mustNotContain(t, "result", result, "turn one")
+	mustNotContain(t, "result", result, "response one")
 }
 
-// --- jsonl-last returns only the last assistant message ---
+func TestCaptureTurns0(t *testing.T) {
+	m, s := setupFakeTranscript(t, "turns-0", twoTurnTranscript(t))
+	result := m.captureOutput(s, "jsonl", 0, "last")
 
-func TestJsonlLastReturnsOnlyLast(t *testing.T) {
+	mustContain(t, "result", result, "2+2")
+	mustContain(t, "result", result, "3+3")
+	assertTypeCount(t, parseCaptureLines(t, result), "user", 2)
+}
+
+func TestCaptureTurnsExceedsAvailable(t *testing.T) {
+	// turns: 10 but only 2 turns — returns everything available
+	m, s := setupFakeTranscript(t, "turns-exceed", twoTurnTranscript(t))
+	result := m.captureOutput(s, "jsonl", 10, "last")
+	assertTypeCount(t, parseCaptureLines(t, result), "user", 2)
+}
+
+// === detail: "last" ===
+
+func TestCaptureDetailLast(t *testing.T) {
+	// Last turn of toolUseTranscript is "thanks" → "you are welcome" (no tool calls)
+	m, s := setupFakeTranscript(t, "detail-last", toolUseTranscript(t))
+	result := m.captureOutput(s, "jsonl", 1, "last")
+	entries := parseCaptureLines(t, result)
+
+	mustContain(t, "result", result, "thanks")
+	mustContain(t, "result", result, "you are welcome")
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries (user + assistant), got %d", len(entries))
+	}
+}
+
+func TestCaptureDetailLastToolTurn(t *testing.T) {
+	// Both turns: turn 1 has tool calls, detail "last" returns final assistant per turn
+	m, s := setupFakeTranscript(t, "detail-last-tool", toolUseTranscript(t))
+	result := m.captureOutput(s, "jsonl", 2, "last")
+
+	// Turn 1: user + final assistant ("I found two files..."), NOT the tool_use assistant
+	mustContain(t, "result", result, "list the files")
+	mustContain(t, "result", result, "I found two files")
+	mustNotContain(t, "result", result, "file1.txt")
+
+	entries := parseCaptureLines(t, result)
+	// 2 turns × (user + last assistant) = 4 entries
+	if len(entries) != 4 {
+		t.Fatalf("expected 4 entries (2 turns × user+assistant), got %d", len(entries))
+	}
+	for _, e := range entries {
+		if hasContentBlockType(e, "tool_use") {
+			t.Fatal("detail 'last' should not include tool_use content blocks")
+		}
+		if hasContentBlockType(e, "tool_result") {
+			t.Fatal("detail 'last' should not include tool_result user entries")
+		}
+	}
+}
+
+// === detail: "assistant" ===
+
+func TestCaptureDetailAssistant(t *testing.T) {
+	// Both turns: should include all assistant text blocks but no tool_use-only entries
+	m, s := setupFakeTranscript(t, "detail-asst", toolUseTranscript(t))
+	result := m.captureOutput(s, "jsonl", 2, "assistant")
+	entries := parseCaptureLines(t, result)
+
+	mustContain(t, "result", result, "I found two files")
+	for _, e := range entries {
+		if hasContentBlockType(e, "tool_use") {
+			t.Fatal("detail 'assistant' should not include assistant entries with only tool_use blocks")
+		}
+		if hasContentBlockType(e, "tool_result") {
+			t.Fatal("detail 'assistant' should not include tool_result user entries")
+		}
+	}
+
+	// User prompts present, but not tool_result user entries
+	mustContain(t, "result", result, "list the files")
+	mustNotContain(t, "result", result, "file1.txt")
+}
+
+// === detail: "tools" ===
+
+func TestCaptureDetailTools(t *testing.T) {
+	// Both turns: all user + assistant entries, metadata stripped
+	m, s := setupFakeTranscript(t, "detail-tools", toolUseTranscript(t))
+	result := m.captureOutput(s, "jsonl", 2, "tools")
+	entries := parseCaptureLines(t, result)
+
+	// All user entries (prompts + tool results) and all assistant entries
+	mustContain(t, "result", result, "list the files")
+	mustContain(t, "result", result, "Bash")
+	mustContain(t, "result", result, "file1.txt")
+	mustContain(t, "result", result, "I found two files")
+
+	// Metadata stripped
+	mustNotContain(t, "result", result, "stop_reason")
+	mustNotContain(t, "result", result, "input_tokens")
+	mustNotContain(t, "result", result, "requestId")
+	mustNotContain(t, "result", result, "parentUuid")
+
+	assertTypeCount(t, entries, "progress", 0)
+}
+
+// === detail: "raw" ===
+
+func TestCaptureDetailRaw(t *testing.T) {
+	m, s := setupFakeTranscript(t, "detail-raw", noisyTranscript(t))
+	result := m.captureOutput(s, "jsonl", 0, "raw")
+	entries := parseCaptureLines(t, result)
+
+	// Everything unfiltered
+	assertTypeCount(t, entries, "progress", 1)
+	assertTypeCount(t, entries, "system", 1)
+	mustContain(t, "result", result, "stop_reason")
+	mustContain(t, "result", result, "input_tokens")
+}
+
+func TestCaptureDetailRawPreservesMetadata(t *testing.T) {
+	m, s := setupFakeTranscript(t, "detail-raw-meta", toolUseTranscript(t))
+	result := m.captureOutput(s, "jsonl", 0, "raw")
+
+	mustContain(t, "result", result, "parentUuid")
+	mustContain(t, "result", result, "requestId")
+	mustContain(t, "result", result, "isSidechain")
+	mustContain(t, "result", result, "stop_reason")
+}
+
+// === Output is always JSONL ===
+
+func TestCaptureOutputIsJSONL(t *testing.T) {
+	m, s := setupFakeTranscript(t, "always-jsonl", twoTurnTranscript(t))
+	result := m.captureOutput(s, "jsonl", 1, "last")
+	entries := parseCaptureLines(t, result)
+
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 JSONL entries, got %d", len(entries))
+	}
+	if typ, _ := entries[0]["type"].(string); typ != "user" {
+		t.Fatalf("first entry should be type=user, got %q", typ)
+	}
+	if typ, _ := entries[1]["type"].(string); typ != "assistant" {
+		t.Fatalf("second entry should be type=assistant, got %q", typ)
+	}
+}
+
+// === Edge cases ===
+
+func TestCaptureEmptyTranscript(t *testing.T) {
+	m, s := setupFakeTranscript(t, "empty", "")
+	result := m.captureOutput(s, "jsonl", 1, "last")
+	if result != "" {
+		t.Fatalf("expected empty for empty transcript, got: %s", result)
+	}
+}
+
+func TestCaptureNoAssistantYet(t *testing.T) {
 	transcript := buildTranscript(t,
-		"user", "q1",
-		"assistant", "answer one",
-		"user", "q2",
-		"assistant", "answer two",
+		buildEntry(t, "user", "still waiting"),
 	)
+	m, s := setupFakeTranscript(t, "no-asst", transcript)
+	result := m.captureOutput(s, "jsonl", 1, "last")
+	entries := parseCaptureLines(t, result)
 
-	m, s := setupFakeTranscript(t, "test-last-uuid", transcript)
-	result := m.captureContent(s, "jsonl-last")
-
-	mustContain(t, "jsonl-last", result, "answer two")
-	mustNotContain(t, "jsonl-last", result, "answer one")
+	assertTypeCount(t, entries, "user", 1)
 }
 
-// --- extractTextContent ---
+func TestCaptureNoUUID(t *testing.T) {
+	m, s := setupFakeTranscript(t, "no-uuid", twoTurnTranscript(t))
+	s.ClaudeUUID = ""
+	result := m.captureOutput(s, "jsonl", 1, "last")
+	if result != "" {
+		t.Fatalf("expected empty for session without UUID, got: %s", result)
+	}
+}
+
+// === Helper function tests ===
 
 func TestExtractTextContent(t *testing.T) {
-	t.Run("current format with message.content array", func(t *testing.T) {
+	t.Run("message.content array", func(t *testing.T) {
 		msg := map[string]any{
 			"type": "assistant",
 			"message": map[string]any{
@@ -242,14 +517,14 @@ func TestExtractTextContent(t *testing.T) {
 		}
 	})
 
-	t.Run("legacy format with top-level content string", func(t *testing.T) {
+	t.Run("legacy content string", func(t *testing.T) {
 		msg := map[string]any{"type": "assistant", "content": "legacy text"}
 		if got := extractTextContent(msg); got != "legacy text" {
 			t.Fatalf("expected 'legacy text', got %q", got)
 		}
 	})
 
-	t.Run("skips non-text content blocks", func(t *testing.T) {
+	t.Run("skips tool_use blocks", func(t *testing.T) {
 		msg := map[string]any{
 			"type": "assistant",
 			"message": map[string]any{
@@ -264,26 +539,26 @@ func TestExtractTextContent(t *testing.T) {
 		}
 	})
 
-	t.Run("empty content returns empty string", func(t *testing.T) {
+	t.Run("empty content", func(t *testing.T) {
 		msg := map[string]any{
 			"type":    "assistant",
 			"message": map[string]any{"content": []any{}},
 		}
 		if got := extractTextContent(msg); got != "" {
-			t.Fatalf("expected empty string, got %q", got)
+			t.Fatalf("expected empty, got %q", got)
 		}
 	})
 }
 
 func TestExtractLastSection(t *testing.T) {
-	t.Run("short buffer returned as-is", func(t *testing.T) {
+	t.Run("short buffer", func(t *testing.T) {
 		buf := "line1\nline2\nline3"
 		if got := extractLastSection(buf); got != buf {
 			t.Fatalf("expected full buffer, got %q", got)
 		}
 	})
 
-	t.Run("long buffer truncated to last 50 lines", func(t *testing.T) {
+	t.Run("long buffer truncated to 50 lines", func(t *testing.T) {
 		var lines []string
 		for i := 0; i < 100; i++ {
 			lines = append(lines, "line")

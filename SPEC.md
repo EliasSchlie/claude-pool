@@ -55,22 +55,59 @@ When a session's process dies, the session transitions to `offloaded` (not a sep
 
 When a session fails to load, the error is logged and loading is retried automatically. After repeated failures (implementation decides the threshold), the session is marked `error`. Error sessions are visible but cannot be loaded without explicit action (`followup` with `force: true` resets the retry counter and attempts loading again).
 
-### Output Formats
+### Output Capture
 
-Commands that return session output (`wait`, `capture`) accept a `format` field:
+Commands that return session output (`wait`, `capture`) accept three optional parameters:
 
-| Format | Description | Requires live terminal? |
-|--------|-------------|------------------------|
-| `jsonl-last` | Last assistant message only. | No |
-| `jsonl-short` | All assistant messages since last user message. **Default.** | No |
-| `jsonl-long` | Full JSONL since last user message, repetitive fields stripped. | No |
-| `jsonl-full` | Complete JSONL transcript, unfiltered. | No |
-| `buffer-last` | Terminal buffer since last user message. | Yes |
-| `buffer-full` | Full terminal scrollback, ANSI stripped. | Yes |
+#### `source` — where to read from
 
-JSONL formats read from Claude Code's transcript files (via Claude UUID). Work for any session with a known UUID — including offloaded, archived, and re-queued sessions that retain their UUID. Buffer formats require a live terminal (idle or processing only).
+| Value | Description | Requires live terminal? |
+|-------|-------------|------------------------|
+| `"jsonl"` (default) | Claude Code's JSONL transcript (via Claude UUID). Works for any session with a known UUID — including offloaded, archived, and re-queued sessions. | No |
+| `"buffer"` | Raw terminal scrollback, ANSI stripped. | Yes |
 
-Empty content is valid — if a session was stopped before producing output, JSONL formats might return an empty string.
+#### `turns` — how far back to look
+
+Integer. Default: `1`.
+
+- `1` — last turn only. (default)
+- `N` — last N turns.
+- `0` — entire history.
+
+A **turn** is one user message and everything that follows until the next user message (assistant responses, tool calls, tool results). For buffer source, turn boundaries are detected from the JSONL transcript — `turns: 1` returns terminal output since the last user message was sent.
+
+#### `detail` — what to include per turn (JSONL only)
+
+In Claude Code's JSONL transcripts, tool use and tool results are not separate entry types — `tool_use` blocks appear inside `type: "assistant"` entries, and `tool_result` blocks appear inside `type: "user"` entries. The `detail` parameter filters at both the entry level (which entries to include) and the content-block level (which blocks within an entry to keep).
+
+| Value | Entries included | Content filtering |
+|-------|-----------------|-------------------|
+| `"last"` (default) | User prompts + final assistant entry with text, per turn. | Strip tool_use blocks. Exclude tool_result user entries. |
+| `"assistant"` | User prompts + all assistant entries that contain text. | Strip tool_use blocks. Exclude tool_result user entries. |
+| `"tools"` | All user entries (prompts + tool results) + all assistant entries. | Keep everything. Strip metadata (model, usage, timestamps). |
+| `"raw"` | All entries unfiltered (including progress, system, etc.). | No filtering. |
+
+For buffer source, `detail` is ignored — buffer output is always raw terminal text. The only parameter that affects buffer output is `turns`.
+
+#### Output format
+
+For JSONL source, the `content` field is always JSONL (one JSON object per line), regardless of `detail` level. The `detail` parameter controls which entries are included and how they are filtered, not the output format.
+
+Example — `source: "jsonl", turns: 2, detail: "last"`:
+```jsonl
+{"type":"user","content":"What is 2+2?"}
+{"type":"assistant","content":"4"}
+{"type":"user","content":"What is 3+3?"}
+{"type":"assistant","content":"6"}
+```
+
+The same request with `detail: "tools"` would include all entries from those turns — including assistant entries with `tool_use` content blocks and user entries carrying `tool_result` blocks.
+
+For buffer source, `content` is plain text (the raw terminal output for the requested turns, ANSI stripped).
+
+#### Notes
+
+Empty content is valid — if a session was stopped before producing output, capture might return an empty string.
 
 ---
 
@@ -100,8 +137,8 @@ Transport: Unix domain socket, newline-delimited JSON. See [docs/protocol.md](do
 
 - **`ls`** — List sessions. Default: owned sessions only. `all: true` for everything. `tree: true` for nested descendants. `archived: true` to include archived.
 - **`info`** — Full session details including Claude UUID, cwd, priority, pin status, and recursive children tree.
-- **`wait`** — Long-poll until a session becomes idle. Returns session output. Without a sessionId, waits for any owned busy session.
-- **`capture`** — Return session output immediately, regardless of state. JSONL formats work for any session with a UUID (including queued sessions re-queued via `followup`/`pin` that retain their UUID); buffer formats require a live terminal (errors on queued and offloaded sessions).
+- **`wait`** — Long-poll until a session becomes idle. Returns session output (see Output Capture). Without a sessionId, waits for any owned busy session.
+- **`capture`** — Return session output immediately, regardless of state (see Output Capture). JSONL source works for any session with a UUID (including re-queued sessions that retain their UUID); buffer source requires a live terminal (errors on queued and offloaded sessions).
 
 ### Session Control
 
