@@ -3,7 +3,6 @@ package pool
 import (
 	"log"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/EliasSchlie/claude-pool/internal/api"
@@ -378,10 +377,7 @@ func (m *Manager) handleWait(id any, req api.Msg) api.Msg {
 	if t, ok := req["timeout"].(float64); ok {
 		timeoutMs = t
 	}
-	format, _ := req["format"].(string)
-	if format == "" {
-		format = "jsonl-short"
-	}
+	source, turns, detail := parseCaptureParams(req)
 
 	timeout := time.Duration(timeoutMs) * time.Millisecond
 
@@ -428,7 +424,7 @@ func (m *Manager) handleWait(id any, req api.Msg) api.Msg {
 	}
 
 	if s.Status == StatusIdle {
-		content := m.captureContent(s, format)
+		content := m.captureOutput(s, source, turns, detail)
 		m.mu.Unlock()
 		return api.Response(id, "result", api.Msg{
 			"sessionId": s.ID,
@@ -456,7 +452,7 @@ func (m *Manager) handleWait(id any, req api.Msg) api.Msg {
 			}
 			switch s.Status {
 			case StatusIdle:
-				content := m.captureContent(s, format)
+				content := m.captureOutput(s, source, turns, detail)
 				m.mu.Unlock()
 				return api.Response(id, "result", api.Msg{
 					"sessionId": sid,
@@ -551,18 +547,32 @@ func (m *Manager) handleStop(id any, req api.Msg) api.Msg {
 	}
 }
 
+// parseCaptureParams extracts source/turns/detail from a request with defaults.
+func parseCaptureParams(req api.Msg) (source string, turns int, detail string) {
+	source, _ = req["source"].(string)
+	if source == "" {
+		source = "jsonl"
+	}
+	turns = 1
+	if t, ok := req["turns"].(float64); ok {
+		turns = int(t)
+	}
+	detail, _ = req["detail"].(string)
+	if detail == "" {
+		detail = "last"
+	}
+	return
+}
+
 // --- Capture ---
 
 func (m *Manager) handleCapture(id any, req api.Msg) api.Msg {
 	sessionID, _ := req["sessionId"].(string)
-	format, _ := req["format"].(string)
-	if format == "" {
-		format = "jsonl-short"
-	}
-
 	if sessionID == "" {
 		return api.ErrorResponse(id, "sessionId is required")
 	}
+
+	source, turns, detail := parseCaptureParams(req)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -576,11 +586,11 @@ func (m *Manager) handleCapture(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "session is queued (no output yet)")
 	}
 
-	if strings.HasPrefix(format, "buffer-") && !s.IsLive() {
-		return api.ErrorResponse(id, "buffer format requires live terminal")
+	if source == "buffer" && !s.IsLive() {
+		return api.ErrorResponse(id, "buffer source requires live terminal")
 	}
 
-	content := m.captureContent(s, format)
+	content := m.captureOutput(s, source, turns, detail)
 	return api.Response(id, "result", api.Msg{
 		"sessionId": s.ID,
 		"content":   content,
