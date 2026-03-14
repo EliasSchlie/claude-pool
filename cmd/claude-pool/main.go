@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -27,6 +28,15 @@ func main() {
 		log.Fatalf("failed to create pool directories: %v", err)
 	}
 
+	// Set up file logging per design principle #3: each pool has its own logs.
+	// Writes to both stderr (for attached terminals) and daemon.log (for debugging).
+	logFile, err := os.OpenFile(p.DaemonLog(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatalf("failed to open log file %s: %v", p.DaemonLog(), err)
+	}
+	defer logFile.Close()
+	log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+
 	cfgMgr := pool.NewConfigManager(p.ConfigJSON())
 	mgr := pool.NewManager(p, cfgMgr)
 
@@ -50,4 +60,5 @@ func main() {
 
 	srv.Stop()
 	mgr.Shutdown()
+	log.Printf("daemon stopped")
 }

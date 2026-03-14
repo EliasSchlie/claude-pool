@@ -25,14 +25,16 @@ package integration
 //   10. "capture — buffer-last"
 //   11. "capture — buffer-full"
 //   12. "followup to idle session"
-//   13. "followup on processing errors without force"
-//   14. "followup with force on processing"
-//   15. "wait on offloaded session errors"
-//   16. "wait with no sessionId — returns first idle"
-//   17. "wait with no sessionId — errors if none busy"
-//   18. "wait with timeout"
-//   19. "input sends raw bytes and verifiable text"
-//   20. "session prefix resolution"
+//   13. "jsonl-short after followup excludes earlier turns"
+//   14. "jsonl-long strips repetitive fields"
+//   15. "followup on processing errors without force"
+//   16. "followup with force on processing"
+//   17. "wait on offloaded session errors"
+//   18. "wait with no sessionId — returns first idle"
+//   19. "wait with no sessionId — errors if none busy"
+//   20. "wait with timeout"
+//   21. "input sends raw bytes and verifiable text"
+//   22. "session prefix resolution"
 
 import (
 	"strings"
@@ -205,6 +207,36 @@ func TestSession(t *testing.T) {
 		)
 		assertNotError(t, waitResp)
 		assertContains(t, strVal(waitResp, "content"), "goodbye")
+	})
+
+	t.Run("jsonl-short after followup excludes earlier turns", func(t *testing.T) {
+		// s1 now has 2+ turns: "hello world" from step 1 and "goodbye" from
+		// step 12. SPEC says jsonl-short = "all assistant messages since last
+		// user message" — so only the latest turn should appear.
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-short"})
+		assertNotError(t, resp)
+		content := strVal(resp, "content")
+		assertContains(t, content, "goodbye")
+		if strings.Contains(strings.ToLower(content), "hello world") {
+			t.Fatalf("jsonl-short should only return messages since last user message, but earlier turn's 'hello world' is present:\n%s", truncate(content, 500))
+		}
+	})
+
+	t.Run("jsonl-long strips repetitive fields", func(t *testing.T) {
+		longResp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-long"})
+		assertNotError(t, longResp)
+		longContent := strVal(longResp, "content")
+
+		fullResp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-full"})
+		assertNotError(t, fullResp)
+		fullContent := strVal(fullResp, "content")
+
+		// jsonl-long filters to since-last-user AND strips repetitive fields,
+		// so it must be strictly smaller than jsonl-full (complete unfiltered)
+		if len(longContent) >= len(fullContent) {
+			t.Fatalf("jsonl-long (%d bytes) should be smaller than jsonl-full (%d bytes) — repetitive fields should be stripped",
+				len(longContent), len(fullContent))
+		}
 	})
 
 	var s2 string

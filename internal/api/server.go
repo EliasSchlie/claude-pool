@@ -104,11 +104,15 @@ func (s *Server) handleConn(conn net.Conn) {
 	s.connsMu.Lock()
 	s.conns[conn] = struct{}{}
 	s.connsMu.Unlock()
+
+	owned := false // set when handler takes ownership (e.g., subscribe)
 	defer func() {
-		s.connsMu.Lock()
-		delete(s.conns, conn)
-		s.connsMu.Unlock()
-		conn.Close()
+		if !owned {
+			s.connsMu.Lock()
+			delete(s.conns, conn)
+			s.connsMu.Unlock()
+			conn.Close()
+		}
 	}()
 
 	scanner := bufio.NewScanner(conn)
@@ -130,7 +134,9 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		resp := s.handler(conn, req)
 		if resp == nil {
-			// Handler took ownership of connection (e.g., subscribe)
+			// Handler took ownership of connection (e.g., subscribe).
+			// Don't close or untrack — the handler manages it now.
+			owned = true
 			return
 		}
 		s.writeMsg(conn, resp)

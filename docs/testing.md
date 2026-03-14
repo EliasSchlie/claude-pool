@@ -2,15 +2,7 @@
 
 ## Philosophy
 
-**No mocking.** Tests run against real Claude Code sessions through the full socket API. This catches integration issues that unit tests with mocks would miss — the pool's value is in orchestrating real processes, so that's what we test.
-
-## Test Pool Config
-
-All tests use a pool configured with `--model haiku` to minimize API costs:
-
-```go
-config set flags "--dangerously-skip-permissions --model haiku"
-```
+Test at the right level. Unit tests for pure logic (fast, pinpoint failures). Integration tests with real Claude sessions for end-to-end behavior (slow, high confidence). Integration tests must never mock the daemon or Claude — the pool's value is orchestrating real processes.
 
 ## Framework
 
@@ -18,9 +10,17 @@ Go's built-in `testing` package with `t.Run` subtests.
 
 ## Test Layers
 
+### Unit Tests (`internal/*/`)
+
+Co-located with source (Go convention, `package pool`). For pure logic that doesn't need a running daemon: JSONL parsing/filtering, eviction ordering, state transitions, data transformations. Fast (~ms), run on every change.
+
+```bash
+go test ./internal/pool/ -v
+```
+
 ### API Integration Tests (`tests/integration/`)
 
-Test the daemon's behavior directly through the socket API. Raw JSON over Unix socket — no CLI involved. This is the bulk of testing.
+Test the daemon's behavior through the socket API with real Claude sessions. Raw JSON over Unix socket — no CLI involved. Flow-based: each file initializes a pool and walks through a sequence of operations.
 
 See [tests/integration/CLAUDE.md](../tests/integration/CLAUDE.md) for philosophy, file listing, and guidelines.
 
@@ -29,6 +29,14 @@ See [tests/integration/CLAUDE.md](../tests/integration/CLAUDE.md) for philosophy
 Test the CLI → daemon path: arg parsing, env var propagation (`CLAUDE_POOL_SESSION_ID`), output formatting, exit codes. Invoke the `claude-pool` CLI binary as a subprocess. Not a re-test of pool logic.
 
 See [tests/cli/CLAUDE.md](../tests/cli/CLAUDE.md) for philosophy and file listing.
+
+## Test Pool Config
+
+Integration tests use `--model haiku` to minimize API costs:
+
+```go
+config set flags "--dangerously-skip-permissions --model haiku"
+```
 
 ## Claude Code Constraints
 
@@ -41,9 +49,12 @@ See [tests/cli/CLAUDE.md](../tests/cli/CLAUDE.md) for philosophy and file listin
 
 ```bash
 # All tests
-go test ./tests/... -v -timeout 15m
+go test ./... -v -timeout 15m
 
-# API integration tests only
+# Unit tests only
+go test ./internal/... -v
+
+# Integration tests only
 go test ./tests/integration/ -v -timeout 10m
 
 # CLI smoke tests only

@@ -2,6 +2,7 @@
 package paths
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -26,8 +27,9 @@ func (p *Pool) OffloadedDir() string   { return filepath.Join(p.Root, "offloaded
 func (p *Pool) ArchivedDir() string    { return filepath.Join(p.Root, "archived") }
 func (p *Pool) SessionPIDsDir() string { return filepath.Join(p.Root, "session-pids") }
 func (p *Pool) IdleSignalsDir() string { return filepath.Join(p.Root, "idle-signals") }
-func (p *Pool) HooksDir() string       { return filepath.Join(p.Root, ".claude") }
-func (p *Pool) HooksJSON() string      { return filepath.Join(p.Root, ".claude", "hooks.json") }
+func (p *Pool) HooksDir() string       { return filepath.Join(p.Root, "hooks") }
+func (p *Pool) ClaudeDir() string      { return filepath.Join(p.Root, ".claude") }
+func (p *Pool) SettingsJSON() string   { return filepath.Join(p.Root, ".claude", "settings.json") }
 
 // SessionOffloaded returns the directory for an offloaded session's metadata.
 func (p *Pool) SessionOffloaded(id string) string {
@@ -39,14 +41,14 @@ func (p *Pool) SessionArchived(id string) string {
 	return filepath.Join(p.ArchivedDir(), id)
 }
 
-// IdleSignal returns the path to a session's idle signal file.
-func (p *Pool) IdleSignal(id string) string {
-	return filepath.Join(p.IdleSignalsDir(), id)
+// IdleSignal returns the path to a session's idle signal file, keyed by PID.
+func (p *Pool) IdleSignal(pid int) string {
+	return filepath.Join(p.IdleSignalsDir(), fmt.Sprintf("%d", pid))
 }
 
-// SessionPID returns the path for a PID mapping file.
-func (p *Pool) SessionPID(id string) string {
-	return filepath.Join(p.SessionPIDsDir(), id)
+// SessionPID returns the path for a PID mapping file, keyed by PID.
+func (p *Pool) SessionPID(pid int) string {
+	return filepath.Join(p.SessionPIDsDir(), fmt.Sprintf("%d", pid))
 }
 
 // EnsureDirs creates all required subdirectories.
@@ -57,6 +59,7 @@ func (p *Pool) EnsureDirs() error {
 		p.ArchivedDir(),
 		p.SessionPIDsDir(),
 		p.IdleSignalsDir(),
+		p.ClaudeDir(),
 		p.HooksDir(),
 	}
 	for _, d := range dirs {
