@@ -52,20 +52,11 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 	m.initialized = true
 	m.poolSize = size
 
-	// Deploy hooks: local (self-contained in pool dir) or global (requires install)
-	localHooks, _ := req["localHooks"].(bool)
-	if localHooks {
-		if err := m.deployLocalHooks(); err != nil {
-			m.initialized = false
-			log.Printf("[init] %v", err)
-			return api.ErrorResponse(id, err.Error())
-		}
-	} else {
-		if err := checkGlobalInstall(); err != nil {
-			m.initialized = false
-			log.Printf("[init] %v", err)
-			return api.ErrorResponse(id, err.Error())
-		}
+	// Deploy hook scripts to pool directory — each pool owns its own hooks
+	if err := m.deployHooks(); err != nil {
+		m.initialized = false
+		log.Printf("[init] %v", err)
+		return api.ErrorResponse(id, err.Error())
 	}
 
 	// Try to restore sessions from pool.json (unless noRestore)

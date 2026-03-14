@@ -5,18 +5,14 @@
 # Usage: source "$(dirname "$0")/common.sh"
 #
 # Silently exits if CLAUDE_POOL_DIR is not set — this happens when the hook
-# fires in a non-pool Claude session (hooks are global but only act on pool sessions).
+# fires in a non-pool Claude session. The hook-runner.sh wrapper normally
+# prevents this, but the guard is here as a safety net.
 
 set -euo pipefail
 umask 077
 
 # Guard: exit silently for non-pool sessions
 if [ -z "${CLAUDE_POOL_DIR:-}" ]; then
-    exit 0
-fi
-
-# Defer to local hooks if deployed (avoids double-firing with global hooks)
-if [ -f "$CLAUDE_POOL_DIR/.claude/settings.json" ]; then
     exit 0
 fi
 

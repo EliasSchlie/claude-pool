@@ -144,7 +144,7 @@ func setupPool(t *testing.T, size int) *testPool {
 	t.Helper()
 	p := setupDaemon(t, size)
 
-	resp := p.send(Msg{"type": "init", "size": size, "localHooks": true})
+	resp := p.send(Msg{"type": "init", "size": size})
 	if resp["type"] == "error" {
 		t.Fatalf("init failed: %v", resp["error"])
 	}

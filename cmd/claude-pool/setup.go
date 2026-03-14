@@ -14,7 +14,8 @@ import (
 //go:embed embedded/skill.md
 var embeddedSkill embed.FS
 
-const hookMarker = "/.claude-pool/hooks/"
+// hookMarker identifies claude-pool entries in settings.json for add/remove.
+const hookMarker = "hook-runner.sh"
 
 func homeDir() (string, error) {
 	home, err := os.UserHomeDir()
@@ -46,26 +47,19 @@ func cmdInstall() error {
 	}
 	fmt.Println("  ✅ Skill installed")
 
-	// 2. Install hook scripts
-	hookDir := filepath.Join(poolBase, "hooks")
-	if err := os.MkdirAll(hookDir, 0o755); err != nil {
-		return fmt.Errorf("create hook dir: %w", err)
+	// 2. Install hook runner
+	if err := os.MkdirAll(poolBase, 0o755); err != nil {
+		return fmt.Errorf("create pool base dir: %w", err)
 	}
-	hookScripts := []string{"common.sh", "idle-signal.sh", "session-pid-map.sh"}
-	for _, name := range hookScripts {
-		content, err := hookfiles.Global.ReadFile(name)
-		if err != nil {
-			return fmt.Errorf("read embedded %s: %w", name, err)
-		}
-		if err := os.WriteFile(filepath.Join(hookDir, name), content, 0o755); err != nil {
-			return fmt.Errorf("write %s: %w", name, err)
-		}
+	runnerPath := filepath.Join(poolBase, "hook-runner.sh")
+	if err := os.WriteFile(runnerPath, hookfiles.HookRunner, 0o755); err != nil {
+		return fmt.Errorf("write hook-runner.sh: %w", err)
 	}
-	fmt.Println("  ✅ Hook scripts installed")
+	fmt.Println("  ✅ Hook runner installed")
 
 	// 3. Register hooks in settings.json
 	settingsPath := filepath.Join(claudeBase, "settings.json")
-	if err := addHooksToSettings(settingsPath, hookDir); err != nil {
+	if err := addHooksToSettings(settingsPath, runnerPath); err != nil {
 		return fmt.Errorf("register hooks: %w", err)
 	}
 	fmt.Println("  ✅ Hooks registered in settings.json")
@@ -99,40 +93,42 @@ func cmdUninstall() error {
 		fmt.Println("  ✅ Hooks removed from settings.json")
 	}
 
-	// 3. Remove hook scripts (but keep pool state)
-	hookDir := filepath.Join(poolBase, "hooks")
-	_ = os.RemoveAll(hookDir)
+	// 3. Remove hook runner
+	_ = os.Remove(filepath.Join(poolBase, "hook-runner.sh"))
 
 	fmt.Println("\n✅ claude-pool uninstalled.")
 	fmt.Println("   Pool state preserved in ~/.claude-pool/ (delete manually if unwanted).")
 	return nil
 }
 
-// hookSettings returns the hooks structure for global install (absolute paths).
-// Must stay in sync with internal/hookfiles/settings-local.json (relative paths via ${CLAUDE_POOL_DIR}).
-func hookSettings(hookDir string) map[string]interface{} {
-	idle := fmt.Sprintf("bash %s/idle-signal.sh", hookDir)
-	pidMap := fmt.Sprintf("bash %s/session-pid-map.sh", hookDir)
+// hookSettings builds the settings.json hooks structure.
+// All commands go through hook-runner.sh, which delegates to pool-local scripts
+// via $CLAUDE_POOL_DIR at runtime. This keeps pools self-contained — each pool
+// deploys its own hook scripts on init, so different pools can run different versions.
+func hookSettings(runnerPath string) map[string]interface{} {
+	run := func(args string) string {
+		return fmt.Sprintf("bash %s %s", runnerPath, args)
+	}
 
 	return map[string]interface{}{
 		"SessionStart": []interface{}{
 			map[string]interface{}{
 				"hooks": []interface{}{
-					map[string]interface{}{"type": "command", "command": pidMap},
-					map[string]interface{}{"type": "command", "command": idle + " write session-start"},
+					map[string]interface{}{"type": "command", "command": run("session-pid-map.sh")},
+					map[string]interface{}{"type": "command", "command": run("idle-signal.sh write session-start")},
 				},
 			},
 			map[string]interface{}{
 				"matcher": "clear",
 				"hooks": []interface{}{
-					map[string]interface{}{"type": "command", "command": idle + " write session-clear"},
+					map[string]interface{}{"type": "command", "command": run("idle-signal.sh write session-clear")},
 				},
 			},
 		},
 		"Stop": []interface{}{
 			map[string]interface{}{
 				"hooks": []interface{}{
-					map[string]interface{}{"type": "command", "command": idle + " write stop", "async": true},
+					map[string]interface{}{"type": "command", "command": run("idle-signal.sh write stop"), "async": true},
 				},
 			},
 		},
@@ -140,28 +136,28 @@ func hookSettings(hookDir string) map[string]interface{} {
 			map[string]interface{}{
 				"matcher": "AskUserQuestion|ExitPlanMode",
 				"hooks": []interface{}{
-					map[string]interface{}{"type": "command", "command": idle + " write tool"},
+					map[string]interface{}{"type": "command", "command": run("idle-signal.sh write tool")},
 				},
 			},
 		},
 		"PermissionRequest": []interface{}{
 			map[string]interface{}{
 				"hooks": []interface{}{
-					map[string]interface{}{"type": "command", "command": idle + " write permission"},
+					map[string]interface{}{"type": "command", "command": run("idle-signal.sh write permission")},
 				},
 			},
 		},
 		"PostToolUse": []interface{}{
 			map[string]interface{}{
 				"hooks": []interface{}{
-					map[string]interface{}{"type": "command", "command": idle + " clear"},
+					map[string]interface{}{"type": "command", "command": run("idle-signal.sh clear")},
 				},
 			},
 		},
 		"UserPromptSubmit": []interface{}{
 			map[string]interface{}{
 				"hooks": []interface{}{
-					map[string]interface{}{"type": "command", "command": idle + " clear"},
+					map[string]interface{}{"type": "command", "command": run("idle-signal.sh clear")},
 				},
 			},
 		},
@@ -170,7 +166,7 @@ func hookSettings(hookDir string) map[string]interface{} {
 
 // addHooksToSettings registers claude-pool hooks in settings.json.
 // Creates settings.json if it doesn't exist. Replaces existing claude-pool hooks.
-func addHooksToSettings(path string, hookDir string) error {
+func addHooksToSettings(path string, runnerPath string) error {
 	data := map[string]interface{}{}
 	if raw, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(raw, &data); err != nil {
@@ -188,7 +184,7 @@ func addHooksToSettings(path string, hookDir string) error {
 	removePoolEntries(hooks)
 
 	// Add claude-pool hooks to each event type
-	newHooks := hookSettings(hookDir)
+	newHooks := hookSettings(runnerPath)
 	for event, entries := range newHooks {
 		existing, _ := hooks[event].([]interface{})
 		newEntries, _ := entries.([]interface{})

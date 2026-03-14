@@ -28,7 +28,6 @@ func (p *Pool) ArchivedDir() string    { return filepath.Join(p.Root, "archived"
 func (p *Pool) SessionPIDsDir() string { return filepath.Join(p.Root, "session-pids") }
 func (p *Pool) IdleSignalsDir() string { return filepath.Join(p.Root, "idle-signals") }
 func (p *Pool) HooksDir() string       { return filepath.Join(p.Root, "hooks") }
-func (p *Pool) ClaudeDir() string      { return filepath.Join(p.Root, ".claude") }
 
 // SessionOffloaded returns the directory for an offloaded session's metadata.
 func (p *Pool) SessionOffloaded(id string) string {

@@ -76,7 +76,7 @@ func TestPool(t *testing.T) {
 	var s1, s2 string
 
 	t.Run("init", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "init", "size": 2, "localHooks": true})
+		resp := pool.send(Msg{"type": "init", "size": 2})
 		assertNotError(t, resp)
 		assertType(t, resp, "pool")
 
@@ -107,7 +107,7 @@ func TestPool(t *testing.T) {
 	})
 
 	t.Run("init errors if already initialized", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "init", "size": 2, "localHooks": true})
+		resp := pool.send(Msg{"type": "init", "size": 2})
 		assertError(t, resp)
 	})
 
@@ -223,7 +223,7 @@ func TestPool(t *testing.T) {
 		}
 		assertContains(t, strVal(cfg, "flags"), "haiku")
 
-		resp := pool.send(Msg{"type": "init", "size": 2, "localHooks": true})
+		resp := pool.send(Msg{"type": "init", "size": 2})
 		assertNotError(t, resp)
 		assertType(t, resp, "pool")
 
@@ -258,7 +258,7 @@ func TestPool(t *testing.T) {
 
 		pool.startDaemon()
 
-		resp := pool.send(Msg{"type": "init", "size": 2, "noRestore": true, "localHooks": true})
+		resp := pool.send(Msg{"type": "init", "size": 2, "noRestore": true})
 		assertNotError(t, resp)
 		assertType(t, resp, "pool")
 

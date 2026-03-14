@@ -1,23 +1,21 @@
-// Package hookfiles embeds hook scripts shared by global install and local pool deployment.
+// Package hookfiles embeds hook scripts for pool deployment and global install.
+//
+// Hook architecture: each pool deploys its own scripts on init (pool-dir/hooks/).
+// The global install only writes a thin hook-runner.sh that delegates to
+// $CLAUDE_POOL_DIR/hooks/ at runtime. This keeps pools fully self-contained —
+// different pools can run different hook versions independently.
 package hookfiles
 
 import "embed"
 
-// Global contains hook scripts for global installation (~/.claude-pool/hooks/).
-// The common.sh in this set defers to local hooks if they exist in the pool dir.
+// Scripts contains hook scripts deployed to each pool directory on init.
 //
 //go:embed common.sh idle-signal.sh session-pid-map.sh
-var Global embed.FS
+var Scripts embed.FS
 
-// LocalScripts contains hook scripts for per-pool local deployment.
-// The common.sh in this set does NOT defer — these ARE the local hooks.
-// idle-signal.sh and session-pid-map.sh are shared (same file, different embed name).
+// HookRunner is the thin global entry point installed to ~/.claude-pool/hook-runner.sh.
+// It delegates to pool-local scripts via $CLAUDE_POOL_DIR, exiting silently for
+// non-pool sessions.
 //
-//go:embed common-local.sh idle-signal.sh session-pid-map.sh
-var LocalScripts embed.FS
-
-// LocalSettings is the settings.json template for local hook deployment.
-// Commands use ${CLAUDE_POOL_DIR} which the shell expands at runtime.
-//
-//go:embed settings-local.json
-var LocalSettings []byte
+//go:embed hook-runner.sh
+var HookRunner []byte

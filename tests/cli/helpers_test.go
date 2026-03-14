@@ -177,7 +177,7 @@ func setupCLIPool(t *testing.T, size int) *cliPool {
 		daemon.Process.Kill()
 		t.Fatalf("failed to connect: %v", err)
 	}
-	initMsg, _ := json.Marshal(Msg{"type": "init", "size": size, "localHooks": true})
+	initMsg, _ := json.Marshal(Msg{"type": "init", "size": size})
 	conn.Write(append(initMsg, '\n'))
 	scanner := bufio.NewScanner(conn)
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))

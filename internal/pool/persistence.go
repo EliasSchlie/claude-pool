@@ -164,58 +164,28 @@ func (m *Manager) sessionFromMap(sm map[string]any) *Session {
 	return s
 }
 
-// checkGlobalInstall verifies that claude-pool hooks are installed globally.
-// Returns an error if the install is missing — the daemon cannot function
-// without hooks to detect session state changes.
-func checkGlobalInstall() error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("cannot determine home directory: %w", err)
-	}
-	hookDir := filepath.Join(home, ".claude-pool", "hooks")
-	for _, name := range []string{"common.sh", "idle-signal.sh", "session-pid-map.sh"} {
-		if _, err := os.Stat(filepath.Join(hookDir, name)); err != nil {
-			return fmt.Errorf("claude-pool is not installed (missing %s). Run: claude-pool install", name)
-		}
-	}
-	return nil
-}
+// deployHooks writes hook scripts to the pool directory.
+// Called on every init — each pool owns its hook scripts, so different pools
+// (or different branches under test) can run different hook versions independently.
+// The global hook-runner.sh (installed via `claude-pool install`) delegates to
+// these pool-local scripts via $CLAUDE_POOL_DIR at runtime.
+func (m *Manager) deployHooks() error {
+	log.Printf("[hooks] deploying hooks to %s", m.paths.Root)
 
-// deployLocalHooks writes hook scripts and settings.json to the pool directory.
-// Used when localHooks is true — provides full isolation from the global install.
-// Global hooks defer to local hooks when they detect pool-dir/.claude/settings.json.
-func (m *Manager) deployLocalHooks() error {
-	log.Printf("[hooks] deploying local hooks to %s", m.paths.Root)
-
-	// Write settings.json to pool-dir/.claude/
-	if err := os.MkdirAll(m.paths.ClaudeDir(), 0755); err != nil {
-		return fmt.Errorf("create .claude dir: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(m.paths.ClaudeDir(), "settings.json"), hookfiles.LocalSettings, 0644); err != nil {
-		return fmt.Errorf("write local settings.json: %w", err)
-	}
-
-	// Write hook scripts to pool-dir/hooks/
 	if err := os.MkdirAll(m.paths.HooksDir(), 0755); err != nil {
 		return fmt.Errorf("create hooks dir: %w", err)
 	}
 
-	// common-local.sh is deployed as common.sh (the scripts source "common.sh")
-	localScripts := map[string]string{
-		"common-local.sh":    "common.sh",
-		"idle-signal.sh":     "idle-signal.sh",
-		"session-pid-map.sh": "session-pid-map.sh",
-	}
-	for src, dst := range localScripts {
-		data, err := hookfiles.LocalScripts.ReadFile(src)
+	for _, name := range []string{"common.sh", "idle-signal.sh", "session-pid-map.sh"} {
+		data, err := hookfiles.Scripts.ReadFile(name)
 		if err != nil {
-			return fmt.Errorf("read embedded %s: %w", src, err)
+			return fmt.Errorf("read embedded %s: %w", name, err)
 		}
-		if err := os.WriteFile(filepath.Join(m.paths.HooksDir(), dst), data, 0755); err != nil {
-			return fmt.Errorf("write %s: %w", dst, err)
+		if err := os.WriteFile(filepath.Join(m.paths.HooksDir(), name), data, 0755); err != nil {
+			return fmt.Errorf("write %s: %w", name, err)
 		}
 	}
 
-	log.Printf("[hooks] local hooks deployed")
+	log.Printf("[hooks] hooks deployed")
 	return nil
 }
