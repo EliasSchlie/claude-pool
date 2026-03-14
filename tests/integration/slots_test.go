@@ -93,9 +93,18 @@ func TestSlots(t *testing.T) {
 	})
 
 	t.Run("capture on fresh-queued session errors", func(t *testing.T) {
-		// s3 is queued from scratch — no UUID, no terminal. All capture formats should error.
-		for _, format := range []string{"jsonl-short", "jsonl-last", "buffer-last", "buffer-full"} {
-			resp := pool.send(Msg{"type": "capture", "sessionId": s3, "format": format})
+		// s3 is queued from scratch — no UUID, no terminal. All capture variants should error.
+		for _, params := range []Msg{
+			{"source": "jsonl"},
+			{"source": "jsonl", "detail": "raw"},
+			{"source": "buffer", "turns": 1},
+			{"source": "buffer", "turns": 0},
+		} {
+			msg := Msg{"type": "capture", "sessionId": s3}
+			for k, v := range params {
+				msg[k] = v
+			}
+			resp := pool.send(msg)
 			assertError(t, resp)
 		}
 	})

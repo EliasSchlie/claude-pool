@@ -40,9 +40,9 @@ claude-pool followup <sessionId> <prompt>     # Send to idle/offloaded session
 claude-pool followup <sessionId> <prompt> --block
 claude-pool wait [sessionId]                  # Wait for idle (any owned if omitted)
 claude-pool result <sessionId>                # Get output (must be idle)
-claude-pool result <sessionId> --format jsonl-long
+claude-pool result <sessionId> --source jsonl --detail tools
 claude-pool capture <sessionId>               # Get live output
-claude-pool capture <sessionId> --format buffer-full
+claude-pool capture <sessionId> --source buffer --turns 0
 claude-pool stop <sessionId>                  # Interrupt or cancel queued request
 claude-pool offload <sessionId>               # Manually offload idle session
 
@@ -96,17 +96,32 @@ claude-pool pools remove <name>            # Remove from registry
 | Full internal ID | `a7f2x9` | Pool-assigned session ID |
 | Prefix | `a7f` | Auto-resolves if unique match |
 
-## Output Formats
+## Output Capture
 
-The `--format` flag is supported by `wait`, `capture`, `result`, and `start --block`:
+Commands that return session output (`wait`, `capture`, `result`, `start --block`) accept three flags:
 
-| Format | Description | Requires live terminal |
-|--------|-------------|----------------------|
-| `jsonl-last` | Last assistant message only | No (reads JSONL transcript) |
-| `jsonl-short` | All assistant messages since last user message **(default)** | No (reads JSONL transcript) |
-| `jsonl-long` | Full JSONL since last user message, repetitive fields stripped | No (reads JSONL transcript) |
-| `jsonl-full` | Complete unfiltered JSONL transcript | No (reads JSONL transcript) |
-| `buffer-last` | Terminal buffer since last user message | Yes |
-| `buffer-full` | Full terminal scrollback, ANSI stripped | Yes |
+### `--source` — where to read from
 
-JSONL formats read from Claude Code's own transcript files (located via UUID), so they work for any session state. Buffer formats require a live terminal — they fail for offloaded/archived sessions.
+| Value | Description | Requires live terminal? |
+|-------|-------------|------------------------|
+| `jsonl` **(default)** | Claude Code's JSONL transcript (via UUID). Works for any session with a known UUID — including offloaded and archived. | No |
+| `buffer` | Raw terminal scrollback, ANSI stripped. | Yes |
+
+### `--turns` — how far back to look
+
+Integer. Default: `1`.
+
+- `1` — last turn only (default)
+- `N` — last N turns
+- `0` — entire history
+
+### `--detail` — what to include per turn (JSONL only)
+
+| Value | Description |
+|-------|-------------|
+| `last` **(default)** | User prompt + final assistant response per turn. No tool calls. |
+| `assistant` | User prompt + all assistant text responses per turn. No tool calls. |
+| `tools` | User prompt + assistant responses + tool calls/results. No internal metadata. |
+| `raw` | Everything unfiltered. |
+
+For buffer source, `--detail` is ignored — buffer is always raw terminal text.

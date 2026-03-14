@@ -41,7 +41,7 @@ package cli
 //   6. "capture"
 //      Run: claude-pool capture --session <id>
 //      Assert: exit code 0, output is non-empty.
-//      Run: claude-pool capture --session <id> --format jsonl-full
+//      Run: claude-pool capture --session <id> --source jsonl --turns 0 --detail raw
 //      Assert: exit code 0, output is longer than default.
 //
 //   7. "followup"

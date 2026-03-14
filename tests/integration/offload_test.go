@@ -99,23 +99,24 @@ func TestOffload(t *testing.T) {
 
 	t.Run("capture JSONL on offloaded session works", func(t *testing.T) {
 		// s1 is offloaded — JSONL capture reads from persisted transcript
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-short"})
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1})
 		assertNotError(t, resp)
 		assertContains(t, strVal(resp, "content"), "offload test")
 
-		for _, format := range []string{"jsonl-last", "jsonl-long", "jsonl-full"} {
-			r := pool.send(Msg{"type": "capture", "sessionId": s1, "format": format})
+		// All JSONL detail levels should work on offloaded sessions
+		for _, detail := range []string{"assistant", "tools", "raw"} {
+			r := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "detail": detail})
 			assertNotError(t, r)
-			assertNonEmpty(t, format+" content", strVal(r, "content"))
+			assertNonEmpty(t, "detail="+detail+" content", strVal(r, "content"))
 		}
 	})
 
 	t.Run("capture buffer on offloaded session errors", func(t *testing.T) {
 		// Buffer capture requires a live terminal
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "buffer-last"})
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 1})
 		assertError(t, resp)
 
-		resp = pool.send(Msg{"type": "capture", "sessionId": s1, "format": "buffer-full"})
+		resp = pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 0})
 		assertError(t, resp)
 	})
 
@@ -217,13 +218,13 @@ func TestOffload(t *testing.T) {
 	})
 
 	t.Run("capture JSONL on archived session works", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-short"})
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1})
 		assertNotError(t, resp)
 		assertNonEmpty(t, "archived capture", strVal(resp, "content"))
 	})
 
 	t.Run("capture buffer on archived session errors", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "buffer-last"})
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 1})
 		assertError(t, resp)
 	})
 
