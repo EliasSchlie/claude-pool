@@ -2,3 +2,4 @@ node_modules/
 .wt/
 .run/
 *.sock
+claude-pool
