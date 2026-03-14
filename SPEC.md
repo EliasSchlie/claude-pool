@@ -1,6 +1,6 @@
 # Spec
 
-> ⛔ **Protected.** No changes without explicit user permission. Flag contradictions — don't silently work around them.
+> ⛔ **Protected.** Do not edit without explicit user permission. If you believe the spec needs a change, propose it to the user first. Implementation details not covered here are free to change — but anything that contradicts the spec must be flagged.
 
 ## Invariants
 
