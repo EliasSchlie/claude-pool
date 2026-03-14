@@ -188,17 +188,15 @@ func (m *Manager) deployLocalHooks() error {
 	log.Printf("[hooks] deploying local hooks to %s", m.paths.Root)
 
 	// Write settings.json to pool-dir/.claude/
-	claudeDir := filepath.Join(m.paths.Root, ".claude")
-	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+	if err := os.MkdirAll(m.paths.ClaudeDir(), 0755); err != nil {
 		return fmt.Errorf("create .claude dir: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), hookfiles.LocalSettings, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(m.paths.ClaudeDir(), "settings.json"), hookfiles.LocalSettings, 0644); err != nil {
 		return fmt.Errorf("write local settings.json: %w", err)
 	}
 
 	// Write hook scripts to pool-dir/hooks/
-	hookDir := filepath.Join(m.paths.Root, "hooks")
-	if err := os.MkdirAll(hookDir, 0755); err != nil {
+	if err := os.MkdirAll(m.paths.HooksDir(), 0755); err != nil {
 		return fmt.Errorf("create hooks dir: %w", err)
 	}
 
@@ -213,7 +211,7 @@ func (m *Manager) deployLocalHooks() error {
 		if err != nil {
 			return fmt.Errorf("read embedded %s: %w", src, err)
 		}
-		if err := os.WriteFile(filepath.Join(hookDir, dst), data, 0755); err != nil {
+		if err := os.WriteFile(filepath.Join(m.paths.HooksDir(), dst), data, 0755); err != nil {
 			return fmt.Errorf("write %s: %w", dst, err)
 		}
 	}

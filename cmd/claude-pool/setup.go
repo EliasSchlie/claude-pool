@@ -108,8 +108,8 @@ func cmdUninstall() error {
 	return nil
 }
 
-// hookSettings returns the hooks structure matching the per-pool settings.json format.
-// Hook commands reference scripts at the given hookDir.
+// hookSettings returns the hooks structure for global install (absolute paths).
+// Must stay in sync with internal/hookfiles/settings-local.json (relative paths via ${CLAUDE_POOL_DIR}).
 func hookSettings(hookDir string) map[string]interface{} {
 	idle := fmt.Sprintf("bash %s/idle-signal.sh", hookDir)
 	pidMap := fmt.Sprintf("bash %s/session-pid-map.sh", hookDir)
