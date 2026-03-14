@@ -33,14 +33,15 @@ package integration
 //   18. "new-capture: default params match turns=1 detail=last"
 //   19. "new-capture: buffer turns=1 excludes earlier turn content"
 //   20. "new-capture: buffer turns=0 contains all terminal output"
-//   21. "followup on processing errors without force"
-//   22. "followup with force on processing"
-//   23. "wait on offloaded session errors"
-//   24. "wait with no sessionId — returns first idle"
-//   25. "wait with no sessionId — errors if none busy"
-//   26. "wait with timeout"
-//   27. "input sends raw bytes and verifiable text"
-//   28. "session prefix resolution"
+//   21. "new-capture: buffer ignores detail parameter"
+//   22. "followup on processing errors without force"
+//   23. "followup with force on processing"
+//   24. "wait on offloaded session errors"
+//   25. "wait with no sessionId — returns first idle"
+//   26. "wait with no sessionId — errors if none busy"
+//   27. "wait with timeout"
+//   28. "input sends raw bytes and verifiable text"
+//   29. "session prefix resolution"
 
 import (
 	"strings"
@@ -323,6 +324,17 @@ func TestSession(t *testing.T) {
 		// Full buffer should contain output from both turns
 		assertContains(t, content, "hello world")
 		assertContains(t, content, "goodbye")
+	})
+
+	t.Run("new-capture: buffer ignores detail parameter", func(t *testing.T) {
+		// Spec: "For buffer source, detail is ignored — buffer is always raw terminal text."
+		bufDefault := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 1})
+		bufWithDetail := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 1, "detail": "raw"})
+		assertNotError(t, bufDefault)
+		assertNotError(t, bufWithDetail)
+		if strVal(bufDefault, "content") != strVal(bufWithDetail, "content") {
+			t.Fatal("buffer should return identical content regardless of detail parameter")
+		}
 	})
 
 	var s2 string

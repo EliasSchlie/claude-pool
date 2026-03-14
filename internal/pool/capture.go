@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// captureOutput is the new capture API with orthogonal source/turns/detail params.
+// captureOutput returns session output filtered by source/turns/detail params.
 // TODO: implement — currently panics to fail tests explicitly.
 func (m *Manager) captureOutput(s *Session, source string, turns int, detail string) string {
 	panic("captureOutput not implemented — see capture API redesign")

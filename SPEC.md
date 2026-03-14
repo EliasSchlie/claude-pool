@@ -74,36 +74,22 @@ Integer. Default: `1`.
 - `N` — last N turns.
 - `0` — entire history.
 
-A **turn** is one user message and everything that follows until the next user message (assistant responses, tool calls, tool results). For buffer source, turn boundaries are detected from the JSONL transcript — `turns: 1` returns terminal output since the last user message was sent.
+A **turn** is one user message and everything that follows until the next user message (assistant responses, tool calls, tool results).
 
 #### `detail` — what to include per turn (JSONL only)
 
-In Claude Code's JSONL transcripts, tool use and tool results are not separate entry types — `tool_use` blocks appear inside `type: "assistant"` entries, and `tool_result` blocks appear inside `type: "user"` entries. The `detail` parameter filters at both the entry level (which entries to include) and the content-block level (which blocks within an entry to keep).
+| Value | Description |
+|-------|-------------|
+| `"last"` (default) | User prompt + final assistant response per turn. No tool calls. |
+| `"assistant"` | User prompt + all assistant text responses per turn. No tool calls. |
+| `"tools"` | User prompt + assistant responses + tool calls/results. No internal metadata. |
+| `"raw"` | Everything unfiltered. |
 
-| Value | Entries included | Content filtering |
-|-------|-----------------|-------------------|
-| `"last"` (default) | User prompts + final assistant entry with text, per turn. | Strip tool_use blocks. Exclude tool_result user entries. |
-| `"assistant"` | User prompts + all assistant entries that contain text. | Strip tool_use blocks. Exclude tool_result user entries. |
-| `"tools"` | All user entries (prompts + tool results) + all assistant entries. | Keep everything. Strip metadata (model, usage, timestamps). |
-| `"raw"` | All entries unfiltered (including progress, system, etc.). | No filtering. |
+For buffer source, `detail` is ignored — buffer is always raw terminal text.
 
-For buffer source, `detail` is ignored — buffer output is always raw terminal text. The only parameter that affects buffer output is `turns`.
+Empty content is valid — if a session was stopped before producing output, capture might return an empty string.
 
-#### Output format
-
-For JSONL source, the `content` field is always JSONL (one JSON object per line), regardless of `detail` level. The `detail` parameter controls which entries are included and how they are filtered, not the output format.
-
-Example — `source: "jsonl", turns: 2, detail: "last"`:
-```jsonl
-{"type":"user","content":"What is 2+2?"}
-{"type":"assistant","content":"4"}
-{"type":"user","content":"What is 3+3?"}
-{"type":"assistant","content":"6"}
-```
-
-The same request with `detail: "tools"` would include all entries from those turns — including assistant entries with `tool_use` content blocks and user entries carrying `tool_result` blocks.
-
-For buffer source, `content` is plain text (the raw terminal output for the requested turns, ANSI stripped).
+See [docs/protocol.md](docs/protocol.md) for output format details and filtering mechanics.
 
 #### Notes
 

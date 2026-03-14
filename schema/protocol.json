@@ -43,7 +43,7 @@
     "captureDetail": {
       "enum": ["last", "assistant", "tools", "raw"],
       "default": "last",
-      "description": "What to include per turn (JSONL only, ignored for buffer). Filters both entries and content blocks. last = user prompts + final assistant text (no tool_use/tool_result). assistant = user prompts + all assistant text blocks (no tool_use/tool_result). tools = all user + assistant entries, metadata stripped. raw = everything unfiltered."
+      "description": "What to include per turn (JSONL only, ignored for buffer). last = user prompt + final assistant response, no tool calls. assistant = user prompt + all assistant text responses, no tool calls. tools = prompts + responses + tool calls/results, no metadata. raw = everything unfiltered."
     },
 
     "poolState": {

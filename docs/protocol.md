@@ -40,41 +40,54 @@ Sessions track their parent. Auto-detected via `CLAUDE_POOL_SESSION_ID` env var,
 
 ## Output Capture
 
-Commands that return session output (`wait`, `capture`) accept three optional parameters:
+Commands that return session output (`wait`, `capture`) accept three optional parameters. See [SPEC.md](../SPEC.md) for the parameter definitions. This section covers implementation details.
 
-### `source` — where to read from
+### JSONL transcript structure
 
-| Value | Description | Requires live terminal? |
-|-------|-------------|------------------------|
-| `"jsonl"` (default) | Claude Code's JSONL transcript (via Claude UUID). Works for any session state where a UUID has been discovered — including offloaded, error, and archived sessions. | No |
-| `"buffer"` | Raw terminal scrollback, ANSI stripped. Only works for live sessions (idle, processing). Errors for queued, offloaded, error, and archived sessions. | Yes |
+Claude Code's JSONL transcripts use these entry types:
 
-### `turns` — how far back to look
+| Entry `type` | Meaning |
+|-------------|---------|
+| `user` | User prompt OR tool result (distinguished by content blocks) |
+| `assistant` | Assistant response OR tool use (distinguished by content blocks) |
+| `progress` | Hook execution, internal events |
+| `system` | System messages |
+| `file-history-snapshot` | File state snapshots |
 
-Integer. Default: `1`.
+Tool calls are **not** separate entry types. A `tool_use` block appears inside an `assistant` entry's `message.content` array. A `tool_result` block appears inside a `user` entry's `message.content` array.
 
-- `1` — last turn only. (default)
-- `N` — last N turns.
-- `0` — entire history.
+### Turn boundaries
 
-A **turn** is one user message and everything that follows until the next user message (assistant responses, tool calls, tool results). For buffer source, turn boundaries are detected from the JSONL transcript — `turns: 1` returns terminal output since the last user message was sent.
+A turn starts at a user prompt (a `type: "user"` entry where `message.content` contains a `text` block, not a `tool_result` block) and includes everything until the next user prompt. For buffer source, turn boundaries are detected from the JSONL transcript — `turns: 1` returns terminal output since the last user prompt was sent.
 
-### `detail` — what to include per turn (JSONL only)
+### Detail filtering
 
-In Claude Code's JSONL transcripts, tool use and tool results are not separate entry types — `tool_use` blocks appear inside `type: "assistant"` entries, and `tool_result` blocks appear inside `type: "user"` entries. The `detail` parameter filters at both the entry level (which entries to include) and the content-block level (which blocks within an entry to keep).
+The `detail` parameter filters at two levels: which entries to include, and which content blocks to keep within each entry.
 
 | Value | Entries included | Content filtering |
 |-------|-----------------|-------------------|
-| `"last"` (default) | User prompts + final assistant entry with text, per turn. | Strip tool_use blocks. Exclude tool_result user entries. |
-| `"assistant"` | User prompts + all assistant entries that contain text. | Strip tool_use blocks. Exclude tool_result user entries. |
-| `"tools"` | All user entries (prompts + tool results) + all assistant entries. | Keep everything. Strip metadata (model, usage, timestamps). |
+| `"last"` | User prompts + final assistant entry with text, per turn. | Exclude tool_use blocks. Exclude tool_result user entries. |
+| `"assistant"` | User prompts + all assistant entries that contain text. | Exclude tool_use blocks. Exclude tool_result user entries. |
+| `"tools"` | All user entries (prompts + tool results) + all assistant entries. | Keep all content blocks. Strip metadata fields (see below). |
 | `"raw"` | All entries unfiltered (including progress, system, etc.). | No filtering. |
 
-For buffer source, `detail` is ignored — buffer output is always raw terminal text.
+For buffer source, `detail` is ignored — buffer is always raw terminal text.
+
+### Metadata stripping (`detail: "tools"`)
+
+When `detail` is `"tools"`, the following fields are stripped from each entry to reduce noise while preserving conversation content:
+
+**Stripped from all entries:** `parentUuid`, `isSidechain`, `version`, `gitBranch`, `requestId`, `uuid`, `timestamp`, `cwd`, `sessionId`, `userType`
+
+**Stripped from `message` objects:** `model`, `id`, `usage`, `stop_reason`, `stop_sequence`
+
+**Kept:** `type`, `message.role`, `message.content`
+
+This list may grow as Claude Code evolves. The principle: keep conversation content, strip everything else.
 
 ### Output format
 
-For JSONL source, the `content` field is always JSONL (one JSON object per line), regardless of `detail` level. The `detail` parameter controls which entries are included and how they are filtered, not the output format.
+For JSONL source, the `content` field is always JSONL (one JSON object per line). The `detail` parameter controls which entries are included, not the format.
 
 Example — `source: "jsonl", turns: 2, detail: "last"`:
 ```jsonl
@@ -84,15 +97,15 @@ Example — `source: "jsonl", turns: 2, detail: "last"`:
 {"type":"assistant","content":"6"}
 ```
 
-The same request with `detail: "tools"` would include all entries from those turns — including assistant entries with `tool_use` content blocks and user entries carrying `tool_result` blocks.
+With `detail: "tools"`, the same request would additionally include assistant entries with `tool_use` content blocks and user entries carrying `tool_result` blocks — but with metadata fields removed.
 
-With `detail: "raw"`, entries are the original unmodified JSONL lines from Claude Code's transcript (including `progress`, `system`, `file-history-snapshot` entries, and all metadata fields like `model`, `usage`, `parentUuid`, `timestamp`, etc.).
+With `detail: "raw"`, entries are the original unmodified lines from Claude Code's transcript.
 
-For buffer source, `content` is plain text (the raw terminal output for the requested turns, ANSI stripped).
+For buffer source, `content` is plain text (raw terminal output for the requested turns, ANSI escape sequences stripped).
 
 ### Empty content
 
-If a session was interrupted (`stop`) before Claude produced any assistant output, or if there is no assistant message in the requested turns, capture might return an empty string. This is not an error — it reflects that no output was produced. Callers should handle empty content gracefully.
+If a session was stopped before producing output, or if there is no assistant message in the requested turns, capture returns an empty string. This is not an error. Callers should handle empty content gracefully.
 
 ---
 

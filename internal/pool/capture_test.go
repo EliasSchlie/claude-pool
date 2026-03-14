@@ -383,25 +383,94 @@ func TestCaptureDetailLastToolTurn(t *testing.T) {
 
 // === detail: "assistant" ===
 
-func TestCaptureDetailAssistant(t *testing.T) {
-	// Both turns: should include all assistant text blocks but no tool_use-only entries
-	m, s := setupFakeTranscript(t, "detail-asst", toolUseTranscript(t))
+// multiAssistantTranscript has a turn where the assistant gives text, calls a tool,
+// then gives more text — testing that "assistant" returns all text blocks while
+// "last" returns only the final one.
+func multiAssistantTranscript(t *testing.T) string {
+	return buildTranscript(t,
+		buildEntry(t, "user", "check the logs"),
+		buildEntry(t, "assistant", "let me look at the logs"),
+		buildEntry(t, "assistant_tool_use", "Bash"),
+		buildEntry(t, "tool_result", "ERROR: connection refused"),
+		buildEntry(t, "assistant", "the logs show a connection error"),
+	)
+}
+
+func TestCaptureDetailAssistantReturnsAllTextBlocks(t *testing.T) {
+	// Key distinction from "last": "assistant" returns ALL assistant text blocks,
+	// not just the final one. In a tool-use turn, there are typically multiple.
+	m, s := setupFakeTranscript(t, "detail-asst-multi", multiAssistantTranscript(t))
+	result := m.captureOutput(s, "jsonl", 1, "assistant")
+	entries := parseCaptureLines(t, result)
+
+	// Both assistant text messages should be present
+	mustContain(t, "result", result, "let me look at the logs")
+	mustContain(t, "result", result, "the logs show a connection error")
+
+	// But tool_use and tool_result should be excluded
+	mustNotContain(t, "result", result, "connection refused")
+	for _, e := range entries {
+		if hasContentBlockType(e, "tool_use") {
+			t.Fatal("detail 'assistant' should not include tool_use blocks")
+		}
+		if hasContentBlockType(e, "tool_result") {
+			t.Fatal("detail 'assistant' should not include tool_result entries")
+		}
+	}
+
+	// User prompt present
+	mustContain(t, "result", result, "check the logs")
+}
+
+func TestCaptureDetailLastVsAssistant(t *testing.T) {
+	// Direct comparison: "last" returns 1 assistant, "assistant" returns 2
+	m, s := setupFakeTranscript(t, "last-vs-asst", multiAssistantTranscript(t))
+
+	lastResult := m.captureOutput(s, "jsonl", 1, "last")
+	asstResult := m.captureOutput(s, "jsonl", 1, "assistant")
+
+	lastEntries := parseCaptureLines(t, lastResult)
+	asstEntries := parseCaptureLines(t, asstResult)
+
+	// "last" should have fewer assistant entries than "assistant"
+	lastAssistantCount := countByType(lastEntries, "assistant")
+	asstAssistantCount := countByType(asstEntries, "assistant")
+
+	if lastAssistantCount != 1 {
+		t.Fatalf("detail 'last' should return 1 assistant entry, got %d", lastAssistantCount)
+	}
+	if asstAssistantCount != 2 {
+		t.Fatalf("detail 'assistant' should return 2 assistant entries, got %d", asstAssistantCount)
+	}
+
+	// "last" should only have the final text
+	mustNotContain(t, "last result", lastResult, "let me look")
+	mustContain(t, "last result", lastResult, "connection error")
+
+	// "assistant" should have both
+	mustContain(t, "assistant result", asstResult, "let me look")
+	mustContain(t, "assistant result", asstResult, "connection error")
+}
+
+func TestCaptureDetailAssistantExcludesToolUseOnly(t *testing.T) {
+	// toolUseTranscript turn 1 has a tool_use-only assistant entry (no text).
+	// "assistant" should exclude it entirely.
+	m, s := setupFakeTranscript(t, "detail-asst-toolonly", toolUseTranscript(t))
 	result := m.captureOutput(s, "jsonl", 2, "assistant")
 	entries := parseCaptureLines(t, result)
 
 	mustContain(t, "result", result, "I found two files")
+	mustContain(t, "result", result, "list the files")
+	mustNotContain(t, "result", result, "file1.txt")
+
 	for _, e := range entries {
 		if hasContentBlockType(e, "tool_use") {
-			t.Fatal("detail 'assistant' should not include assistant entries with only tool_use blocks")
+			t.Fatal("detail 'assistant' should not include tool_use-only assistant entries")
 		}
 		if hasContentBlockType(e, "tool_result") {
 			t.Fatal("detail 'assistant' should not include tool_result user entries")
 		}
 	}
-
-	// User prompts present, but not tool_result user entries
-	mustContain(t, "result", result, "list the files")
-	mustNotContain(t, "result", result, "file1.txt")
 }
 
 // === detail: "tools" ===
