@@ -27,17 +27,23 @@
       "description": "API-visible session states. Internal slot states (fresh, loading, live, error) are not exposed. Offloaded sessions can transition to queued via followup/pin."
     },
 
-    "outputFormat": {
-      "enum": [
-        "jsonl-last",
-        "jsonl-short",
-        "jsonl-long",
-        "jsonl-full",
-        "buffer-last",
-        "buffer-full"
-      ],
-      "default": "jsonl-short",
-      "description": "Output format. JSONL formats read from Claude Code transcripts (work for any state with UUID). Buffer formats require live terminal."
+    "captureSource": {
+      "enum": ["jsonl", "buffer"],
+      "default": "jsonl",
+      "description": "Where to read output. jsonl = Claude Code transcript (any state with UUID). buffer = raw terminal scrollback (live sessions only)."
+    },
+
+    "captureTurns": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 1,
+      "description": "How many turns back. 1 = last turn, N = last N turns, 0 = entire history."
+    },
+
+    "captureDetail": {
+      "enum": ["last", "assistant", "tools", "raw"],
+      "default": "last",
+      "description": "What to include per turn (JSONL only, ignored for buffer). last = user prompt + final assistant response, no tool calls. assistant = user prompt + all assistant text responses, no tool calls. tools = prompts + responses + tool calls/results, no metadata. raw = everything unfiltered."
     },
 
     "poolState": {
@@ -373,7 +379,9 @@
             "default": 300000,
             "description": "Timeout in ms"
           },
-          "format": { "$ref": "#/$defs/outputFormat" }
+          "source": { "$ref": "#/$defs/captureSource" },
+          "turns": { "$ref": "#/$defs/captureTurns" },
+          "detail": { "$ref": "#/$defs/captureDetail" }
         },
         "required": ["type"]
       },
@@ -390,14 +398,16 @@
     },
 
     "capture": {
-      "description": "Get session output. JSONL formats work for any state with UUID. Buffer formats require live terminal.",
+      "description": "Get session output. JSONL source works for any state with UUID. Buffer source requires live terminal.",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "capture" },
           "id": { "type": "integer" },
           "sessionId": { "$ref": "#/$defs/sessionId" },
-          "format": { "$ref": "#/$defs/outputFormat" }
+          "source": { "$ref": "#/$defs/captureSource" },
+          "turns": { "$ref": "#/$defs/captureTurns" },
+          "detail": { "$ref": "#/$defs/captureDetail" }
         },
         "required": ["type", "sessionId"]
       },

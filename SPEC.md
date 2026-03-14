@@ -55,22 +55,45 @@ When a session's process dies, the session transitions to `offloaded` (not a sep
 
 When a session fails to load, the error is logged and loading is retried automatically. After repeated failures (implementation decides the threshold), the session is marked `error`. Error sessions are visible but cannot be loaded without explicit action (`followup` with `force: true` resets the retry counter and attempts loading again).
 
-### Output Formats
+### Output Capture
 
-Commands that return session output (`wait`, `capture`) accept a `format` field:
+Commands that return session output (`wait`, `capture`) accept three optional parameters:
 
-| Format | Description | Requires live terminal? |
-|--------|-------------|------------------------|
-| `jsonl-last` | Last assistant message only. | No |
-| `jsonl-short` | All assistant messages since last user message. **Default.** | No |
-| `jsonl-long` | Full JSONL since last user message, repetitive fields stripped. | No |
-| `jsonl-full` | Complete JSONL transcript, unfiltered. | No |
-| `buffer-last` | Terminal buffer since last user message. | Yes |
-| `buffer-full` | Full terminal scrollback, ANSI stripped. | Yes |
+#### `source` — where to read from
 
-JSONL formats read from Claude Code's transcript files (via Claude UUID). Work for any session with a known UUID — including offloaded, archived, and re-queued sessions that retain their UUID. Buffer formats require a live terminal (idle or processing only).
+| Value | Description | Requires live terminal? |
+|-------|-------------|------------------------|
+| `"jsonl"` (default) | Claude Code's JSONL transcript (via Claude UUID). Works for any session with a known UUID — including offloaded, archived, and re-queued sessions. | No |
+| `"buffer"` | Raw terminal scrollback, ANSI stripped. | Yes |
 
-Empty content is valid — if a session was stopped before producing output, JSONL formats might return an empty string.
+#### `turns` — how far back to look
+
+Integer. Default: `1`.
+
+- `1` — last turn only. (default)
+- `N` — last N turns.
+- `0` — entire history.
+
+A **turn** is one user message and everything that follows until the next user message (assistant responses, tool calls, tool results).
+
+#### `detail` — what to include per turn (JSONL only)
+
+| Value | Description |
+|-------|-------------|
+| `"last"` (default) | User prompt + final assistant response per turn. No tool calls. |
+| `"assistant"` | User prompt + all assistant text responses per turn. No tool calls. |
+| `"tools"` | User prompt + assistant responses + tool calls/results. No internal metadata. |
+| `"raw"` | Everything unfiltered. |
+
+For buffer source, `detail` is ignored — buffer is always raw terminal text.
+
+Empty content is valid — if a session was stopped before producing output, capture might return an empty string.
+
+See [docs/protocol.md](docs/protocol.md) for output format details and filtering mechanics.
+
+#### Notes
+
+Empty content is valid — if a session was stopped before producing output, capture might return an empty string.
 
 ---
 
@@ -100,8 +123,8 @@ Transport: Unix domain socket, newline-delimited JSON. See [docs/protocol.md](do
 
 - **`ls`** — List sessions. Default: owned sessions only. `all: true` for everything. `tree: true` for nested descendants. `archived: true` to include archived.
 - **`info`** — Full session details including Claude UUID, cwd, priority, pin status, and recursive children tree.
-- **`wait`** — Long-poll until a session becomes idle. Returns session output. Without a sessionId, waits for any owned busy session.
-- **`capture`** — Return session output immediately, regardless of state. JSONL formats work for any session with a UUID (including queued sessions re-queued via `followup`/`pin` that retain their UUID); buffer formats require a live terminal (errors on queued and offloaded sessions).
+- **`wait`** — Long-poll until a session becomes idle. Returns session output (see Output Capture). Without a sessionId, waits for any owned busy session.
+- **`capture`** — Return session output immediately, regardless of state (see Output Capture). JSONL source works for any session with a UUID (including re-queued sessions that retain their UUID); buffer source requires a live terminal (errors on queued and offloaded sessions).
 
 ### Session Control
 

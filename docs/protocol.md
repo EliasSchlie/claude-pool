@@ -38,26 +38,74 @@ Sessions track their parent. Auto-detected via `CLAUDE_POOL_SESSION_ID` env var,
 
 ---
 
-## Output Formats
+## Output Capture
 
-Commands that return session output (`wait`, `capture`) accept a `format` field:
+Commands that return session output (`wait`, `capture`) accept three optional parameters. See [SPEC.md](../SPEC.md) for the parameter definitions. This section covers implementation details.
 
-| Format | Description | Requires live terminal? |
-|--------|-------------|------------------------|
-| `jsonl-last` | Last assistant message only from the JSONL transcript. | No |
-| `jsonl-short` | All assistant messages since the last user message. **Default.** | No |
-| `jsonl-long` | Full JSONL since the last user message, with repetitive/internal fields stripped. | No |
-| `jsonl-full` | Complete JSONL transcript — every message, unfiltered. | No |
-| `buffer-last` | Terminal buffer content since the last user message. | Yes |
-| `buffer-full` | Full terminal scrollback, ANSI stripped. | Yes |
+### JSONL transcript structure
 
-The default is `jsonl-short` — a concise view of Claude's responses without tool calls or system messages.
+Claude Code's JSONL transcripts use these entry types:
 
-**JSONL formats** read from Claude Code's own transcript files (located via the session's Claude UUID). They work for any session state where a Claude UUID has been discovered — including offloaded, error, and archived sessions.
+| Entry `type` | Meaning |
+|-------------|---------|
+| `user` | User prompt OR tool result (distinguished by content blocks) |
+| `assistant` | Assistant response OR tool use (distinguished by content blocks) |
+| `progress` | Hook execution, internal events |
+| `system` | System messages |
+| `file-history-snapshot` | File state snapshots |
 
-**Buffer formats** require a live terminal. They only work for idle and processing sessions. Errors for queued, offloaded, error, and archived sessions.
+Tool calls are **not** separate entry types. A `tool_use` block appears inside an `assistant` entry's `message.content` array. A `tool_result` block appears inside a `user` entry's `message.content` array.
 
-**Empty content is valid.** If a session was interrupted (`stop`) before Claude produced any assistant output, or if there is no assistant message after the last user message, JSONL formats might return an empty string. This is not an error — it reflects that no output was produced. Callers should handle empty content gracefully.
+### Turn boundaries
+
+A turn starts at a user prompt (a `type: "user"` entry where `message.content` contains a `text` block, not a `tool_result` block) and includes everything until the next user prompt. For buffer source, turn boundaries are detected from the JSONL transcript — `turns: 1` returns terminal output since the last user prompt was sent.
+
+### Detail filtering
+
+The `detail` parameter filters at two levels: which entries to include, and which content blocks to keep within each entry.
+
+| Value | Entries included | Content filtering |
+|-------|-----------------|-------------------|
+| `"last"` | User prompts + final assistant entry with text, per turn. | Exclude tool_use blocks. Exclude tool_result user entries. |
+| `"assistant"` | User prompts + all assistant entries that contain text. | Exclude tool_use blocks. Exclude tool_result user entries. |
+| `"tools"` | All user entries (prompts + tool results) + all assistant entries. | Keep all content blocks. Strip metadata fields (see below). |
+| `"raw"` | All entries unfiltered (including progress, system, etc.). | No filtering. |
+
+For buffer source, `detail` is ignored — buffer is always raw terminal text.
+
+### Metadata stripping (`detail: "tools"`)
+
+When `detail` is `"tools"`, the following fields are stripped from each entry to reduce noise while preserving conversation content:
+
+**Stripped from all entries:** `parentUuid`, `isSidechain`, `version`, `gitBranch`, `requestId`, `uuid`, `timestamp`, `cwd`, `sessionId`, `userType`
+
+**Stripped from `message` objects:** `model`, `id`, `usage`, `stop_reason`, `stop_sequence`
+
+**Kept:** `type`, `message.role`, `message.content`
+
+This list may grow as Claude Code evolves. The principle: keep conversation content, strip everything else.
+
+### Output format
+
+For JSONL source, the `content` field is always JSONL (one JSON object per line). The `detail` parameter controls which entries are included, not the format.
+
+Example — `source: "jsonl", turns: 2, detail: "last"`:
+```jsonl
+{"type":"user","content":"What is 2+2?"}
+{"type":"assistant","content":"4"}
+{"type":"user","content":"What is 3+3?"}
+{"type":"assistant","content":"6"}
+```
+
+With `detail: "tools"`, the same request would additionally include assistant entries with `tool_use` content blocks and user entries carrying `tool_result` blocks — but with metadata fields removed.
+
+With `detail: "raw"`, entries are the original unmodified lines from Claude Code's transcript.
+
+For buffer source, `content` is plain text (raw terminal output for the requested turns, ANSI escape sequences stripped).
+
+### Empty content
+
+If a session was stopped before producing output, or if there is no assistant message in the requested turns, capture returns an empty string. This is not an error. Callers should handle empty content gracefully.
 
 ---
 
@@ -187,7 +235,9 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 |-------|------|----------|-------------|
 | `sessionId` | sessionId | No | Target session. If omitted, waits for any owned busy session. |
 | `timeout` | integer | No | Timeout in ms (default 300000 = 5 min) |
-| `format` | string | No | Output format (see Output Formats). Default: `jsonl-short`. |
+| `source` | string | No | `"jsonl"` (default) or `"buffer"`. See Output Capture. |
+| `turns` | integer | No | How many turns back (default 1, 0 = all). See Output Capture. |
+| `detail` | string | No | `"last"` (default), `"assistant"`, `"tools"`, or `"raw"`. See Output Capture. |
 
 **Response:** `{ type: "result", sessionId, content }` — session output when it becomes idle.
 
@@ -207,14 +257,16 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `sessionId` | sessionId | Yes | Target session |
-| `format` | string | No | Output format (see Output Formats). Default: `jsonl-short`. |
+| `source` | string | No | `"jsonl"` (default) or `"buffer"`. See Output Capture. |
+| `turns` | integer | No | How many turns back (default 1, 0 = all). See Output Capture. |
+| `detail` | string | No | `"last"` (default), `"assistant"`, `"tools"`, or `"raw"`. See Output Capture. |
 
 **Response:** `{ type: "result", sessionId, content }` — session output.
 
 **Behavior:** Returns the current session output, regardless of session state.
-- **JSONL formats** work for any session with a known Claude UUID: **idle**, **processing**, **queued** (if re-queued from offloaded), **offloaded**, **error**, **archived**. Reads from Claude Code's transcript files.
-- **Buffer formats** only work for live sessions (**idle**, **processing**). Errors for all other states.
-- **Queued** sessions: JSONL formats work if the session has a UUID (re-queued from offloaded). Buffer formats error (no live terminal). Sessions queued from scratch (never spawned) have no UUID, so all formats error.
+- **JSONL source** works for any session with a known Claude UUID: **idle**, **processing**, **queued** (if re-queued from offloaded), **offloaded**, **error**, **archived**. Reads from Claude Code's transcript files.
+- **Buffer source** only works for live sessions (**idle**, **processing**). Errors for all other states.
+- **Queued** sessions: JSONL source works if the session has a UUID (re-queued from offloaded). Buffer source errors (no live terminal). Sessions queued from scratch (never spawned) have no UUID, so all sources error.
 
 ---
 

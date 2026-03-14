@@ -27,14 +27,21 @@ package integration
 //   12. "followup to idle session"
 //   13. "jsonl-short after followup excludes earlier turns"
 //   14. "jsonl-long strips repetitive fields"
-//   15. "followup on processing errors without force"
-//   16. "followup with force on processing"
-//   17. "wait on offloaded session errors"
-//   18. "wait with no sessionId — returns first idle"
-//   19. "wait with no sessionId — errors if none busy"
-//   20. "wait with timeout"
-//   21. "input sends raw bytes and verifiable text"
-//   22. "session prefix resolution"
+//   15. "new-capture: turns=1 detail=last returns only last turn"
+//   16. "new-capture: turns=0 detail=last returns all turns"
+//   17. "new-capture: detail=raw returns unfiltered JSONL with metadata"
+//   18. "new-capture: default params match turns=1 detail=last"
+//   19. "new-capture: buffer turns=1 excludes earlier turn content"
+//   20. "new-capture: buffer turns=0 contains all terminal output"
+//   21. "new-capture: buffer ignores detail parameter"
+//   22. "followup on processing errors without force"
+//   23. "followup with force on processing"
+//   24. "wait on offloaded session errors"
+//   25. "wait with no sessionId — returns first idle"
+//   26. "wait with no sessionId — errors if none busy"
+//   27. "wait with timeout"
+//   28. "input sends raw bytes and verifiable text"
+//   29. "session prefix resolution"
 
 import (
 	"strings"
@@ -236,6 +243,97 @@ func TestSession(t *testing.T) {
 		if len(longContent) >= len(fullContent) {
 			t.Fatalf("jsonl-long (%d bytes) should be smaller than jsonl-full (%d bytes) — repetitive fields should be stripped",
 				len(longContent), len(fullContent))
+		}
+	})
+
+	// --- New capture API tests (source/turns/detail) ---
+	// s1 now has 2+ turns. Turn 1: "hello world", Turn 2 (latest): "goodbye"
+
+	t.Run("new-capture: turns=1 detail=last returns only last turn", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "turns": 1, "detail": "last"})
+		assertNotError(t, resp)
+		content := strVal(resp, "content")
+		assertContains(t, content, "goodbye")
+		if strings.Contains(strings.ToLower(content), "hello world") {
+			t.Fatalf("turns=1 should exclude earlier turns, but 'hello world' is present:\n%s", truncate(content, 500))
+		}
+	})
+
+	t.Run("new-capture: turns=0 detail=last returns all turns", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "turns": 0, "detail": "last"})
+		assertNotError(t, resp)
+		content := strVal(resp, "content")
+		assertContains(t, content, "hello world")
+		assertContains(t, content, "goodbye")
+	})
+
+	t.Run("new-capture: detail=raw returns unfiltered JSONL with metadata", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "turns": 1, "detail": "raw"})
+		assertNotError(t, resp)
+		content := strVal(resp, "content")
+		// Raw should have metadata fields that other detail levels strip
+		assertContains(t, content, "stop_reason")
+	})
+
+	t.Run("new-capture: default params match turns=1 detail=last", func(t *testing.T) {
+		// No source/turns/detail → should default to jsonl, 1, last
+		defaultResp := pool.send(Msg{"type": "capture", "sessionId": s1})
+		explicitResp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "turns": 1, "detail": "last"})
+		assertNotError(t, defaultResp)
+		assertNotError(t, explicitResp)
+		// Both should return the same content
+		if strVal(defaultResp, "content") != strVal(explicitResp, "content") {
+			t.Fatalf("default capture should equal explicit turns=1,detail=last\ndefault: %s\nexplicit: %s",
+				truncate(strVal(defaultResp, "content"), 300),
+				truncate(strVal(explicitResp, "content"), 300))
+		}
+	})
+
+	t.Run("new-capture: buffer turns=1 excludes earlier turn content", func(t *testing.T) {
+		// s1 has 2 turns. Turn 1 prompt contained "hello world", turn 2 "goodbye".
+		// buffer turns=1 should return terminal output since the last user message.
+		// The first turn's prompt text should NOT appear in the filtered buffer.
+		bufAll := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 0})
+		assertNotError(t, bufAll)
+		bufAllContent := strVal(bufAll, "content")
+
+		bufLast := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 1})
+		assertNotError(t, bufLast)
+		bufLastContent := strVal(bufLast, "content")
+
+		// buffer turns=0 should be larger (full scrollback)
+		if len(bufLastContent) >= len(bufAllContent) {
+			t.Fatalf("buffer turns=0 (%d bytes) should be larger than turns=1 (%d bytes)",
+				len(bufAllContent), len(bufLastContent))
+		}
+
+		// The first turn's user prompt should be in the full buffer but not the last-turn buffer.
+		// "hello world" was the text we asked Claude to respond with, and it appeared in the
+		// terminal output. The exact prompt "respond with exactly the text: hello world" should
+		// be in the full buffer from turn 1.
+		if strings.Contains(strings.ToLower(bufLastContent), "respond with exactly the text: hello world") {
+			t.Fatalf("buffer turns=1 should not contain turn 1's prompt, but it does:\n%s",
+				truncate(bufLastContent, 500))
+		}
+	})
+
+	t.Run("new-capture: buffer turns=0 contains all terminal output", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 0})
+		assertNotError(t, resp)
+		content := strVal(resp, "content")
+		// Full buffer should contain output from both turns
+		assertContains(t, content, "hello world")
+		assertContains(t, content, "goodbye")
+	})
+
+	t.Run("new-capture: buffer ignores detail parameter", func(t *testing.T) {
+		// Spec: "For buffer source, detail is ignored — buffer is always raw terminal text."
+		bufDefault := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 1})
+		bufWithDetail := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 1, "detail": "raw"})
+		assertNotError(t, bufDefault)
+		assertNotError(t, bufWithDetail)
+		if strVal(bufDefault, "content") != strVal(bufWithDetail, "content") {
+			t.Fatal("buffer should return identical content regardless of detail parameter")
 		}
 	})
 
