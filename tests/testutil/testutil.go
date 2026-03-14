@@ -43,13 +43,18 @@ func BuildBinary(repoRoot, outputPath, pkg string) {
 }
 
 // SetupRunDir creates a timestamped run directory for test artifacts at
-// <repoRoot>/.run/<prefix>-<timestamp>/. Prunes old runs (>1 hour).
+// ~/.cache/claude-pool-tests/<prefix>-<timestamp>/. Prunes old runs (>1 hour).
 // On success the caller removes the run dir; on failure it stays for inspection.
 //
-// Keep paths short — Unix sockets have a 104-byte limit on macOS. The full
-// path to api.sock must fit: <repoRoot>/.run/<prefix>-<ts>/<TestName>/api.sock
+// Uses ~/.cache/ instead of the repo root so that socket paths stay short
+// regardless of worktree depth. Unix sockets have a 104-byte limit on macOS.
 func SetupRunDir(repoRoot, prefix string) string {
-	baseDir := filepath.Join(repoRoot, ".run")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to get home dir: %v\n", err)
+		os.Exit(1)
+	}
+	baseDir := filepath.Join(home, ".cache", "claude-pool-tests")
 	pruneOldRuns(baseDir, time.Hour)
 
 	stamp := time.Now().Format(stampFormat)
