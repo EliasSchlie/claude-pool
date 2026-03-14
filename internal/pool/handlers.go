@@ -52,8 +52,12 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 	m.initialized = true
 	m.poolSize = size
 
-	// Deploy hooks to pool directory
-	m.deployHooks()
+	// Verify global hooks are installed
+	if err := checkGlobalInstall(); err != nil {
+		m.initialized = false
+		log.Printf("[init] %v", err)
+		return api.ErrorResponse(id, err.Error())
+	}
 
 	// Try to restore sessions from pool.json (unless noRestore)
 	var liveSessions, offloadedSessions []*Session

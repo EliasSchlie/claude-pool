@@ -15,21 +15,23 @@ import (
 //go:embed embedded/session-pid-map.sh
 var embeddedFiles embed.FS
 
-const hookMarker = "claude-pool"
+const hookMarker = "/.claude-pool/hooks/"
 
-func claudeDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude")
-}
-
-func poolBaseDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude-pool")
+func homeDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	return home, nil
 }
 
 func cmdInstall() error {
-	claudeBase := claudeDir()
-	poolBase := poolBaseDir()
+	home, err := homeDir()
+	if err != nil {
+		return err
+	}
+	claudeBase := filepath.Join(home, ".claude")
+	poolBase := filepath.Join(home, ".claude-pool")
 
 	// 1. Install skill
 	skillDir := filepath.Join(claudeBase, "skills", "claude-pool")
@@ -75,8 +77,12 @@ func cmdInstall() error {
 }
 
 func cmdUninstall() error {
-	claudeBase := claudeDir()
-	poolBase := poolBaseDir()
+	home, err := homeDir()
+	if err != nil {
+		return err
+	}
+	claudeBase := filepath.Join(home, ".claude")
+	poolBase := filepath.Join(home, ".claude-pool")
 
 	// 1. Remove skill
 	skillDir := filepath.Join(claudeBase, "skills", "claude-pool")
@@ -256,5 +262,10 @@ func writeJSON(path string, data map[string]interface{}) error {
 		return err
 	}
 	out = append(out, '\n')
-	return os.WriteFile(path, out, 0o644)
+	// Atomic write: temp file + rename prevents corruption on crash mid-write
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

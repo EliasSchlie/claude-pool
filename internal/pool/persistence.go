@@ -2,13 +2,12 @@ package pool
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"time"
-
-	"github.com/EliasSchlie/claude-pool/internal/hooks"
 )
 
 func (m *Manager) saveOffloadMeta(s *Session) {
@@ -163,41 +162,19 @@ func (m *Manager) sessionFromMap(sm map[string]any) *Session {
 	return s
 }
 
-func (m *Manager) deployHooks() {
-	log.Printf("[hooks] deploying hooks to %s", m.paths.Root)
-	// Write settings.json to .claude/settings.json (Claude Code loads hooks from here)
-	data, err := hooks.Files.ReadFile("files/settings.json")
+// checkGlobalInstall verifies that claude-pool hooks are installed globally.
+// Returns an error if the install is missing — the daemon cannot function
+// without hooks to detect session state changes.
+func checkGlobalInstall() error {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		log.Printf("[hooks] error: embedded settings.json not found: %v", err)
-		return
+		return fmt.Errorf("cannot determine home directory: %w", err)
 	}
-	if err := os.MkdirAll(m.paths.ClaudeDir(), 0755); err != nil {
-		log.Printf("[hooks] error creating .claude dir: %v", err)
-		return
-	}
-	if err := os.WriteFile(m.paths.SettingsJSON(), data, 0644); err != nil {
-		log.Printf("[hooks] error writing settings.json: %v", err)
-		return
-	}
-	log.Printf("[hooks] wrote settings.json to %s", m.paths.SettingsJSON())
-
-	// Write hook scripts to pool dir/hooks/
-	if err := os.MkdirAll(m.paths.HooksDir(), 0755); err != nil {
-		log.Printf("[hooks] error creating hooks dir: %v", err)
-		return
-	}
-
+	hookDir := filepath.Join(home, ".claude-pool", "hooks")
 	for _, name := range []string{"common.sh", "idle-signal.sh", "session-pid-map.sh"} {
-		data, err := hooks.Files.ReadFile("files/" + name)
-		if err != nil {
-			log.Printf("[hooks] error: embedded %s not found: %v", name, err)
-			continue
+		if _, err := os.Stat(filepath.Join(hookDir, name)); err != nil {
+			return fmt.Errorf("claude-pool is not installed (missing %s). Run: claude-pool install", name)
 		}
-		dst := filepath.Join(m.paths.HooksDir(), name)
-		if err := os.WriteFile(dst, data, 0755); err != nil {
-			log.Printf("[hooks] error writing %s: %v", name, err)
-			continue
-		}
-		log.Printf("[hooks] wrote %s", dst)
 	}
+	return nil
 }
