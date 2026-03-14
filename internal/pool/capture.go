@@ -161,11 +161,29 @@ func (m *Manager) userPromptTexts(s *Session) []string {
 // --- Turn boundary detection ---
 
 // isUserPrompt returns true if the entry is a user prompt (has text content, not tool_result).
+// Claude Code writes user prompts with message.content as a plain string (not an array of
+// content blocks), while tool results use an array with tool_result blocks.
 func isUserPrompt(entry map[string]any) bool {
 	if typ, _ := entry["type"].(string); typ != "user" {
 		return false
 	}
-	return hasBlockType(entry, "text")
+	msg, _ := entry["message"].(map[string]any)
+	if msg == nil {
+		return false
+	}
+	switch content := msg["content"].(type) {
+	case string:
+		return true
+	case []any:
+		for _, c := range content {
+			if block, ok := c.(map[string]any); ok {
+				if t, _ := block["type"].(string); t == "text" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // hasBlockType checks if an entry's message.content contains a block of the given type.
