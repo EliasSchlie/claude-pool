@@ -144,6 +144,10 @@
           "type": "string",
           "description": "Un-submitted text in terminal buffer. Empty string if nothing typed. Only populated for loaded sessions. Changes reset LRU timestamp."
         },
+        "metadata": {
+          "$ref": "#/$defs/sessionMetadata",
+          "description": "User-defined session metadata (name, description, tags). Always present (empty object if unset)."
+        },
         "children": {
           "type": "array",
           "items": { "$ref": "#/$defs/sessionInfo" },
@@ -151,6 +155,26 @@
         }
       },
       "required": ["sessionId", "status"]
+    },
+
+    "sessionMetadata": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Short label (e.g. \"Fix auth bug\")"
+        },
+        "description": {
+          "type": "string",
+          "description": "Longer context (e.g. \"Investigating token refresh failure in middleware\")"
+        },
+        "tags": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "null"] },
+          "description": "Arbitrary key-value pairs (e.g. {\"project\": \"api\"}). Null value deletes the key."
+        }
+      },
+      "description": "User-defined session metadata. All fields optional."
     },
 
     "poolConfig": {
@@ -324,6 +348,10 @@
           "parentId": {
             "$ref": "#/$defs/sessionId",
             "description": "Explicit parent. Auto-detected from env if omitted."
+          },
+          "metadata": {
+            "$ref": "#/$defs/sessionMetadata",
+            "description": "Optional session metadata (name, description, tags)"
           }
         },
         "required": ["type", "prompt"]
@@ -532,6 +560,10 @@
             "minimum": 0,
             "default": 120,
             "description": "Seconds"
+          },
+          "metadata": {
+            "$ref": "#/$defs/sessionMetadata",
+            "description": "Optional session metadata (only used when no sessionId, i.e. fresh session mode)"
           }
         },
         "required": ["type"]
@@ -659,6 +691,31 @@
       }
     },
 
+    "set-metadata": {
+      "description": "Update session metadata. Merge semantics: only specified fields are changed. Explicit null clears a field. For tags, null on a key deletes it; null on the entire tags object clears all tags.",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "set-metadata" },
+          "id": { "type": "integer" },
+          "sessionId": { "$ref": "#/$defs/sessionId" },
+          "metadata": {
+            "$ref": "#/$defs/sessionMetadata",
+            "description": "Fields to update. Omitted fields are unchanged. Null clears."
+          }
+        },
+        "required": ["type", "sessionId", "metadata"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "ok" },
+          "id": { "type": "integer" }
+        },
+        "required": ["type"]
+      }
+    },
+
     "attach": {
       "description": "Raw PTY pipe for live session. Multiple clients can attach (broadcast). Pipe closes on offload/death.",
       "request": {
@@ -718,7 +775,7 @@
           "fields": {
             "type": "array",
             "items": {
-              "enum": ["cwd", "priority", "pinned", "pendingInput"]
+              "enum": ["cwd", "priority", "pinned", "pendingInput", "metadata"]
             },
             "description": "Only updated events for these fields. Omit = all fields."
           }

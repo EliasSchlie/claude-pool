@@ -196,6 +196,7 @@ If no previous state exists (first-time init), all slots get fresh pre-warmed se
 |-------|------|----------|-------------|
 | `prompt` | string | Yes | The prompt to send |
 | `parentId` | sessionId | No | Explicit parent. Auto-detected from `CLAUDE_POOL_SESSION_ID` env var if omitted. |
+| `metadata` | object | No | Session metadata: `name` (string), `description` (string), `tags` (key-value map). |
 
 **Response:** `{ type: "started", sessionId, status }` — internal ID + initial status.
 
@@ -312,7 +313,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 **Response:** `{ type: "sessions", sessions }` — array of session info objects.
 
-**Behavior:** Lists sessions. Each session includes: `sessionId`, `claudeUUID` (null if not yet discovered), `status`, `parentId`, `priority`, `cwd`, `spawnCwd`, `createdAt`, `pid`, `pinned`, `children` (array of child sessions, populated when `tree: true`).
+**Behavior:** Lists sessions. Each session includes: `sessionId`, `claudeUUID` (null if not yet discovered), `status`, `parentId`, `priority`, `cwd`, `spawnCwd`, `createdAt`, `pid`, `pinned`, `metadata`, `children` (array of child sessions, populated when `tree: true`).
 - Default: returns direct children of the caller (excludes archived).
 - `tree: true`: returns children with their descendants nested recursively (each child has its own `children` array populated).
 - `all: true`: returns every session in the pool (flat list).
@@ -345,6 +346,10 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
   "pid": 12345,
   "pinned": false,
   "pendingInput": "",
+  "metadata": {
+    "name": "Fix auth bug",
+    "tags": { "project": "api" }
+  },
   "children": [
     {
       "sessionId": "b3k9m2",
@@ -364,6 +369,8 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 `pendingInput` contains any un-submitted text detected in the session's terminal buffer. Empty string if nothing typed. Only populated for loaded sessions. Changes to `pendingInput` reset the session's LRU timestamp.
 
+`metadata` contains user-defined labels: `name` (short label), `description` (longer context), and `tags` (key-value map). Always present as an object (empty `{}` if no metadata set). Set via `start`, `pin` (fresh session mode), or `set-metadata`.
+
 `children` contains direct child session objects, each of which is a full session object with its own `children` — recursively. This gives you the full subtree rooted at this session.
 
 Works for any state including offloaded, error, and archived. This is the primary way to look up a session's Claude UUID from its internal ID.
@@ -377,6 +384,7 @@ Works for any state including offloaded, error, and archived. This is the primar
 | `sessionId` | sessionId | No | Target session. If omitted, pins a fresh pre-warmed session and returns its sessionId. |
 | `parentId` | sessionId | No | Only used when no sessionId (fresh session mode). Auto-detected from env if omitted. |
 | `duration` | integer | No | Pin duration in seconds (default 120) |
+| `metadata` | object | No | Session metadata (only used when no sessionId, i.e. fresh session mode). |
 
 **Response:** `{ type: "ok", sessionId, status }` — sessionId is the target (or newly allocated) session. Status is its current state.
 
@@ -472,6 +480,34 @@ Works for any state including offloaded, error, and archived. This is the primar
 
 ---
 
+### `set-metadata`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `sessionId` | sessionId | Yes | Target session |
+| `metadata` | object | Yes | Fields to update (merge semantics) |
+
+**Response:** `{ type: "ok" }`
+
+**Behavior:** Updates session metadata using merge semantics:
+- Only fields present in the `metadata` object are changed. Omitted fields are left unchanged.
+- Explicit `null` clears a field: `{ "name": null }` removes the name.
+- For `tags`: each key is merged individually. `null` on a key deletes it. `null` on the entire `tags` object clears all tags.
+- Works for any session state.
+- Emits an `updated` event with `changes: { metadata: { ...changed fields } }`.
+
+Example — set name and a tag:
+```json
+{"type":"set-metadata","sessionId":"a7f2x9","metadata":{"name":"Fix auth bug","tags":{"project":"api"}}}
+```
+
+Example — clear description, delete one tag:
+```json
+{"type":"set-metadata","sessionId":"a7f2x9","metadata":{"description":null,"tags":{"project":null}}}
+```
+
+---
+
 ### `attach`
 
 | Field | Type | Required | Description |
@@ -516,7 +552,7 @@ Works for any state including offloaded, error, and archived. This is the primar
 Event types:
 - `status` — session changed state. Includes `sessionId`, `status`, `prevStatus`.
 - `created` — new session added to pool. Includes `sessionId`, `status`, `parentId`.
-- `updated` — session property changed (not status). Includes `sessionId` and `changes` object with the changed fields and their new values. Tracked fields: `cwd`, `priority`, `pinned`, `pendingInput`. Filter with the `fields` param to only receive updates for specific properties.
+- `updated` — session property changed (not status). Includes `sessionId` and `changes` object with the changed fields and their new values. Tracked fields: `cwd`, `priority`, `pinned`, `pendingInput`, `metadata`. Filter with the `fields` param to only receive updates for specific properties.
 - `archived` — session archived. Includes `sessionId`.
 - `unarchived` — session unarchived. Includes `sessionId`.
 - `pool` — pool-level event (init, resize, destroy). Includes `action` and relevant details.

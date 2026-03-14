@@ -134,6 +134,8 @@ func (m *Manager) Handle(conn net.Conn, req api.Msg) api.Msg {
 		return m.handleUnpin(id, req)
 	case "set-priority":
 		return m.handleSetPriority(id, req)
+	case "set-metadata":
+		return m.handleSetMetadata(id, req)
 	case "resize":
 		return m.handleResize(id, req)
 	case "input":
@@ -202,6 +204,32 @@ func boolVal(m map[string]any, key string) bool {
 		return v
 	}
 	return false
+}
+
+// metadataFromMap extracts SessionMetadata from a persisted map (pool.json / offload meta).
+func metadataFromMap(m map[string]any) SessionMetadata {
+	raw, _ := m["metadata"].(map[string]any)
+	if raw == nil {
+		return SessionMetadata{}
+	}
+	md := SessionMetadata{
+		Name:        strVal(raw, "name"),
+		Description: strVal(raw, "description"),
+	}
+	if tags, ok := raw["tags"].(map[string]any); ok {
+		md.Tags = make(map[string]string, len(tags))
+		for k, v := range tags {
+			if sv, ok := v.(string); ok {
+				md.Tags[k] = sv
+			}
+		}
+	}
+	return md
+}
+
+// metadataFromRequest extracts SessionMetadata from an API request's "metadata" field.
+func metadataFromRequest(req map[string]any) SessionMetadata {
+	return metadataFromMap(req)
 }
 
 func isPidAlive(pid int) bool {
