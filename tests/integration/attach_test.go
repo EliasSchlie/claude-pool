@@ -93,7 +93,7 @@ func TestAttach(t *testing.T) {
 		pool.awaitStatus(s1, "processing", 15*time.Second)
 		pool.awaitStatus(s1, "idle", 30*time.Second)
 
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-last"})
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "detail": "last"})
 		assertNotError(t, resp)
 		assertContains(t, strVal(resp, "content"), "attach-test-output")
 	})
@@ -122,7 +122,7 @@ func TestAttach(t *testing.T) {
 
 		pool.awaitStatus(s1, "idle", 30*time.Second)
 
-		captureResp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-last"})
+		captureResp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "detail": "last"})
 		assertNotError(t, captureResp)
 		assertContains(t, strVal(captureResp, "content"), "followup-while-attached")
 	})

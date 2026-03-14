@@ -386,11 +386,12 @@ func TestSubscribe(t *testing.T) {
 	t.Run("archived and unarchived events", func(t *testing.T) {
 		sub := pool.subscribe(Msg{"events": []string{"archived", "unarchived"}})
 
-		// Offload first so archive works
-		pool.send(Msg{"type": "offload", "sessionId": s1})
-		pool.awaitStatus(s1, "offloaded", 10*time.Second)
+		// Archive s2 (not s1) — s2 has no children, so archive doesn't need recursive.
+		// s1 has s2 as a child, so archiving s1 without recursive: true would error per spec.
+		pool.send(Msg{"type": "offload", "sessionId": s2})
+		pool.awaitStatus(s2, "offloaded", 10*time.Second)
 
-		pool.send(Msg{"type": "archive", "sessionId": s1})
+		pool.send(Msg{"type": "archive", "sessionId": s2})
 		ev, ok := sub.nextWithin(10 * time.Second)
 		if !ok {
 			t.Fatal("expected archived event")
@@ -398,11 +399,11 @@ func TestSubscribe(t *testing.T) {
 		if strVal(ev, "event") != "archived" {
 			t.Fatalf("expected archived event, got %q", strVal(ev, "event"))
 		}
-		if strVal(ev, "sessionId") != s1 {
-			t.Fatalf("expected sessionId %s, got %q", s1, strVal(ev, "sessionId"))
+		if strVal(ev, "sessionId") != s2 {
+			t.Fatalf("expected sessionId %s, got %q", s2, strVal(ev, "sessionId"))
 		}
 
-		pool.send(Msg{"type": "unarchive", "sessionId": s1})
+		pool.send(Msg{"type": "unarchive", "sessionId": s2})
 		ev, ok = sub.nextWithin(10 * time.Second)
 		if !ok {
 			t.Fatal("expected unarchived event")
@@ -411,9 +412,9 @@ func TestSubscribe(t *testing.T) {
 			t.Fatalf("expected unarchived event, got %q", strVal(ev, "event"))
 		}
 
-		// Restore s1 for the next test
-		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: back"})
-		pool.awaitStatus(s1, "idle", 60*time.Second)
+		// Restore s2 for the next test
+		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "respond with exactly: back"})
+		pool.awaitStatus(s2, "idle", 60*time.Second)
 	})
 
 	t.Run("multiple concurrent subscribers", func(t *testing.T) {

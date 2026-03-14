@@ -18,30 +18,25 @@ package integration
 //   3.  "info shows session details"
 //   4.  "cwd updates on directory change"
 //   5.  "wait on already-idle returns immediately"
-//   6.  "capture while idle — jsonl-short (default)"
-//   7.  "capture — jsonl-last"
-//   8.  "capture — jsonl-long"
-//   9.  "capture — jsonl-full"
-//   10. "capture — buffer-last"
-//   11. "capture — buffer-full"
-//   12. "followup to idle session"
-//   13. "jsonl-short after followup excludes earlier turns"
-//   14. "jsonl-long strips repetitive fields"
-//   15. "new-capture: turns=1 detail=last returns only last turn"
-//   16. "new-capture: turns=0 detail=last returns all turns"
-//   17. "new-capture: detail=raw returns unfiltered JSONL with metadata"
-//   18. "new-capture: default params match turns=1 detail=last"
-//   19. "new-capture: buffer turns=1 excludes earlier turn content"
-//   20. "new-capture: buffer turns=0 contains all terminal output"
-//   21. "new-capture: buffer ignores detail parameter"
-//   22. "followup on processing errors without force"
-//   23. "followup with force on processing"
-//   24. "wait on offloaded session errors"
-//   25. "wait with no sessionId — returns first idle"
-//   26. "wait with no sessionId — errors if none busy"
-//   27. "wait with timeout"
-//   28. "input sends raw bytes and verifiable text"
-//   29. "session prefix resolution"
+//   6.  "capture — detail=tools"
+//   7.  "capture — full transcript >= default"
+//   8.  "followup to idle session"
+//   9.  "detail=tools < full transcript"
+//   10. "capture: turns=1 detail=last returns only last turn"
+//   11. "capture: turns=0 detail=last returns all turns"
+//   12. "capture: detail=raw returns unfiltered JSONL with metadata"
+//   13. "capture: default params match turns=1 detail=last"
+//   14. "capture: buffer turns=1 excludes earlier turn content"
+//   15. "capture: buffer turns=0 contains all terminal output"
+//   16. "capture: buffer ignores detail parameter"
+//   17. "followup on processing errors without force"
+//   18. "followup with force on processing"
+//   19. "wait on offloaded session errors"
+//   20. "wait with no sessionId — returns first idle"
+//   21. "wait with no sessionId — errors if none busy"
+//   22. "wait with timeout"
+//   23. "input sends raw bytes and verifiable text"
+//   24. "session prefix resolution"
 
 import (
 	"strings"
@@ -142,60 +137,36 @@ func TestSession(t *testing.T) {
 	})
 
 	t.Run("wait on already-idle returns immediately", func(t *testing.T) {
-		// s1 is already idle from step 2 — wait should return without blocking
+		// s1 is already idle from step 4 (cwd followup) — wait should return without blocking
 		resp := pool.sendLong(
 			Msg{"type": "wait", "sessionId": s1, "timeout": 5000},
 			10*time.Second,
 		)
 		assertNotError(t, resp)
-		assertContains(t, strVal(resp, "content"), "hello world")
+		assertNonEmpty(t, "wait-on-idle content", strVal(resp, "content"))
 	})
 
-	var shortContent string
-
-	t.Run("capture while idle — jsonl-short default", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1})
+	t.Run("capture — detail=tools", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "turns": 1, "detail": "tools"})
 		assertNotError(t, resp)
-		assertType(t, resp, "result")
-		shortContent = strVal(resp, "content")
-		assertNonEmpty(t, "capture content", shortContent)
+		assertNonEmpty(t, "detail=tools content", strVal(resp, "content"))
 	})
 
-	t.Run("capture — jsonl-last", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-last"})
-		assertNotError(t, resp)
-		assertNonEmpty(t, "jsonl-last content", strVal(resp, "content"))
-	})
+	t.Run("capture — full transcript >= default", func(t *testing.T) {
+		defaultResp := pool.send(Msg{"type": "capture", "sessionId": s1})
+		assertNotError(t, defaultResp)
+		defaultContent := strVal(defaultResp, "content")
+		assertNonEmpty(t, "default content", defaultContent)
 
-	t.Run("capture — jsonl-long", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-long"})
-		assertNotError(t, resp)
-		assertNonEmpty(t, "jsonl-long content", strVal(resp, "content"))
-	})
+		rawResp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "turns": 0, "detail": "raw"})
+		assertNotError(t, rawResp)
+		rawContent := strVal(rawResp, "content")
 
-	t.Run("capture — jsonl-full", func(t *testing.T) {
-		respFull := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-full"})
-		assertNotError(t, respFull)
-		fullContent := strVal(respFull, "content")
-		assertNonEmpty(t, "jsonl-full content", fullContent)
-
-		// jsonl-full is the complete unfiltered transcript — should always be >= jsonl-short
-		if len(fullContent) < len(shortContent) {
-			t.Fatalf("jsonl-full (%d bytes) should be >= jsonl-short (%d bytes)",
-				len(fullContent), len(shortContent))
+		// Full unfiltered transcript should always be >= single-turn default
+		if len(rawContent) < len(defaultContent) {
+			t.Fatalf("turns=0 detail=raw (%d bytes) should be >= default (%d bytes)",
+				len(rawContent), len(defaultContent))
 		}
-	})
-
-	t.Run("capture — buffer-last", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "buffer-last"})
-		assertNotError(t, resp)
-		assertNonEmpty(t, "buffer-last content", strVal(resp, "content"))
-	})
-
-	t.Run("capture — buffer-full", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "buffer-full"})
-		assertNotError(t, resp)
-		assertNonEmpty(t, "buffer-full content", strVal(resp, "content"))
 	})
 
 	t.Run("followup to idle session", func(t *testing.T) {
@@ -216,40 +187,27 @@ func TestSession(t *testing.T) {
 		assertContains(t, strVal(waitResp, "content"), "goodbye")
 	})
 
-	t.Run("jsonl-short after followup excludes earlier turns", func(t *testing.T) {
-		// s1 now has 2+ turns: "hello world" from step 1 and "goodbye" from
-		// step 12. SPEC says jsonl-short = "all assistant messages since last
-		// user message" — so only the latest turn should appear.
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-short"})
-		assertNotError(t, resp)
-		content := strVal(resp, "content")
-		assertContains(t, content, "goodbye")
-		if strings.Contains(strings.ToLower(content), "hello world") {
-			t.Fatalf("jsonl-short should only return messages since last user message, but earlier turn's 'hello world' is present:\n%s", truncate(content, 500))
+	t.Run("detail=tools < full transcript", func(t *testing.T) {
+		// s1 now has multiple turns — detail=tools (last turn, stripped) should be
+		// smaller than turns=0 detail=raw (complete unfiltered transcript)
+		toolsResp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "turns": 1, "detail": "tools"})
+		assertNotError(t, toolsResp)
+		toolsContent := strVal(toolsResp, "content")
+
+		rawResp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "turns": 0, "detail": "raw"})
+		assertNotError(t, rawResp)
+		rawContent := strVal(rawResp, "content")
+
+		if len(toolsContent) >= len(rawContent) {
+			t.Fatalf("detail=tools turns=1 (%d bytes) should be smaller than detail=raw turns=0 (%d bytes)",
+				len(toolsContent), len(rawContent))
 		}
 	})
 
-	t.Run("jsonl-long strips repetitive fields", func(t *testing.T) {
-		longResp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-long"})
-		assertNotError(t, longResp)
-		longContent := strVal(longResp, "content")
+	// --- Capture API tests (source/turns/detail) ---
+	// s1 now has 3 turns. Turn 1: "hello world", Turn 2: cwd change, Turn 3 (latest): "goodbye"
 
-		fullResp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "jsonl-full"})
-		assertNotError(t, fullResp)
-		fullContent := strVal(fullResp, "content")
-
-		// jsonl-long filters to since-last-user AND strips repetitive fields,
-		// so it must be strictly smaller than jsonl-full (complete unfiltered)
-		if len(longContent) >= len(fullContent) {
-			t.Fatalf("jsonl-long (%d bytes) should be smaller than jsonl-full (%d bytes) — repetitive fields should be stripped",
-				len(longContent), len(fullContent))
-		}
-	})
-
-	// --- New capture API tests (source/turns/detail) ---
-	// s1 now has 2+ turns. Turn 1: "hello world", Turn 2 (latest): "goodbye"
-
-	t.Run("new-capture: turns=1 detail=last returns only last turn", func(t *testing.T) {
+	t.Run("capture: turns=1 detail=last returns only last turn", func(t *testing.T) {
 		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "turns": 1, "detail": "last"})
 		assertNotError(t, resp)
 		content := strVal(resp, "content")
@@ -259,7 +217,7 @@ func TestSession(t *testing.T) {
 		}
 	})
 
-	t.Run("new-capture: turns=0 detail=last returns all turns", func(t *testing.T) {
+	t.Run("capture: turns=0 detail=last returns all turns", func(t *testing.T) {
 		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "turns": 0, "detail": "last"})
 		assertNotError(t, resp)
 		content := strVal(resp, "content")
@@ -267,7 +225,7 @@ func TestSession(t *testing.T) {
 		assertContains(t, content, "goodbye")
 	})
 
-	t.Run("new-capture: detail=raw returns unfiltered JSONL with metadata", func(t *testing.T) {
+	t.Run("capture: detail=raw returns unfiltered JSONL with metadata", func(t *testing.T) {
 		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "turns": 1, "detail": "raw"})
 		assertNotError(t, resp)
 		content := strVal(resp, "content")
@@ -275,13 +233,12 @@ func TestSession(t *testing.T) {
 		assertContains(t, content, "stop_reason")
 	})
 
-	t.Run("new-capture: default params match turns=1 detail=last", func(t *testing.T) {
+	t.Run("capture: default params match turns=1 detail=last", func(t *testing.T) {
 		// No source/turns/detail → should default to jsonl, 1, last
 		defaultResp := pool.send(Msg{"type": "capture", "sessionId": s1})
 		explicitResp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "turns": 1, "detail": "last"})
 		assertNotError(t, defaultResp)
 		assertNotError(t, explicitResp)
-		// Both should return the same content
 		if strVal(defaultResp, "content") != strVal(explicitResp, "content") {
 			t.Fatalf("default capture should equal explicit turns=1,detail=last\ndefault: %s\nexplicit: %s",
 				truncate(strVal(defaultResp, "content"), 300),
@@ -289,10 +246,8 @@ func TestSession(t *testing.T) {
 		}
 	})
 
-	t.Run("new-capture: buffer turns=1 excludes earlier turn content", func(t *testing.T) {
-		// s1 has 2 turns. Turn 1 prompt contained "hello world", turn 2 "goodbye".
-		// buffer turns=1 should return terminal output since the last user message.
-		// The first turn's prompt text should NOT appear in the filtered buffer.
+	t.Run("capture: buffer turns=1 excludes earlier turn content", func(t *testing.T) {
+		// s1 has 3 turns. buffer turns=1 should return terminal output since the last user message.
 		bufAll := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 0})
 		assertNotError(t, bufAll)
 		bufAllContent := strVal(bufAll, "content")
@@ -308,16 +263,13 @@ func TestSession(t *testing.T) {
 		}
 
 		// The first turn's user prompt should be in the full buffer but not the last-turn buffer.
-		// "hello world" was the text we asked Claude to respond with, and it appeared in the
-		// terminal output. The exact prompt "respond with exactly the text: hello world" should
-		// be in the full buffer from turn 1.
 		if strings.Contains(strings.ToLower(bufLastContent), "respond with exactly the text: hello world") {
 			t.Fatalf("buffer turns=1 should not contain turn 1's prompt, but it does:\n%s",
 				truncate(bufLastContent, 500))
 		}
 	})
 
-	t.Run("new-capture: buffer turns=0 contains all terminal output", func(t *testing.T) {
+	t.Run("capture: buffer turns=0 contains all terminal output", func(t *testing.T) {
 		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 0})
 		assertNotError(t, resp)
 		content := strVal(resp, "content")
@@ -326,7 +278,7 @@ func TestSession(t *testing.T) {
 		assertContains(t, content, "goodbye")
 	})
 
-	t.Run("new-capture: buffer ignores detail parameter", func(t *testing.T) {
+	t.Run("capture: buffer ignores detail parameter", func(t *testing.T) {
 		// Spec: "For buffer source, detail is ignored — buffer is always raw terminal text."
 		bufDefault := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 1})
 		bufWithDetail := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 1, "detail": "raw"})
@@ -464,7 +416,7 @@ func TestSession(t *testing.T) {
 
 		// Give the terminal a moment to reflect the input, then check the buffer
 		time.Sleep(500 * time.Millisecond)
-		bufResp := pool.send(Msg{"type": "capture", "sessionId": s1, "format": "buffer-full"})
+		bufResp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 0})
 		assertNotError(t, bufResp)
 		assertContains(t, strVal(bufResp, "content"), "test_input_marker")
 
