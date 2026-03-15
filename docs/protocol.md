@@ -92,8 +92,7 @@ Assigns internal session ID immediately. If a fresh slot is available, claims it
 Per-state behavior:
 - **idle** → sends prompt immediately (timing dance: Escape, Ctrl-U, type, poll buffer, Enter)
 - **offloaded** → queues for loading (→ `queued`), loads via `/resume <claudeUUID>`, sends prompt
-- **processing/queued** → errors unless `force: true`
-- **error** → errors unless `force: true` (resets retry counter)
+- **processing/queued** → errors (stop first)
 - **archived** → errors (unarchive first)
 
 ### `wait`
