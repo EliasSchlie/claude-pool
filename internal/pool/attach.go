@@ -71,11 +71,22 @@ func (ap *attachPipe) acceptLoop() {
 			}
 		}
 
+		// Replay buffered output before joining the broadcast.
+		// This gives the client the current screen state (like tmux/screen).
+		replay := ap.proc.Buffer()
+		if len(replay) > 0 {
+			if _, err := conn.Write(replay); err != nil {
+				log.Printf("[attach] session %s: replay write error: %v", ap.sessionID, err)
+				conn.Close()
+				continue
+			}
+		}
+
 		ap.mu.Lock()
 		ap.conns[conn] = struct{}{}
 		ap.mu.Unlock()
 
-		log.Printf("[attach] session %s: client connected", ap.sessionID)
+		log.Printf("[attach] session %s: client connected (replayed %d bytes)", ap.sessionID, len(replay))
 
 		// Read from client → write to PTY
 		go func() {
