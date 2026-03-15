@@ -244,6 +244,7 @@ func (p *pool) cliEnv() []string {
 		"CLAUDE_POOL_HOME="+p.homeDir,
 		"CLAUDE_POOL_DAEMON="+daemonBinPath,
 		"CLAUDE_POOL_TEST=1",
+		fmt.Sprintf("CLAUDE_POOL_TEST_OWNER_PID=%d", os.Getpid()),
 	)
 }
 

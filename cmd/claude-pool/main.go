@@ -7,7 +7,9 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/EliasSchlie/claude-pool/internal/api"
 	"github.com/EliasSchlie/claude-pool/internal/paths"
@@ -68,6 +70,25 @@ func main() {
 
 	log.Printf("claude-pool daemon started (pool-dir=%s)", *poolDir)
 
+	// Test watchdog: if started by a test process, self-destruct when it dies.
+	// Prevents orphaned daemons when `go test` is killed or times out.
+	ownerDied := make(chan struct{})
+	if pidStr := os.Getenv("CLAUDE_POOL_TEST_OWNER_PID"); pidStr != "" {
+		ownerPID, err := strconv.Atoi(pidStr)
+		if err == nil && ownerPID > 0 {
+			go func() {
+				for {
+					if err := syscall.Kill(ownerPID, 0); err != nil {
+						log.Printf("test owner (pid=%d) died, self-destructing", ownerPID)
+						close(ownerDied)
+						return
+					}
+					time.Sleep(2 * time.Second)
+				}
+			}()
+		}
+	}
+
 	// Wait for shutdown signal or destroy
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -77,6 +98,8 @@ func main() {
 		log.Printf("received %v, shutting down", sig)
 	case <-mgr.Done():
 		log.Printf("pool destroyed, shutting down")
+	case <-ownerDied:
+		log.Printf("shutting down (test owner gone)")
 	}
 
 	srv.Stop()
