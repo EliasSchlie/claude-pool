@@ -30,7 +30,7 @@ Key docs:
 - [docs/protocol.md](docs/protocol.md) — Full protocol reference (field tables, JSON shapes, per-state behavior)
 - [docs/architecture.md](docs/architecture.md) — Component overview, multi-pool access
 - [docs/testing.md](docs/testing.md) — Testing strategy (no mocking, real sessions, haiku model)
-- [docs/extraction-plan.md](docs/extraction-plan.md) — Implementation plan, OC reference notes
+- [docs/implementation-tasks.md](docs/implementation-tasks.md) — Implementation task list
 
 ## Scope
 
@@ -50,4 +50,4 @@ When a bug is found in production that wasn't caught by integration tests, figur
 
 ## Origin
 
-Designed from requirements, not copied from Open Cockpit. Open Cockpit code is a reference for patterns and edge cases. See [docs/extraction-plan.md](docs/extraction-plan.md).
+Designed from requirements, not copied from Open Cockpit. Open Cockpit code is a reference for patterns and edge cases.

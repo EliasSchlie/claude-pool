@@ -6,7 +6,7 @@ Claude Pool runs a persistent daemon that manages a pool of pre-started Claude C
 
 ## Status
 
-🚧 **Early development** — designing from requirements, referencing [Open Cockpit](https://github.com/EliasSchlie/open-cockpit) for patterns.
+🚧 **In development** — core functionality working, integration-tested with real Claude sessions.
 
 ## Architecture
 

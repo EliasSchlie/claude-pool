@@ -4,7 +4,7 @@
 
 ## Transport
 
-Unix domain socket at `~/.claude-pool/pools/<name>/api.sock`. Newline-delimited JSON. Each message is one JSON object + `\n`. Requests may include `id` — response echoes it back.
+Unix domain socket at `~/.claude-pool/<name>/api.sock`. Newline-delimited JSON. Each message is one JSON object + `\n`. Requests may include `id` — response echoes it back.
 
 ```
 -> {"type":"ping","id":1}\n
@@ -27,14 +27,14 @@ Sessions track their parent. Auto-detected via `CLAUDE_POOL_SESSION_ID` env var,
 
 | State | Meaning |
 |-------|---------|
-| `queued` | Waiting for a slot. Sessions enter this state from `start` (new session), or from `followup`/`pin` on an offloaded session that needs to be loaded. |
+| `queued` | Waiting for a slot. Sessions enter this state from `start` (new session), or from `followup` on an offloaded session that needs to be loaded. |
 | `idle` | Finished processing, waiting for input |
 | `processing` | Claude is working |
 | `offloaded` | Not in a slot, can be resumed. Also the state after a process dies (error is logged, session becomes offloaded). |
 | `error` | Repeatedly failed to load. Visible but cannot be loaded without explicit action. |
 | `archived` | Session is done. Hidden from `ls` by default. Auto-cleaned after 30 days. |
 
-**Important:** Offloaded sessions can become `queued` again. When `followup` or `pin` targets an offloaded session, the session transitions to `queued` while waiting for a slot to become available.
+**Important:** Offloaded sessions can become `queued` again. When `followup` targets an offloaded session, the session transitions to `queued` while waiting for a slot to become available.
 
 ---
 
@@ -134,7 +134,7 @@ If a session was stopped before producing output, or if there is no assistant me
 
 **Behavior:** Initializes the pool daemon. Reads flags from `config.json`. Errors if pool already initialized (sessions are running). Updates `pools.json` registry.
 
-If previous session state exists (from a prior run that was destroyed or crashed), `init` restores sessions that were **live** (idle or processing) when the pool last shut down. These sessions are loaded via `/resume` into available slots. Sessions that were already offloaded, error, or archived remain in their prior state. If there are more sessions to restore than `size` slots, excess sessions stay offloaded and can be loaded later via `followup` or `pin`.
+If previous session state exists (from a prior run that was destroyed or crashed), `init` restores sessions that were **live** (idle or processing) when the pool last shut down. These sessions are loaded via `/resume` into available slots. Sessions that were already offloaded, error, or archived remain in their prior state. If there are more sessions to restore than `size` slots, excess sessions stay offloaded and can be loaded later via `followup`.
 
 If `noRestore: true`, previous session state is ignored — all slots are filled with fresh pre-warmed sessions instead.
 
@@ -194,19 +194,17 @@ If no previous state exists (first-time init), all slots get fresh pre-warmed se
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `prompt` | string | Yes | The prompt to send |
-| `parentId` | sessionId | No | Explicit parent. Auto-detected from `CLAUDE_POOL_SESSION_ID` env var if omitted. |
+| `prompt` | string | No | The prompt to send. If omitted, session is created in `idle` state — a fresh slot is claimed but no prompt is sent (useful for interactive UIs needing a live session for direct TUI access via `attach`). |
+| `parentId` | string | No | Identifies who spawned this session. Auto-detected from `CLAUDE_POOL_SESSION_ID` env var if omitted. Use `"none"` to explicitly create a session with no parent (disables auto-detection). |
 | `metadata` | object | No | Session metadata: `name` (string), `description` (string), `tags` (key-value map). |
 
 **Response:** `{ type: "started", sessionId, status }` — internal ID + initial status.
 
 **Behavior:** Assigns an internal session ID immediately and returns it. Then:
-1. If a fresh (pre-warmed) slot is available → claims it, sends the prompt. Status: first visible state (e.g. `processing`).
+1. If a fresh (pre-warmed) slot is available → claims it, sends the prompt (if provided). Status: first visible state (e.g. `processing`, or `idle` if no prompt).
 2. Otherwise → queues the request. Status: `queued`. The queue processor runs asynchronously: if an evictable idle session exists, it offloads the lowest-priority one (LRU within same priority) to free a slot. If no session is evictable (all processing or pinned), the request waits until a slot frees naturally. Queued requests are served FIFO.
 
 The `parentId` is recorded on the session. If the caller is itself a pool session (detected via `CLAUDE_POOL_SESSION_ID` env var), that ID is used as parent automatically.
-
-Priority defaults to 0 for new sessions. Use `set-priority` to change it after creation.
 
 ---
 
@@ -234,7 +232,8 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `sessionId` | sessionId | No | Target session. If omitted, waits for any owned busy session. |
+| `sessionId` | sessionId | No | Target session. Overrides `parent` if both set. |
+| `parent` | string | No | Wait for any busy session with this parent. Auto-detected from `CLAUDE_POOL_SESSION_ID` if omitted. Without `sessionId` or `parent` (and no auto-detection), waits for any busy session with no parent. |
 | `timeout` | integer | No | Timeout in ms (default 300000 = 5 min) |
 | `source` | string | No | `"jsonl"` (default) or `"buffer"`. See Output Capture. |
 | `turns` | integer | No | How many turns back (default 1, 0 = all). See Output Capture. |
@@ -268,38 +267,6 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 - **JSONL source** works for any session with a known Claude UUID: **idle**, **processing**, **queued** (if re-queued from offloaded), **offloaded**, **error**, **archived**. Reads from Claude Code's transcript files.
 - **Buffer source** only works for live sessions (**idle**, **processing**). Errors for all other states.
 - **Queued** sessions: JSONL source works if the session has a UUID (re-queued from offloaded). Buffer source errors (no live terminal). Sessions queued from scratch (never spawned) have no UUID, so all sources error.
-
----
-
-### `input`
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `sessionId` | sessionId | Yes | Target session |
-| `data` | string | Yes | Raw bytes to send to the terminal |
-
-**Response:** `{ type: "ok" }`
-
-**Behavior:** Sends raw bytes directly to the session's PTY input. No timing dance, no buffer polling — just raw write.
-- Works for any session with a live terminal (**idle**, **processing**).
-- Errors if session has no live terminal: **queued**, **offloaded**, **error**, **archived**.
-- Use this for sending keystrokes like `\r` (Enter), `\x03` (Ctrl+C), `\x1b` (Escape), or arbitrary text.
-- Does NOT handle the timing dance. For safe prompt delivery, use `followup` instead.
-
----
-
-### `offload`
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `sessionId` | sessionId | Yes | Target session |
-
-**Response:** `{ type: "ok" }`
-
-**Behavior:** Manually offload a session to free its slot. Saves session metadata, frees the slot's resources, and transitions the session to `offloaded`. The JSONL transcript (maintained by Claude Code itself) serves as the persistent record and is always accessible via the session's Claude UUID.
-
-- Only works for **idle** sessions. Errors if **processing**, **queued** (nothing to offload), or already **offloaded**.
-- If session is **pinned** → automatically unpinned before offloading.
 
 ---
 
@@ -371,7 +338,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 `pendingInput` contains any un-submitted text detected in the session's terminal buffer. Empty string if nothing typed. Only populated for loaded sessions. Changes to `pendingInput` reset the session's LRU timestamp.
 
-`metadata` contains user-defined labels: `name` (short label), `description` (longer context), and `tags` (key-value map). Always present as an object (empty `{}` if no metadata set). Set via `start`, `pin` (fresh session mode), or `set-metadata`.
+`metadata` contains user-defined labels: `name` (short label), `description` (longer context), and `tags` (key-value map). Always present as an object (empty `{}` if no metadata set). Set via `start` or `set`.
 
 `children` contains direct child session objects, each of which is a full session object with its own `children` — recursively. This gives you the full subtree rooted at this session.
 
@@ -379,38 +346,29 @@ Works for any state including offloaded, error, and archived. This is the primar
 
 ---
 
-### `pin`
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `sessionId` | sessionId | No | Target session. If omitted, pins a fresh pre-warmed session and returns its sessionId. |
-| `parentId` | sessionId | No | Only used when no sessionId (fresh session mode). Auto-detected from env if omitted. |
-| `duration` | integer | No | Pin duration in seconds (default 120) |
-| `metadata` | object | No | Session metadata (only used when no sessionId, i.e. fresh session mode). |
-
-**Response:** `{ type: "ok", sessionId, status }` — sessionId is the target (or newly allocated) session. Status is its current state.
-
-**Behavior:** Prevents automatic LRU eviction for the specified duration.
-- If **no sessionId** → allocates a fresh pre-warmed session, pins it, and returns its sessionId. If no fresh slot is available, offloads the lowest-priority idle session. If all slots are busy, queues the request (status: `queued`). Use `set-priority` after to adjust priority if needed.
-- If session is **live** (idle/processing) → marks as pinned. LRU eviction skips it.
-- If session is **offloaded** → transitions to `queued` for priority loading. The session jumps to the front of the load queue and is loaded on the next available slot (may offload an unpinned session to make room).
-- If session is **error** → errors. Error sessions have repeatedly failed to load.
-- If session is **queued** → bumps to front of queue.
-- If session is **archived** → errors. Unarchive first.
-- Pin expires after `duration` seconds. After expiration, session is eligible for eviction again.
-- Pinning an already-pinned session resets the timer.
-
----
-
-### `unpin`
+### `set`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `sessionId` | sessionId | Yes | Target session |
+| `priority` | number | No | Eviction priority (lower = evicted first, default 0). |
+| `pinned` | integer or false | No | Pin duration in seconds. Use `false` to unpin. |
+| `metadata` | object | No | Fields to update (merge semantics — see below). |
 
 **Response:** `{ type: "ok" }`
 
-**Behavior:** Removes the pin, making the session eligible for LRU eviction again. No-op if session isn't pinned.
+**Behavior:** Sets session properties. At least one of `priority`, `pinned`, or `metadata` must be provided.
+
+**Priority:** Sets the session's eviction priority. Lower values are evicted first. Unbounded (can be negative or very large). Takes effect immediately for LRU eviction decisions. Does NOT affect queue order (always FIFO). Works for any session state.
+
+**Pinned:** Prevents automatic LRU eviction for the specified duration. Pin expires after the given seconds — session becomes eligible for eviction again. Pinning an already-pinned session resets the timer. Use `false` to unpin (no-op if not pinned).
+
+**Metadata:** Updates session metadata using merge semantics:
+- Only fields present in the `metadata` object are changed. Omitted fields are left unchanged.
+- Explicit `null` clears a field: `{ "name": null }` removes the name.
+- For `tags`: each key is merged individually. `null` on a key deletes it. `null` on the entire `tags` object clears all tags.
+- Works for any session state.
+- Emits an `updated` event with `changes: { metadata: { ...changed fields } }`.
 
 ---
 
@@ -460,55 +418,14 @@ Works for any state including offloaded, error, and archived. This is the primar
 
 **Response:** `{ type: "ok" }`
 
-**Behavior:** Restores an archived session to `offloaded` state. The session becomes visible in `ls` again and can be resumed via `followup` or `pin`.
+**Behavior:** Restores an archived session to `offloaded` state. The session becomes visible in `ls` again and can be resumed via `followup`.
 - Only works for **archived** sessions. Errors for any other state.
 
 ---
 
-### `set-priority`
+## UI-specific API
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `sessionId` | sessionId | Yes | Target session |
-| `priority` | number | Yes | New priority value |
-
-**Response:** `{ type: "ok" }`
-
-**Behavior:** Sets the session's eviction priority. Lower values are evicted first. Default is 0. Unbounded (can be negative or very large).
-- Takes effect immediately for LRU eviction decisions.
-- Does NOT affect queue order (queue is always FIFO).
-- Does NOT affect processing speed.
-- Works for any session state.
-
----
-
-### `set-metadata`
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `sessionId` | sessionId | Yes | Target session |
-| `metadata` | object | Yes | Fields to update (merge semantics) |
-
-**Response:** `{ type: "ok" }`
-
-**Behavior:** Updates session metadata using merge semantics:
-- Only fields present in the `metadata` object are changed. Omitted fields are left unchanged.
-- Explicit `null` clears a field: `{ "name": null }` removes the name.
-- For `tags`: each key is merged individually. `null` on a key deletes it. `null` on the entire `tags` object clears all tags.
-- Works for any session state.
-- Emits an `updated` event with `changes: { metadata: { ...changed fields } }`.
-
-Example — set name and a tag:
-```json
-{"type":"set-metadata","sessionId":"a7f2x9","metadata":{"name":"Fix auth bug","tags":{"project":"api"}}}
-```
-
-Example — clear description, delete one tag:
-```json
-{"type":"set-metadata","sessionId":"a7f2x9","metadata":{"description":null,"tags":{"project":null}}}
-```
-
----
+These are API-only — not exposed in the CLI. Needed by user interfaces (e.g. Open Cockpit) that render live terminal output.
 
 ### `attach`
 
@@ -523,9 +440,9 @@ Example — clear description, delete one tag:
 - Multiple clients can attach simultaneously (output is broadcast to all).
 - The pipe closes automatically when the session is offloaded, dies, or the daemon shuts down. Client receives EOF.
 - **Only works for live sessions** (idle, processing). Errors if queued, offloaded, error, archived.
-- To attach to an offloaded session: `pin` it (triggers load, transitions to queued) → `wait` for it to become live → `attach`.
+- To attach to an offloaded session: use `followup` to resume it (transitions to queued) → `wait` for it to become live → `attach`.
 - The temporary socket is cleaned up when all clients disconnect.
-- **Attaching does not affect other operations.** All API commands continue to work normally on attached sessions — `followup`, `stop`, `offload`, etc. Attachment is purely additive.
+- **Attaching does not affect other operations.** All API commands continue to work normally on attached sessions — `followup`, `stop`, etc. Attachment is purely additive.
 
 ---
 
@@ -566,3 +483,24 @@ Filters are ANDed: an event must match all specified filters. For example, `{ se
 **Multiple subscribers:** Each socket connection is independent. Multiple clients (or multiple connections from the same client) can subscribe simultaneously with different filters. Each gets its own event stream.
 
 The stream continues until the client disconnects or the daemon shuts down.
+
+---
+
+## Debug Commands
+
+For troubleshooting — not part of normal workflows.
+
+### `input`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `sessionId` | sessionId | Yes | Target session |
+| `data` | string | Yes | Raw bytes to send to the terminal |
+
+**Response:** `{ type: "ok" }`
+
+**Behavior:** Sends raw bytes directly to the session's PTY input. No timing dance, no buffer polling — just raw write.
+- Works for any session with a live terminal (**idle**, **processing**).
+- Errors if session has no live terminal: **queued**, **offloaded**, **error**, **archived**.
+- Use this for sending keystrokes like `\r` (Enter), `\x03` (Ctrl+C), `\x1b` (Escape), or arbitrary text.
+- Does NOT handle the timing dance. For safe prompt delivery, use `followup` instead.

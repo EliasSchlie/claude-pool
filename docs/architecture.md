@@ -22,13 +22,13 @@ claude-pool daemon
 Core business logic. Manages pool.json, session allocation, queueing, offloading, session restoration. All state mutations go through a mutex to prevent races. External interface uses internal session IDs — slot indices are an implementation detail.
 
 ### Pool Directory
-Each pool is a self-contained directory. The daemon takes `--pool-dir <path>` to specify where to operate. Named pools default to `~/.claude-pool/pools/<name>/`. The pool directory contains config, state, logs, socket, hook scripts, and a `.claude/` folder with hooks that sessions inherit automatically.
+Each pool is a self-contained directory. The daemon takes `--pool-dir <path>` to specify where to operate. Named pools default to `~/.claude-pool/<name>/`. The pool directory contains config, state, logs, socket, hook scripts, and a `.claude/` folder with hooks that sessions inherit automatically.
 
 ### PTY Manager
 Owns all terminal instances in-process via `creack/pty`. On daemon restart, re-adopts orphaned PTY processes by checking PIDs from pool.json.
 
 ### API Server
-Listens on `~/.claude-pool/pools/<name>/api.sock`. Accepts newline-delimited JSON. Routes requests to pool manager.
+Listens on `~/.claude-pool/<name>/api.sock`. Accepts newline-delimited JSON. Routes requests to pool manager.
 
 ### Attach Server
 When a client requests `attach`, creates a temporary Unix socket for raw PTY I/O. The pipe closes when the session is offloaded or dies. Multiple clients can attach to the same session simultaneously (broadcast).
@@ -45,9 +45,9 @@ Pools are discovered via a shared registry (`~/.claude-pool/pools.json`):
 
 ```json
 {
-  "default": { "socket": "~/.claude-pool/pools/default/api.sock" },
-  "work": { "socket": "~/.claude-pool/pools/work/api.sock" },
-  "vps": { "socket": "ssh://user@vps/home/user/.claude-pool/pools/default/api.sock" }
+  "default": { "socket": "~/.claude-pool/default/api.sock" },
+  "work": { "socket": "~/.claude-pool/work/api.sock" },
+  "vps": { "socket": "ssh://user@vps/home/user/.claude-pool/default/api.sock" }
 }
 ```
 
@@ -59,17 +59,13 @@ Remote pools use SSH tunnels. The CLI automatically forwards the remote Unix soc
 
 ```bash
 # CLI transparently handles this:
-ssh -L /tmp/pool-vps.sock:/home/user/.claude-pool/pools/default/api.sock user@vps
+ssh -L /tmp/pool-vps.sock:/home/user/.claude-pool/default/api.sock user@vps
 
 # Registry entry:
-"vps": { "socket": "ssh://user@vps/home/user/.claude-pool/pools/default/api.sock" }
+"vps": { "socket": "ssh://user@vps/home/user/.claude-pool/default/api.sock" }
 ```
 
 Full protocol support including subscribe (persistent event stream) works over the tunnel. Zero additional infra — uses existing SSH auth, encrypted, works through NAT/firewalls.
-
-### Daemon Auto-Start
-
-When the CLI connects and finds no running daemon (socket missing), it automatically spawns one — same pattern as Docker, `gpg-agent`, `ssh-agent`. Explicit `claude-pool daemon start/stop` still available for manual control.
 
 ## Key Design Decisions
 
@@ -83,7 +79,7 @@ All clients use the same socket API. No client reads pool files directly.
 One process per pool owns everything: API server, PTY instances, pool state. On restart, re-adopts orphaned PTY processes.
 
 ### Automatic slot management
-The pool decides when to offload sessions (LRU eviction when slots are needed for `start`). Clients can manually offload specific sessions, but there's no bulk "clean" operation.
+The pool decides when to offload sessions (LRU eviction when slots are needed). No manual offload command — eviction is automatic.
 
 ### Uniform pools
 All sessions in a pool run with the same flags. Different flags = different pool.

@@ -6,7 +6,7 @@ The goal: pass all integration tests (`go test ./tests/integration/ -v -timeout 
 ## Layer 1: Foundation (no tests pass yet)
 
 ### 1. `internal/paths/paths.go` — Path resolution
-Pool dir → all file paths (config.json, pool.json, api.sock, logs/, offloaded/, archived/, idle-signals/, session-pids/).
+Pool dir → all file paths (config.json, pool.json, api.sock, daemon.log, offloaded/, archived/, idle-signals/, session-pids/).
 `--pool-dir` flag support in main.go.
 
 ### 2. `internal/pool/config.go` — Config read/write
@@ -74,9 +74,9 @@ Safe prompt delivery to idle sessions.
 ### 13. `internal/pool/queue.go` — Request queue
 FIFO queue for when all slots are busy. Dequeue on slot free.
 
-### 14. `internal/pool/manager.go` — eviction, priority, pin
-LRU eviction (priority-aware). `set-priority`.
-`pin`/`unpin`: prevent eviction, priority load for offloaded.
+### 14. `internal/pool/manager.go` — eviction, set (priority, pinned, metadata)
+LRU eviction (priority-aware). `set` command for priority, pinned, metadata.
+Pinned sessions: prevent eviction for a duration.
 `resize`: add/remove slots, graceful shrink.
 **Milestone: `TestSlots` passes**.
 

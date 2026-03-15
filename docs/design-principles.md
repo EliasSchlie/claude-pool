@@ -13,13 +13,13 @@ Design decisions and implementation details. Invariants and API surface live in 
 3. **CLI is a separate package.** Thin router resolving pool names to socket connections. Keeps daemon minimal, enables remote access.
 4. **Pool registry for multi-pool access.** `~/.claude-pool/pools.json` maps names to socket paths (local) or connection strings (remote). Auto-updated on pool creation.
 5. **CLI defaults to the `default` pool.**
-6. **Hooks are project-local and self-contained.** Daemon writes `.claude/hooks.json` + scripts into pool dir on `init`. Sessions spawn there. Hook scripts read `CLAUDE_POOL_HOME` and `CLAUDE_POOL_SESSION_ID` env vars. No plugins, no global hooks.
-7. **Sugar operations live in the daemon.** High-level ops (start, followup, wait, pin) coordinate multiple internal steps server-side. One request, one response.
+6. **Two-layer hook design.** Global hook-runner (`~/.claude-pool/hook-runner.sh`) registered once in `~/.claude/settings.json`, delegates to pool-local scripts in `<pool-dir>/hooks/`. Sessions set `CLAUDE_POOL_DIR` and `CLAUDE_POOL_SESSION_ID` env vars. Non-pool sessions exit silently.
+7. **Sugar operations live in the daemon.** High-level ops (start, followup, wait, set) coordinate multiple internal steps server-side. One request, one response.
 8. **Write locking prevents races.** All state mutations go through a mutex.
 9. **Pool config is the single source for spawn settings.** `config.json` drives all spawn operations. No per-command flag overrides.
 10. **Requests queue when slots are full.** FIFO. Internal session ID assigned immediately.
 11. **Sessions are loaded, offloaded, or archived.** Process death → session becomes offloaded (error logged). Repeated load failures → session marked `error`. `followup` auto-resumes offloaded sessions.
-12. **Attach requires a live session.** Pin → wait → attach for offloaded sessions.
+12. **Attach requires a live session.** Use `followup` to resume offloaded sessions first.
 13. **Automatic slot management.** LRU eviction when slots needed. No bulk "clean" command.
 14. **Session priority affects eviction order.** Lower = evicted first, then oldest within same priority. Does not affect queue order or processing speed.
 15. **Pool config survives destroy.** Directory + config persist. Only manual deletion fully removes a pool.
@@ -48,15 +48,12 @@ See [SPEC.md](../SPEC.md) for the slot state table. Slots are internal — consu
 ## Pool Directory Structure
 
 ```
-~/.claude-pool/pools/<name>/
-  config.json            # Pool configuration (flags, size)
+~/.claude-pool/<name>/
+  config.json            # Pool configuration (flags, size, keepFresh)
   pool.json              # Pool state (sessions, queue, mappings)
   api.sock               # Daemon socket
   daemon.pid             # Daemon PID
-  logs/                  # All pool logs
-    daemon.log           # Daemon output, lifecycle events
-    error.log            # Errors and crashes
-    api.log              # API requests/responses
+  daemon.log             # Single JSONL log file (all categories, 30-day retention)
   offloaded/             # Offloaded sessions
     <internalId>/
       meta.json
@@ -65,17 +62,19 @@ See [SPEC.md](../SPEC.md) for the slot state table. Slots are internal — consu
       meta.json
   session-pids/          # PID → internal ID mapping
   idle-signals/          # Session idle signal files
+  hooks/                 # Pool-local hook scripts (deployed by init)
 ```
 
-Global registry (not per-pool):
+Global (not per-pool):
 
 ```
 ~/.claude-pool/
   pools.json             # Pool name → socket path/connection string (auto-updated)
-  pools/
-    default/             # Default pool
-    work/                # Named pool
-    ...
+  hook-runner.sh         # Global hook entry point (delegates to pool-local scripts)
+  hooks/                 # Global hook script templates
+  default/               # Default pool
+  work/                  # Named pool
+  ...
 ```
 
-Nothing lives outside the pool directory except the registry. Deleting `~/.claude-pool/pools/foo/` completely removes that pool with zero side effects.
+Nothing lives outside the pool directory except the registry and global hooks. Deleting `~/.claude-pool/<name>/` completely removes that pool with zero side effects.
