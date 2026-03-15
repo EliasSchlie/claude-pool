@@ -38,7 +38,7 @@ type Session struct {
 	CreatedAt    time.Time
 	LastUsedAt   time.Time // updated on prompt delivery, used for LRU eviction
 	PID          int
-	PendingInput string // Un-submitted text in terminal buffer (attach pipe)
+	PendingInput string // Un-submitted text detected on prompt line (attach pipe or buffer poll)
 	Metadata     SessionMetadata
 
 	// Internal: pool-owned pre-warmed session (can be claimed by start/pin)

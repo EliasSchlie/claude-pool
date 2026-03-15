@@ -139,6 +139,11 @@ func (p *Process) Buffer() []byte {
 	return p.buf.Bytes()
 }
 
+// BufferTail returns the last n bytes of the terminal buffer.
+func (p *Process) BufferTail(n int) []byte {
+	return p.buf.Tail(n)
+}
+
 // Kill sends SIGKILL to the process.
 func (p *Process) Kill() error {
 	if p.cmd.Process == nil {
@@ -272,5 +277,39 @@ func (r *RingBuffer) Bytes() []byte {
 	result := make([]byte, r.size)
 	copy(result, r.data[r.pos:])
 	copy(result[r.size-r.pos:], r.data[:r.pos])
+	return result
+}
+
+// Tail returns the last n bytes of the buffer (or the full buffer if smaller).
+func (r *RingBuffer) Tail(n int) []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	total := r.pos
+	if r.full {
+		total = r.size
+	}
+	if n >= total {
+		// Return everything — same as Bytes()
+		if !r.full {
+			return append([]byte(nil), r.data[:r.pos]...)
+		}
+		result := make([]byte, r.size)
+		copy(result, r.data[r.pos:])
+		copy(result[r.size-r.pos:], r.data[:r.pos])
+		return result
+	}
+
+	// n < total: extract just the tail
+	result := make([]byte, n)
+	// Logical end is at r.pos (or wraps). Work backwards from the write head.
+	if r.pos >= n {
+		copy(result, r.data[r.pos-n:r.pos])
+	} else {
+		// Wraps around: take from end of data, then from start
+		fromEnd := n - r.pos
+		copy(result, r.data[r.size-fromEnd:r.size])
+		copy(result[fromEnd:], r.data[:r.pos])
+	}
 	return result
 }

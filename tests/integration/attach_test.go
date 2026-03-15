@@ -24,6 +24,8 @@ package integration
 //   8.  "eviction closes attach pipe"
 //   9.  "attach fails on offloaded session"
 //  10.  "restore and re-attach"
+//  11.  "buffer-based pendingInput detection without attach"
+//  12.  "buffer-based pendingInput clears on Ctrl-U"
 
 import (
 	"errors"
@@ -217,6 +219,28 @@ func TestAttach(t *testing.T) {
 		}
 
 		newConn.Write([]byte("\x15"))
+	})
+
+	t.Run("buffer-based pendingInput detection without attach", func(t *testing.T) {
+		// s1 is idle and pinned. The re-attach connection from step 10 is closed
+		// (defer). Wait briefly for the server to clean up the pipe — the buffer
+		// poller skips sessions with active attach pipes.
+		time.Sleep(500 * time.Millisecond)
+
+		// Write chars via `input` (raw PTY write, not attach pipe). The buffer
+		// poller must detect them and populate pendingInput.
+		resp := sc.send(Msg{"type": "input", "sessionId": s1, "data": "buffer_typing_test"})
+		assertNotError(t, resp)
+
+		val := p.waitForPendingInput(s1, func(v string) bool { return v != "" }, 10*time.Second)
+		assertContains(t, val, "buffer_typing_test")
+	})
+
+	t.Run("buffer-based pendingInput clears on Ctrl-U", func(t *testing.T) {
+		resp := sc.send(Msg{"type": "input", "sessionId": s1, "data": "\x15"})
+		assertNotError(t, resp)
+
+		p.waitForPendingInput(s1, func(v string) bool { return v == "" }, 10*time.Second)
 	})
 }
 
