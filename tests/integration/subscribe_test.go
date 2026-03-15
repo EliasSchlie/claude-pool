@@ -284,9 +284,7 @@ func TestSubscribe(t *testing.T) {
 		}
 
 		changes, _ := ev["changes"].(map[string]any)
-		if numVal(changes, "priority") != 5 {
-			t.Fatalf("expected priority 5 in changes, got %v", changes["priority"])
-		}
+		assertNumVal(t, changes, "priority", 5)
 
 		sc.send(Msg{"type": "set", "sessionId": s1, "priority": 0})
 		sub.drain()

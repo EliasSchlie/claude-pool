@@ -43,9 +43,7 @@ func TestKeepFresh(t *testing.T) {
 		// Verify config has keepFresh=1
 		resp := pool.runJSON("config")
 		cfg, _ := resp["config"].(map[string]any)
-		if numVal(cfg, "keepFresh") != 1 {
-			t.Fatalf("expected keepFresh 1, got %v", numVal(cfg, "keepFresh"))
-		}
+		assertNumVal(t, cfg, "keepFresh", 1)
 	})
 
 	t.Run("fresh slots maintained after sessions go idle", func(t *testing.T) {
@@ -152,14 +150,8 @@ func TestKeepFresh(t *testing.T) {
 
 		health := pool.getHealth()
 		counts, _ := health["counts"].(map[string]any)
-		if numVal(counts, "idle") != 3 {
-			t.Fatalf("expected 3 idle sessions with keepFresh=0, got %v (counts: %v)",
-				numVal(counts, "idle"), counts)
-		}
-		if numVal(counts, "fresh") != 0 {
-			t.Fatalf("expected 0 fresh slots with keepFresh=0 and full pool, got %v",
-				numVal(counts, "fresh"))
-		}
+		assertNumVal(t, counts, "idle", 3)
+		assertNumVal(t, counts, "fresh", 0)
 	})
 
 	t.Run("config update triggers fresh slot maintenance", func(t *testing.T) {

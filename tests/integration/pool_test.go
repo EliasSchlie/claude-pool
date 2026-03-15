@@ -65,9 +65,7 @@ func TestPool(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected health object in init response, got %v", resp)
 		}
-		if numVal(health, "size") != 2 {
-			t.Fatalf("expected pool size 2, got %v", numVal(health, "size"))
-		}
+		assertNumVal(t, health, "size", 2)
 
 		pool.waitForIdleCount(2, 90*time.Second)
 
@@ -85,9 +83,7 @@ func TestPool(t *testing.T) {
 		health := pool.getHealth()
 
 		// Verify health fields present — same ones we check in the health step
-		if numVal(health, "size") != 2 {
-			t.Fatalf("init health size: expected 2, got %v", numVal(health, "size"))
-		}
+		assertNumVal(t, health, "size", 2)
 		if _, ok := health["counts"]; !ok {
 			t.Fatal("init health response missing 'counts'")
 		}
@@ -112,16 +108,10 @@ func TestPool(t *testing.T) {
 	t.Run("health", func(t *testing.T) {
 		health := pool.getHealth()
 
-		if numVal(health, "size") != 2 {
-			t.Fatalf("expected size 2, got %v", numVal(health, "size"))
-		}
+		assertNumVal(t, health, "size", 2)
 		counts, _ := health["counts"].(map[string]any)
-		if numVal(counts, "idle") != 2 {
-			t.Fatalf("expected 2 idle, got %v", numVal(counts, "idle"))
-		}
-		if numVal(health, "queueDepth") != 0 {
-			t.Fatalf("expected queue depth 0, got %v", numVal(health, "queueDepth"))
-		}
+		assertNumVal(t, counts, "idle", 2)
+		assertNumVal(t, health, "queueDepth", 0)
 	})
 
 	t.Run("pools lists the pool", func(t *testing.T) {
@@ -138,23 +128,17 @@ func TestPool(t *testing.T) {
 			t.Fatalf("expected config object, got %T", resp["config"])
 		}
 		assertContains(t, strVal(cfg, "flags"), "haiku")
-		if numVal(cfg, "size") != 2 {
-			t.Fatalf("expected size 2, got %v", numVal(cfg, "size"))
-		}
+		assertNumVal(t, cfg, "size", 2)
 	})
 
 	t.Run("config set", func(t *testing.T) {
 		resp := pool.runJSON("config", "--set", "size=4")
 		cfg, _ := resp["config"].(map[string]any)
-		if numVal(cfg, "size") != 4 {
-			t.Fatalf("expected size 4 after set, got %v", numVal(cfg, "size"))
-		}
+		assertNumVal(t, cfg, "size", 4)
 
 		readResp := pool.runJSON("config")
 		readCfg, _ := readResp["config"].(map[string]any)
-		if numVal(readCfg, "size") != 4 {
-			t.Fatalf("config not persisted: expected 4, got %v", numVal(readCfg, "size"))
-		}
+		assertNumVal(t, readCfg, "size", 4)
 
 		pool.run("config", "--set", "size=2")
 	})
@@ -163,23 +147,17 @@ func TestPool(t *testing.T) {
 		// Init used --keep-fresh 0, verify it was persisted
 		resp := pool.runJSON("config")
 		cfg, _ := resp["config"].(map[string]any)
-		if numVal(cfg, "keepFresh") != 0 {
-			t.Fatalf("expected keepFresh 0, got %v", numVal(cfg, "keepFresh"))
-		}
+		assertNumVal(t, cfg, "keepFresh", 0)
 
 		// Set keepFresh via config
 		setResp := pool.runJSON("config", "--set", "keepFresh=2")
 		setCfg, _ := setResp["config"].(map[string]any)
-		if numVal(setCfg, "keepFresh") != 2 {
-			t.Fatalf("expected keepFresh 2 after set, got %v", numVal(setCfg, "keepFresh"))
-		}
+		assertNumVal(t, setCfg, "keepFresh", 2)
 
 		// Verify persistence
 		readResp := pool.runJSON("config")
 		readCfg, _ := readResp["config"].(map[string]any)
-		if numVal(readCfg, "keepFresh") != 2 {
-			t.Fatalf("keepFresh not persisted: expected 2, got %v", numVal(readCfg, "keepFresh"))
-		}
+		assertNumVal(t, readCfg, "keepFresh", 2)
 
 		// Restore to 0
 		pool.run("config", "--set", "keepFresh=0")
@@ -316,9 +294,7 @@ func TestPool(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected health object in init response")
 		}
-		if numVal(health, "size") != 2 {
-			t.Fatalf("expected size 2, got %v", numVal(health, "size"))
-		}
+		assertNumVal(t, health, "size", 2)
 
 		pool.waitForIdleCount(2, 90*time.Second)
 

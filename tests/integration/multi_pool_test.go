@@ -161,9 +161,7 @@ func TestMultiPool(t *testing.T) {
 		assertExitOK(t, result)
 
 		health := beta.getHealth()
-		if numVal(health, "size") != 1 {
-			t.Fatalf("expected beta size 1, got %v", numVal(health, "size"))
-		}
+		assertNumVal(t, health, "size", 1)
 
 		info := beta.getSessionInfo(betaSession)
 		assertStatus(t, info, "idle")
