@@ -41,6 +41,10 @@ package integration
 //  29.  "human-readable output"
 //  30.  "debug slots shows slot info"
 //  31.  "debug logs returns log lines"
+//  32.  "start without prompt creates idle session"
+//  33.  "promptless session has claudeUUID but no JSONL turns"
+//  34.  "followup on promptless session works"
+//  35.  "start --block without --prompt errors"
 
 import (
 	"encoding/json"
@@ -382,5 +386,58 @@ func TestSession(t *testing.T) {
 		if result.Stdout == "" {
 			t.Fatal("expected non-empty log output")
 		}
+	})
+
+	var sPromptless string
+
+	t.Run("start without prompt creates idle session", func(t *testing.T) {
+		resp := pool.runJSON("start")
+		sPromptless = strVal(resp, "sessionId")
+		assertNonEmpty(t, "sessionId", sPromptless)
+
+		status := strVal(resp, "status")
+		if status != "idle" {
+			t.Fatalf("expected status idle for promptless start, got %q", status)
+		}
+
+		info := pool.getSessionInfo(sPromptless)
+		assertStatus(t, info, "idle")
+		if info.PID <= 0 {
+			t.Fatalf("promptless session should have a PID (live slot), got %v", info.PID)
+		}
+	})
+
+	t.Run("promptless session has claudeUUID but no JSONL turns", func(t *testing.T) {
+		info := pool.getSessionInfo(sPromptless)
+		assertNonEmpty(t, "claudeUUID", info.ClaudeUUID)
+
+		// Capture should error or return empty — no turns have happened
+		result := pool.run("capture", "--session", sPromptless, "--source", "jsonl", "--json")
+		if result.ExitCode == 0 {
+			var resp Msg
+			json.Unmarshal([]byte(result.Stdout), &resp)
+			content := strVal(resp, "content")
+			if content != "" {
+				t.Fatalf("expected empty content for promptless session, got %q", truncate(content, 200))
+			}
+		}
+		// Either error or empty content is acceptable — no turns exist
+	})
+
+	t.Run("followup on promptless session works", func(t *testing.T) {
+		resp := pool.runJSON("followup", "--session", sPromptless, "--prompt", "respond with exactly: first-prompt")
+		if strVal(resp, "sessionId") != sPromptless {
+			t.Fatal("followup returned different sessionId")
+		}
+
+		waitResp := pool.waitForIdle(sPromptless, 300*time.Second)
+		assertContains(t, strVal(waitResp, "content"), "first-prompt")
+
+		pool.run("archive", "--session", sPromptless)
+	})
+
+	t.Run("start --block without --prompt errors", func(t *testing.T) {
+		result := pool.run("start", "--block", "--json")
+		assertExitError(t, result)
 	})
 }
