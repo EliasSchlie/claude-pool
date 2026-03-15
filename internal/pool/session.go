@@ -91,7 +91,7 @@ func (s *Session) ToMsg() map[string]any {
 		m["claudeUUID"] = s.ClaudeUUID
 	}
 	if s.ParentID != "" {
-		m["parentId"] = s.ParentID
+		m["parent"] = s.ParentID
 	}
 	if s.Cwd != "" {
 		m["cwd"] = s.Cwd
@@ -106,21 +106,17 @@ func (s *Session) ToMsg() map[string]any {
 	if s.IsLive() {
 		m["pendingInput"] = s.PendingInput
 	}
-	// Always include metadata (empty object if unset)
+	// Metadata: flat key-value pairs (spec: "Arbitrary key-value pairs")
+	// Tags are the primary storage; Name/Description included for backward compat.
 	meta := map[string]any{}
+	for k, v := range s.Metadata.Tags {
+		meta[k] = v
+	}
 	if s.Metadata.Name != "" {
 		meta["name"] = s.Metadata.Name
 	}
 	if s.Metadata.Description != "" {
 		meta["description"] = s.Metadata.Description
-	}
-	if len(s.Metadata.Tags) > 0 {
-		// Shallow copy to prevent callers from mutating session state
-		tags := make(map[string]string, len(s.Metadata.Tags))
-		for k, v := range s.Metadata.Tags {
-			tags[k] = v
-		}
-		meta["tags"] = tags
 	}
 	m["metadata"] = meta
 	return m

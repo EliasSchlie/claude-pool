@@ -1,25 +1,29 @@
 package integration
 
-// TestAttach — Attach pipe workflow flow
+// TestAttach — Attach pipe workflow flow (API-only)
 //
 // Pool size: 2
 //
 // This flow tests raw PTY attach: connecting to a session's terminal,
 // pendingInput detection, submitting prompts through the pipe, API followup
-// while attached, and pipe lifecycle (offload closes pipe, re-attach
-// after reload).
+// while attached, and pipe lifecycle (eviction closes pipe, re-attach
+// after restore).
+//
+// Attach is an API-only feature (not exposed in CLI), so this test uses
+// the socket API directly.
 //
 // Flow:
 //
-//   1.  "pin fresh session"
+//   1.  "start and pin session"
 //   2.  "attach to idle session"
-//   3.  "keystrokes populate pendingInput"
-//   4.  "clearing input clears pendingInput"
-//   5.  "submit via attach triggers processing and completes"
-//   6.  "followup via API while attached"
-//   7.  "offload closes attach pipe"
-//   8.  "attach fails on offloaded session"
-//   9.  "re-pin and re-attach after offload"
+//   3.  "new client receives buffer replay"
+//   4.  "keystrokes populate pendingInput"
+//   5.  "clearing input clears pendingInput"
+//   6.  "submit via attach triggers processing and completes"
+//   7.  "followup via API while attached"
+//   8.  "eviction closes attach pipe"
+//   9.  "attach fails on offloaded session"
+//  10.  "restore and re-attach"
 
 import (
 	"errors"
@@ -41,15 +45,15 @@ func TestAttach(t *testing.T) {
 		}
 	})
 
-	t.Run("pin fresh session", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "pin"})
+	t.Run("start and pin session", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "start", "prompt": "respond with exactly: attach-init"})
 		assertNotError(t, resp)
-		assertType(t, resp, "ok")
-
 		s1 = strVal(resp, "sessionId")
-		assertNonEmpty(t, "sessionId", s1)
+		pool.awaitStatus(s1, "idle", 60*time.Second)
 
-		pool.awaitStatus(s1, "idle", 30*time.Second)
+		// Pin to prevent eviction during attach tests
+		pinResp := pool.send(Msg{"type": "set", "sessionId": s1, "pinned": 300})
+		assertNotError(t, pinResp)
 	})
 
 	t.Run("attach to idle session", func(t *testing.T) {
@@ -69,14 +73,9 @@ func TestAttach(t *testing.T) {
 	})
 
 	t.Run("new client receives buffer replay", func(t *testing.T) {
-		// Wait for terminal output to fully settle — Claude Code emits
-		// cursor/prompt sequences for a bit after reaching idle.
 		time.Sleep(3 * time.Second)
 		drainAttach(attachConn)
 
-		// Now the session is truly quiet. A new client connecting should
-		// receive replayed buffer contents (startup banner, prompt, etc.)
-		// immediately. Without buffer replay, this times out.
 		secondConn, err := net.Dial("unix", attachSocketPath)
 		if err != nil {
 			t.Fatalf("connect second client: %v", err)
@@ -98,17 +97,13 @@ func TestAttach(t *testing.T) {
 		if _, err := attachConn.Write([]byte("hello")); err != nil {
 			t.Fatalf("write to attach socket: %v", err)
 		}
-
-		// Session stays idle — pendingInput is a property, not a state
 		pool.awaitPendingInputSet(s1, 10*time.Second)
 	})
 
 	t.Run("clearing input clears pendingInput", func(t *testing.T) {
-		// Ctrl-U clears the input line
 		if _, err := attachConn.Write([]byte("\x15")); err != nil {
 			t.Fatalf("write Ctrl-U: %v", err)
 		}
-
 		pool.awaitPendingInputClear(s1, 10*time.Second)
 	})
 
@@ -136,7 +131,6 @@ func TestAttach(t *testing.T) {
 
 		pool.awaitStatus(s1, "processing", 15*time.Second)
 
-		// Attach pipe should receive terminal output from the API-driven followup
 		buf := make([]byte, 8192)
 		attachConn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		n, err := attachConn.Read(buf)
@@ -154,20 +148,30 @@ func TestAttach(t *testing.T) {
 		assertContains(t, strVal(captureResp, "content"), "followup-while-attached")
 	})
 
-	t.Run("offload closes attach pipe", func(t *testing.T) {
-		// Offload auto-unpins per protocol
-		resp := pool.send(Msg{"type": "offload", "sessionId": s1})
-		assertNotError(t, resp)
+	t.Run("eviction closes attach pipe", func(t *testing.T) {
+		// Unpin s1 so it can be evicted
+		pool.send(Msg{"type": "set", "sessionId": s1, "pinned": false})
 
-		// Drain residual PTY output before expecting EOF — the kernel
-		// delivers buffered data before signaling connection close.
+		// Start a new session to use the other fresh slot
+		r := pool.send(Msg{"type": "start", "prompt": "respond with exactly: filler"})
+		assertNotError(t, r)
+		sNew := strVal(r, "sessionId")
+		pool.awaitStatus(sNew, "idle", 60*time.Second)
+
+		// Now both slots are full (s1 + sNew). Start another → s1 (LRU) gets evicted.
+		r2 := pool.send(Msg{"type": "start", "prompt": "respond with exactly: evict-trigger"})
+		assertNotError(t, r2)
+
+		pool.awaitStatus(s1, "offloaded", 15*time.Second)
+
+		// Drain residual PTY output before expecting EOF
 		buf := make([]byte, 4096)
 		attachConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		for {
 			_, err := attachConn.Read(buf)
 			if err != nil {
 				if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
-					t.Fatalf("expected EOF or closed after offload, got: %v", err)
+					t.Fatalf("expected EOF or closed after eviction, got: %v", err)
 				}
 				break
 			}
@@ -179,11 +183,14 @@ func TestAttach(t *testing.T) {
 		assertError(t, resp)
 	})
 
-	t.Run("re-pin and re-attach after offload", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "pin", "sessionId": s1})
+	t.Run("restore and re-attach", func(t *testing.T) {
+		// Restore s1 via followup (triggers load from offloaded state)
+		resp := pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: restored"})
 		assertNotError(t, resp)
+		pool.awaitStatus(s1, "idle", 60*time.Second)
 
-		pool.awaitStatus(s1, "idle", 30*time.Second)
+		// Pin to keep it loaded
+		pool.send(Msg{"type": "set", "sessionId": s1, "pinned": 300})
 
 		attachResp := pool.send(Msg{"type": "attach", "sessionId": s1})
 		assertNotError(t, attachResp)
@@ -198,7 +205,6 @@ func TestAttach(t *testing.T) {
 		}
 		defer newConn.Close()
 
-		// Verify pipe is alive by writing a character and reading the echo
 		if _, err := newConn.Write([]byte("x")); err != nil {
 			t.Fatalf("write to re-attached socket: %v", err)
 		}
@@ -212,12 +218,10 @@ func TestAttach(t *testing.T) {
 			t.Fatal("expected output from re-attached session")
 		}
 
-		// Best-effort cleanup
 		newConn.Write([]byte("\x15"))
 	})
 }
 
-// drainAttach reads and discards any pending output from an attach pipe.
 func drainAttach(conn net.Conn) {
 	buf := make([]byte, 8192)
 	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))

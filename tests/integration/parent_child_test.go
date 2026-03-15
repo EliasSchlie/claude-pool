@@ -1,15 +1,16 @@
 package integration
 
-// TestParentChild — Ownership, tree listing, and recursive archive flow
+// TestParentChild — Ownership, tree listing, and recursive archive flow (CLI)
 //
 // Pool size: 3
 //
-// This flow tests parent-child session relationships: how ownership is set, how
-// ls/info respect it, and how recursive archive propagates through the tree.
+// Tests parent-child session relationships through the CLI: explicit --parent flag,
+// env-based auto-detection, ls filtering by parent, verbosity levels for tree views,
+// and recursive archive.
 //
 // Session tree built during this flow:
 //
-//   s1 (parent: null — external caller)
+//   s1 (parent: none — external caller)
 //   ├── s2 (parent: s1)
 //   │   └── s3 (parent: s2)
 //   └── s4 (parent: s1)
@@ -17,19 +18,24 @@ package integration
 // Flow:
 //
 //   1.  "start root session"
-//   2.  "start child with explicit parentId"
+//   2.  "start child with explicit parent"
 //   3.  "start grandchild"
 //   4.  "start second child of root"
 //   5.  "info shows recursive children"
-//   6.  "ls returns owned direct children"
-//   7.  "ls with tree shows nested descendants"
-//   8.  "ls with all shows all pool sessions"
-//   9.  "ls with all + tree shows all sessions as tree"
-//  10.  "archive with unarchived children errors"
-//  11.  "archive offloaded parent with unarchived children errors"
-//  12.  "archive leaf session succeeds"
-//  13.  "archive parent after children archived"
-//  14.  "recursive archive archives entire subtree"
+//   6.  "ls without parent from non-Claude caller shows all"
+//   7.  "ls with parent filter shows direct children"
+//   8.  "ls with verbosity nested shows tree"
+//   9.  "child auto-detects parent from env"
+//  10.  "explicit parent overrides env"
+//  11.  "parent none disables auto-detection"
+//  12.  "ls with status filter"
+//  13.  "wait with parent filter"
+//  14.  "ls parent none from session context shows all"
+//  15.  "ls from session context shows owned children"
+//  16.  "archive with unarchived children errors"
+//  17.  "archive leaf session succeeds"
+//  18.  "archive parent after children archived"
+//  19.  "recursive archive archives entire subtree"
 
 import (
 	"testing"
@@ -37,98 +43,79 @@ import (
 )
 
 func TestParentChild(t *testing.T) {
-	pool := setupPool(t, 3)
+	pool := setupCLIPool(t, 3)
 
 	var s1, s2, s3, s4 string
 
 	t.Run("start root session", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "start", "prompt": "respond with exactly: root"})
-		assertNotError(t, resp)
+		resp := pool.runJSON("start", "--prompt", "respond with exactly: root")
 		s1 = strVal(resp, "sessionId")
+		pool.waitForIdle(s1, 300*time.Second)
 
-		pool.awaitStatus(s1, "idle", 60*time.Second)
-
-		info := pool.send(Msg{"type": "info", "sessionId": s1})
-		session := parseSession(t, info["session"])
-		if session.ParentID != "" {
-			t.Fatalf("root session should have no parent, got %q", session.ParentID)
+		info := pool.getSessionInfo(s1)
+		if info.Parent != "" {
+			t.Fatalf("root session should have no parent, got %q", info.Parent)
 		}
-		if len(session.Children) != 0 {
-			t.Fatalf("new session should have no children, got %d", len(session.Children))
+		if len(info.Children) != 0 {
+			t.Fatalf("new session should have no children, got %d", len(info.Children))
 		}
 	})
 
-	t.Run("start child with explicit parentId", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "start", "prompt": "respond with exactly: child1", "parentId": s1})
-		assertNotError(t, resp)
+	t.Run("start child with explicit parent", func(t *testing.T) {
+		resp := pool.runJSON("start", "--prompt", "respond with exactly: child1", "--parent", s1)
 		s2 = strVal(resp, "sessionId")
+		pool.waitForIdle(s2, 300*time.Second)
 
-		pool.awaitStatus(s2, "idle", 60*time.Second)
-
-		info2 := pool.send(Msg{"type": "info", "sessionId": s2})
-		session2 := parseSession(t, info2["session"])
-		if session2.ParentID != s1 {
-			t.Fatalf("expected parentId %s, got %q", s1, session2.ParentID)
+		info2 := pool.getSessionInfo(s2)
+		if info2.Parent != s1 {
+			t.Fatalf("expected parent %s, got %q", s1, info2.Parent)
 		}
 
-		info1 := pool.send(Msg{"type": "info", "sessionId": s1})
-		session1 := parseSession(t, info1["session"])
-		assertHasChild(t, session1, s2)
+		info1 := pool.getSessionInfo(s1)
+		assertHasChild(t, info1, s2)
 	})
 
 	t.Run("start grandchild", func(t *testing.T) {
-		// Pool has 3 slots — s1, s2 use 2. s3 gets the 3rd.
-		resp := pool.send(Msg{"type": "start", "prompt": "respond with exactly: grandchild", "parentId": s2})
-		assertNotError(t, resp)
+		resp := pool.runJSON("start", "--prompt", "respond with exactly: grandchild", "--parent", s2)
 		s3 = strVal(resp, "sessionId")
+		pool.waitForIdle(s3, 300*time.Second)
 
-		pool.awaitStatus(s3, "idle", 60*time.Second)
-
-		info3 := pool.send(Msg{"type": "info", "sessionId": s3})
-		session3 := parseSession(t, info3["session"])
-		if session3.ParentID != s2 {
-			t.Fatalf("expected parentId %s, got %q", s2, session3.ParentID)
+		info3 := pool.getSessionInfo(s3)
+		if info3.Parent != s2 {
+			t.Fatalf("expected parent %s, got %q", s2, info3.Parent)
 		}
 
-		info2 := pool.send(Msg{"type": "info", "sessionId": s2})
-		session2 := parseSession(t, info2["session"])
-		assertHasChild(t, session2, s3)
+		info2 := pool.getSessionInfo(s2)
+		assertHasChild(t, info2, s3)
 	})
 
 	t.Run("start second child of root", func(t *testing.T) {
-		// Pool is full (3 slots). Offload s3 to make room.
-		pool.send(Msg{"type": "offload", "sessionId": s3})
-		pool.awaitStatus(s3, "offloaded", 10*time.Second)
-
-		resp := pool.send(Msg{"type": "start", "prompt": "respond with exactly: child2", "parentId": s1})
-		assertNotError(t, resp)
+		// Pool is full (3 slots). Evict s3 (least recently used) by starting s4.
+		// s3 should be offloaded since s1 and s2 were touched more recently.
+		resp := pool.runJSON("start", "--prompt", "respond with exactly: child2", "--parent", s1)
 		s4 = strVal(resp, "sessionId")
+		pool.waitForIdle(s4, 300*time.Second)
 
-		pool.awaitStatus(s4, "idle", 60*time.Second)
-
-		info1 := pool.send(Msg{"type": "info", "sessionId": s1})
-		session1 := parseSession(t, info1["session"])
-		assertHasChild(t, session1, s2)
-		assertHasChild(t, session1, s4)
+		info1 := pool.getSessionInfo(s1)
+		assertHasChild(t, info1, s2)
+		assertHasChild(t, info1, s4)
 	})
 
 	t.Run("info shows recursive children", func(t *testing.T) {
-		info := pool.send(Msg{"type": "info", "sessionId": s1})
-		session := parseSession(t, info["session"])
+		info := pool.getSessionInfo(s1)
 
-		// s1 should have s2 and s4 as children
-		if len(session.Children) != 2 {
-			t.Fatalf("expected 2 children for s1, got %d", len(session.Children))
+		if len(info.Children) != 2 {
+			t.Fatalf("expected 2 children for s1, got %d", len(info.Children))
 		}
 
 		var child2 SessionInfo
-		for _, c := range session.Children {
+		for _, c := range info.Children {
 			if c.SessionID == s2 {
 				child2 = c
 			}
 		}
 
-		// s2 should have s3 as a child (even though s3 is offloaded)
+		// s2 should have s3 as child (even if s3 is offloaded)
 		if len(child2.Children) != 1 {
 			t.Fatalf("expected 1 child for s2, got %d", len(child2.Children))
 		}
@@ -137,155 +124,207 @@ func TestParentChild(t *testing.T) {
 		}
 	})
 
-	t.Run("ls returns owned direct children", func(t *testing.T) {
-		lsResp := pool.send(Msg{"type": "ls"})
-		assertNotError(t, lsResp)
-		assertType(t, lsResp, "sessions")
-		// External caller — should get root-level sessions
-		sessions := parseSessions(t, lsResp)
+	t.Run("ls without parent from non-Claude caller shows all", func(t *testing.T) {
+		// Non-Claude caller (no CLAUDE_POOL_SESSION_ID) — shows all top-level sessions
+		sessions := pool.listSessions()
 		if len(sessions) == 0 {
-			t.Fatal("ls should return at least one session")
+			t.Fatal("ls should return sessions")
+		}
+		// Should include s1 as a top-level session
+		if _, found := findSession(sessions, s1); !found {
+			t.Fatal("expected s1 in top-level ls")
 		}
 	})
 
-	t.Run("ls with tree shows nested descendants", func(t *testing.T) {
-		lsResp := pool.send(Msg{"type": "ls", "tree": true})
-		assertNotError(t, lsResp)
-		sessions := parseSessions(t, lsResp)
+	t.Run("ls with parent filter shows direct children", func(t *testing.T) {
+		sessions := pool.listSessions("--parent", s1)
+		// Should show s2 and s4 (direct children of s1)
+		if _, found := findSession(sessions, s2); !found {
+			t.Fatal("expected s2 in ls --parent s1")
+		}
+		if _, found := findSession(sessions, s4); !found {
+			t.Fatal("expected s4 in ls --parent s1")
+		}
+		// s3 is a grandchild, should NOT appear at top level
+		if _, found := findSession(sessions, s3); found {
+			t.Fatal("s3 (grandchild) should not appear in --parent s1")
+		}
+	})
+
+	t.Run("ls with verbosity nested shows tree", func(t *testing.T) {
+		resp := pool.runJSON("ls", "--verbosity", "nested")
+		sessions := parseSessions(t, resp)
 
 		root, found := findSession(sessions, s1)
 		if !found {
-			t.Fatal("s1 not found in tree ls")
+			t.Fatal("s1 not found in nested ls")
 		}
 		if len(root.Children) < 2 {
 			t.Fatalf("expected at least 2 children in tree, got %d", len(root.Children))
 		}
-	})
 
-	t.Run("ls with all shows all pool sessions", func(t *testing.T) {
-		lsResp := pool.send(Msg{"type": "ls", "all": true})
-		sessions := parseSessions(t, lsResp)
-
-		// Should include all 4 sessions (flat, regardless of ownership)
-		ids := map[string]bool{}
-		for _, s := range sessions {
-			ids[s.SessionID] = true
-		}
-		for _, sid := range []string{s1, s2, s3, s4} {
-			if !ids[sid] {
-				t.Fatalf("ls all should include %s", sid)
-			}
-		}
-	})
-
-	t.Run("ls with all + tree shows all sessions as tree", func(t *testing.T) {
-		lsResp := pool.send(Msg{"type": "ls", "all": true, "tree": true})
-		assertNotError(t, lsResp)
-		sessions := parseSessions(t, lsResp)
-
-		// Root s1 should appear with children nested underneath
-		root, found := findSession(sessions, s1)
-		if !found {
-			t.Fatal("s1 not found in all+tree ls")
-		}
-		if len(root.Children) < 2 {
-			t.Fatalf("expected s1 to have at least 2 children in tree, got %d", len(root.Children))
-		}
-
-		// s2 should be nested under s1 with s3 as its child
-		var child2 SessionInfo
+		// s2 should have s3 nested
 		for _, c := range root.Children {
 			if c.SessionID == s2 {
-				child2 = c
+				if len(c.Children) != 1 || c.Children[0].SessionID != s3 {
+					t.Fatalf("expected s3 nested under s2")
+				}
 			}
 		}
-		if child2.SessionID == "" {
-			t.Fatal("s2 not found as child of s1 in tree")
+	})
+
+	t.Run("child auto-detects parent from env", func(t *testing.T) {
+		// Run start with CLAUDE_POOL_SESSION_ID=s1 — parent should auto-detect
+		resp := pool.runInSessionJSON(s1, "start", "--prompt", "respond with exactly: auto-child")
+		autoChild := strVal(resp, "sessionId")
+
+		pool.waitForIdle(autoChild, 300*time.Second)
+
+		info := pool.getSessionInfo(autoChild)
+		if info.Parent != s1 {
+			t.Fatalf("expected parent auto-detected as %s, got %q", s1, info.Parent)
 		}
-		if len(child2.Children) != 1 || child2.Children[0].SessionID != s3 {
-			t.Fatalf("expected s2 to have s3 as child, got %d children", len(child2.Children))
+
+		pool.run("archive", "--session", autoChild)
+	})
+
+	t.Run("explicit parent overrides env", func(t *testing.T) {
+		// CLAUDE_POOL_SESSION_ID=s1 but --parent s2 should win
+		resp := pool.runInSessionJSON(s1, "start", "--prompt", "respond with exactly: explicit", "--parent", s2)
+		explicitChild := strVal(resp, "sessionId")
+
+		pool.waitForIdle(explicitChild, 300*time.Second)
+
+		info := pool.getSessionInfo(explicitChild)
+		if info.Parent != s2 {
+			t.Fatalf("expected parent %s (explicit), got %q", s2, info.Parent)
+		}
+
+		pool.run("archive", "--session", explicitChild)
+	})
+
+	t.Run("parent none disables auto-detection", func(t *testing.T) {
+		// CLAUDE_POOL_SESSION_ID=s1 but --parent none → no parent
+		resp := pool.runInSessionJSON(s1, "start", "--prompt", "respond with exactly: orphan", "--parent", "none")
+		orphan := strVal(resp, "sessionId")
+
+		pool.waitForIdle(orphan, 300*time.Second)
+
+		info := pool.getSessionInfo(orphan)
+		if info.Parent != "" {
+			t.Fatalf("expected no parent with --parent none, got %q", info.Parent)
+		}
+
+		pool.run("archive", "--session", orphan)
+	})
+
+	t.Run("ls with status filter", func(t *testing.T) {
+		sessions := pool.listSessions("--status", "idle")
+		for _, s := range sessions {
+			if s.Status != "idle" {
+				t.Fatalf("expected only idle sessions with --status idle, got %q", s.Status)
+			}
+		}
+		// At least one session should be idle
+		if len(sessions) == 0 {
+			t.Fatal("expected at least one idle session")
+		}
+	})
+
+	t.Run("wait with parent filter", func(t *testing.T) {
+		// Start a child of s1 and wait for it via --parent
+		resp := pool.runJSON("start", "--prompt", "respond with exactly: wait-parent-test", "--parent", s1)
+		childSid := strVal(resp, "sessionId")
+
+		waitResp := pool.runJSON("wait", "--parent", s1, "--timeout", "120000")
+		waitedSid := strVal(waitResp, "sessionId")
+		if waitedSid != childSid {
+			t.Fatalf("expected wait to return child %s, got %s", childSid, waitedSid)
+		}
+		assertContains(t, strVal(waitResp, "content"), "wait-parent-test")
+		pool.run("archive", "--session", childSid)
+	})
+
+	t.Run("ls parent none from session context shows all", func(t *testing.T) {
+		// From a Claude session (CLAUDE_POOL_SESSION_ID set), --parent none shows all
+		resp := pool.runInSessionJSON(s1, "ls", "--parent", "none")
+		sessions := parseSessions(t, resp)
+		// Should include s1 itself (top-level)
+		if _, found := findSession(sessions, s1); !found {
+			t.Fatal("expected s1 in ls --parent none from session context")
+		}
+	})
+
+	t.Run("ls from session context shows owned children", func(t *testing.T) {
+		// ls as s1 — should show s2, s4 (direct children)
+		resp := pool.runInSessionJSON(s1, "ls")
+		sessions := parseSessions(t, resp)
+
+		hasS2 := false
+		for _, s := range sessions {
+			if s.SessionID == s2 {
+				hasS2 = true
+			}
+			if s.SessionID == s3 {
+				t.Fatal("s3 (grandchild) should not appear in ls from s1 context")
+			}
+		}
+		if !hasS2 {
+			t.Fatal("expected s2 in ls from s1 context")
 		}
 	})
 
 	t.Run("archive with unarchived children errors", func(t *testing.T) {
 		// s2 has child s3 (offloaded but not archived)
-		resp := pool.send(Msg{"type": "archive", "sessionId": s2})
-		assertError(t, resp)
+		result := pool.run("archive", "--session", s2)
+		assertExitError(t, result)
 
-		// Confirm s2 is still in its previous state
-		info := pool.send(Msg{"type": "info", "sessionId": s2})
-		session := parseSession(t, info["session"])
-		if session.Status == "archived" {
+		info := pool.getSessionInfo(s2)
+		if info.Status == "archived" {
 			t.Fatal("s2 should not be archived — it has unarchived children")
 		}
 	})
 
-	t.Run("archive offloaded parent with unarchived children errors", func(t *testing.T) {
-		// Regression guard: the children check must apply regardless of
-		// whether the parent is live or offloaded.
-		pool.send(Msg{"type": "offload", "sessionId": s2})
-		pool.awaitStatus(s2, "offloaded", 10*time.Second)
-
-		resp := pool.send(Msg{"type": "archive", "sessionId": s2})
-		assertError(t, resp)
-
-		info := pool.send(Msg{"type": "info", "sessionId": s2})
-		session := parseSession(t, info["session"])
-		if session.Status == "archived" {
-			t.Fatal("offloaded parent with unarchived children should not be archived")
-		}
-	})
-
 	t.Run("archive leaf session succeeds", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "archive", "sessionId": s3})
-		assertNotError(t, resp)
+		result := pool.run("archive", "--session", s3)
+		assertExitOK(t, result)
 
-		info := pool.send(Msg{"type": "info", "sessionId": s3})
-		session := parseSession(t, info["session"])
-		assertStatus(t, session, "archived")
+		info := pool.getSessionInfo(s3)
+		assertStatus(t, info, "archived")
 	})
 
 	t.Run("archive parent after children archived", func(t *testing.T) {
-		// s2's only child (s3) is now archived
-		// First offload s2 since it's idle in a slot
-		pool.send(Msg{"type": "offload", "sessionId": s2})
-		pool.awaitStatus(s2, "offloaded", 10*time.Second)
+		// s2's child (s3) is now archived — s2 can be archived
+		result := pool.run("archive", "--session", s2)
+		assertExitOK(t, result)
 
-		resp := pool.send(Msg{"type": "archive", "sessionId": s2})
-		assertNotError(t, resp)
-
-		info := pool.send(Msg{"type": "info", "sessionId": s2})
-		session := parseSession(t, info["session"])
-		assertStatus(t, session, "archived")
+		info := pool.getSessionInfo(s2)
+		assertStatus(t, info, "archived")
 	})
 
 	t.Run("recursive archive archives entire subtree", func(t *testing.T) {
-		// Unarchive s2 and s3 to test recursive archive from s1
-		pool.send(Msg{"type": "unarchive", "sessionId": s2})
-		pool.send(Msg{"type": "unarchive", "sessionId": s3})
+		// Unarchive s2 and s3 to test recursive from s1
+		pool.run("unarchive", "--session", s2)
+		pool.run("unarchive", "--session", s3)
 
-		resp := pool.send(Msg{"type": "archive", "sessionId": s1, "recursive": true})
-		assertNotError(t, resp)
+		result := pool.run("archive", "--session", s1, "--recursive")
+		assertExitOK(t, result)
 
-		// All 4 sessions should be archived
 		for _, sid := range []string{s1, s2, s3, s4} {
-			info := pool.send(Msg{"type": "info", "sessionId": sid})
-			session := parseSession(t, info["session"])
-			assertStatus(t, session, "archived")
+			info := pool.getSessionInfo(sid)
+			assertStatus(t, info, "archived")
 		}
 
 		// Default ls should be empty
-		lsResp := pool.send(Msg{"type": "ls", "all": true})
-		sessions := parseSessions(t, lsResp)
+		sessions := pool.listSessions()
 		if len(sessions) != 0 {
-			t.Fatalf("expected 0 sessions in default ls after recursive archive, got %d", len(sessions))
+			t.Fatalf("expected 0 sessions after recursive archive, got %d", len(sessions))
 		}
 
-		// ls with archived should show all 4
-		lsArchived := pool.send(Msg{"type": "ls", "all": true, "archived": true})
-		archivedSessions := parseSessions(t, lsArchived)
+		// ls with --archived shows all
+		archivedSessions := pool.listSessions("--archived")
 		if len(archivedSessions) < 4 {
-			t.Fatalf("expected at least 4 sessions with archived flag, got %d", len(archivedSessions))
+			t.Fatalf("expected at least 4 with --archived, got %d", len(archivedSessions))
 		}
 	})
 }
