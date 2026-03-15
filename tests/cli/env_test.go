@@ -61,6 +61,8 @@ package cli
 //      Capture child output — should contain "spawned-child".
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -224,9 +226,62 @@ func TestEnv(t *testing.T) {
 		}
 	})
 
-	// Step 7 (real e2e: Claude spawns child via CLI) is skipped for now —
-	// it requires the daemon to set CLAUDE_POOL_SESSION_ID on spawned sessions
-	// AND the Claude session to actually run the CLI binary. This needs the full
-	// hook integration which is complex to test. The steps above verify all the
-	// CLI-level plumbing; step 7 is a daemon-level feature test.
+	t.Run("real e2e: Claude session spawns child via CLI", func(t *testing.T) {
+		// The parent session runs the CLI binary directly. The daemon sets
+		// CLAUDE_POOL_SESSION_ID on its env, so the CLI auto-detects the parent.
+		// We also set CLAUDE_POOL_REGISTRY so the CLI finds our test pool.
+		prompt := fmt.Sprintf(
+			"Run this exact bash command and nothing else: "+
+				"CLAUDE_POOL_REGISTRY=%s %s --pool %s start --prompt 'respond with exactly: spawned-child'",
+			pool.registryPath, pool.cliBin, pool.poolName,
+		)
+
+		// Start parent via socket — the prompt references test-specific paths
+		resp := pool.send(Msg{"type": "start", "prompt": prompt})
+		if resp["type"] == "error" {
+			t.Fatalf("start parent failed: %v", resp["error"])
+		}
+		sParent := strVal(resp, "sessionId")
+
+		// Wait for parent to become idle (it should run the CLI command and finish)
+		waitResp := pool.send(Msg{"type": "wait", "sessionId": sParent, "timeout": 120000})
+		if waitResp["type"] == "error" {
+			t.Fatalf("wait for parent failed: %v", waitResp["error"])
+		}
+
+		// Find the child session — it should have parentId = sParent
+		lsResp := pool.send(Msg{"type": "ls", "all": true})
+		if lsResp["type"] == "error" {
+			t.Fatalf("ls failed: %v", lsResp["error"])
+		}
+		sessions, _ := lsResp["sessions"].([]any)
+
+		var childID string
+		for _, s := range sessions {
+			sm, _ := s.(map[string]any)
+			if strVal(sm, "parentId") == sParent {
+				childID = strVal(sm, "sessionId")
+				break
+			}
+		}
+		if childID == "" {
+			t.Fatalf("no child session found with parentId=%s. Sessions: %v", sParent, sessions)
+		}
+
+		// Wait for child to finish
+		childWait := pool.send(Msg{"type": "wait", "sessionId": childID, "timeout": 120000})
+		if childWait["type"] == "error" {
+			t.Fatalf("wait for child failed: %v", childWait["error"])
+		}
+
+		// Capture child output — should contain "spawned-child"
+		captureResp := pool.send(Msg{"type": "capture", "sessionId": childID})
+		if captureResp["type"] == "error" {
+			t.Fatalf("capture child failed: %v", captureResp["error"])
+		}
+		content, _ := captureResp["content"].(string)
+		if !strings.Contains(strings.ToLower(content), "spawned-child") {
+			t.Fatalf("expected child output to contain 'spawned-child', got: %s", truncate(content, 500))
+		}
+	})
 }

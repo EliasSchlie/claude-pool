@@ -78,12 +78,13 @@ func TestMain(m *testing.M) {
 type Msg = map[string]any
 
 type cliPool struct {
-	t          *testing.T
-	poolDir    string
-	socketPath string
-	cliBin     string
-	daemon     *exec.Cmd
-	poolName   string
+	t            *testing.T
+	poolDir      string
+	socketPath   string
+	registryPath string
+	cliBin       string
+	daemon       *exec.Cmd
+	poolName     string
 }
 
 type cmdResult struct {
@@ -151,12 +152,13 @@ func setupCLIPool(t *testing.T, size int) *cliPool {
 	}
 
 	p := &cliPool{
-		t:          t,
-		poolDir:    poolDir,
-		socketPath: socketPath,
-		cliBin:     cliBinPath,
-		daemon:     daemon,
-		poolName:   poolName,
+		t:            t,
+		poolDir:      poolDir,
+		socketPath:   socketPath,
+		registryPath: registryPath,
+		cliBin:       cliBinPath,
+		daemon:       daemon,
+		poolName:     poolName,
 	}
 
 	// Cleanup
@@ -266,6 +268,41 @@ func (p *cliPool) runInSessionJSON(sessionID string, args ...string) Msg {
 		p.t.Fatalf("failed to parse CLI JSON output: %v\nstdout: %s", err, result.Stdout)
 	}
 	return msg
+}
+
+// send sends a raw JSON message over the socket and reads the response.
+// Used by tests that need direct socket access (e.g., test 7 starts a parent
+// session via socket, then verifies the Claude session can spawn children via CLI).
+func (p *cliPool) send(msg Msg) Msg {
+	p.t.Helper()
+
+	conn, err := net.Dial("unix", p.socketPath)
+	if err != nil {
+		p.t.Fatalf("socket connect: %v", err)
+	}
+	defer conn.Close()
+
+	data, _ := json.Marshal(msg)
+	data = append(data, '\n')
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if _, err := conn.Write(data); err != nil {
+		p.t.Fatalf("socket write: %v", err)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(120 * time.Second))
+	scanner := bufio.NewScanner(conn)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			p.t.Fatalf("socket read: %v", err)
+		}
+		p.t.Fatal("socket closed")
+	}
+
+	var resp Msg
+	if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
+		p.t.Fatalf("socket unmarshal: %v\nraw: %s", err, scanner.Text())
+	}
+	return resp
 }
 
 var strVal = testutil.StrVal

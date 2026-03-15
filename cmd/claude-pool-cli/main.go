@@ -2,9 +2,6 @@
 //
 // Resolves pool names from the registry (pools.json) to socket connections,
 // translates CLI commands to socket API calls, and formats output.
-//
-// Stub: commands are not yet implemented. This binary exists so that CLI tests
-// can compile and fail meaningfully.
 package main
 
 import (
@@ -17,10 +14,53 @@ import (
 	"strings"
 )
 
+// conn is a persistent socket connection used for the entire CLI invocation.
+// Opened once in main(), reused by all commands (including --block which
+// sends start then wait on the same connection).
+type conn struct {
+	c       net.Conn
+	scanner *bufio.Scanner
+}
+
+func dial(socketPath string) (*conn, error) {
+	c, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot connect to pool: %w", err)
+	}
+	return &conn{c: c, scanner: bufio.NewScanner(c)}, nil
+}
+
+func (c *conn) send(msg map[string]any) (map[string]any, error) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return nil, err
+	}
+	data = append(data, '\n')
+
+	if _, err := c.c.Write(data); err != nil {
+		return nil, fmt.Errorf("write failed: %w", err)
+	}
+
+	if !c.scanner.Scan() {
+		if err := c.scanner.Err(); err != nil {
+			return nil, fmt.Errorf("read failed: %w", err)
+		}
+		return nil, fmt.Errorf("connection closed")
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(c.scanner.Bytes(), &resp); err != nil {
+		return nil, fmt.Errorf("invalid response: %w", err)
+	}
+
+	return resp, nil
+}
+
+func (c *conn) close() { c.c.Close() }
+
 func main() {
 	args := os.Args[1:]
 
-	// Parse global flags
 	pool := "default"
 	jsonMode := false
 	var remaining []string
@@ -53,13 +93,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := dispatch(socketPath, cmd, cmdArgs, jsonMode); err != nil {
+	c, err := dial(socketPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer c.close()
+
+	if err := dispatch(c, cmd, cmdArgs, jsonMode); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// resolvePool reads the registry to find a pool's socket path.
 func resolvePool(name string) (string, error) {
 	registryPath := os.Getenv("CLAUDE_POOL_REGISTRY")
 	if registryPath == "" {
@@ -93,51 +139,36 @@ func resolvePool(name string) (string, error) {
 	return socket, nil
 }
 
-// dispatch routes CLI commands to socket API calls.
-func dispatch(socketPath, cmd string, args []string, jsonMode bool) error {
+func dispatch(c *conn, cmd string, args []string, jsonMode bool) error {
 	switch cmd {
 	case "ping":
-		return doSimple(socketPath, map[string]any{"type": "ping"}, jsonMode)
-
+		return doSimple(c, map[string]any{"type": "ping"}, jsonMode)
 	case "health":
-		return doSimple(socketPath, map[string]any{"type": "health"}, jsonMode)
-
+		return doSimple(c, map[string]any{"type": "health"}, jsonMode)
 	case "start":
-		return doStart(socketPath, args, jsonMode)
-
+		return doStart(c, args, jsonMode)
 	case "wait":
-		return doWait(socketPath, args, jsonMode)
-
+		return doWait(c, args, jsonMode)
 	case "info":
-		return doInfo(socketPath, args, jsonMode)
-
+		return doInfo(c, args, jsonMode)
 	case "ls":
-		return doLs(socketPath, args, jsonMode)
-
+		return doLs(c, args, jsonMode)
 	case "capture":
-		return doCapture(socketPath, args, jsonMode)
-
+		return doCapture(c, args, jsonMode)
 	case "followup":
-		return doFollowup(socketPath, args, jsonMode)
-
+		return doFollowup(c, args, jsonMode)
 	case "set-priority":
-		return doSetPriority(socketPath, args, jsonMode)
-
+		return doSetPriority(c, args, jsonMode)
 	case "pin":
-		return doPin(socketPath, args, jsonMode)
-
+		return doPin(c, args, jsonMode)
 	case "unpin":
-		return doUnpin(socketPath, args, jsonMode)
-
+		return doUnpin(c, args, jsonMode)
 	case "offload":
-		return doSessionCmd(socketPath, "offload", args, jsonMode)
-
+		return doSessionCmd(c, "offload", args, jsonMode)
 	case "archive":
-		return doArchive(socketPath, args, jsonMode)
-
+		return doArchive(c, args, jsonMode)
 	case "destroy":
-		return doDestroy(socketPath, args, jsonMode)
-
+		return doDestroy(c, args, jsonMode)
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -145,7 +176,7 @@ func dispatch(socketPath, cmd string, args []string, jsonMode bool) error {
 
 // --- Command implementations ---
 
-func doStart(socketPath string, args []string, jsonMode bool) error {
+func doStart(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "start"}
 	var block bool
 
@@ -166,18 +197,16 @@ func doStart(socketPath string, args []string, jsonMode bool) error {
 		}
 	}
 
-	// Auto-detect parent from env
 	if _, hasParent := msg["parentId"]; !hasParent {
 		if envParent := os.Getenv("CLAUDE_POOL_SESSION_ID"); envParent != "" {
 			msg["parentId"] = envParent
 		}
 	}
 
-	resp, err := sendMsg(socketPath, msg)
+	resp, err := c.send(msg)
 	if err != nil {
 		return err
 	}
-
 	if err := checkError(resp); err != nil {
 		return err
 	}
@@ -189,7 +218,7 @@ func doStart(socketPath string, args []string, jsonMode bool) error {
 			"sessionId": sessionID,
 			"timeout":   120000,
 		}
-		resp, err = sendMsg(socketPath, waitMsg)
+		resp, err = c.send(waitMsg)
 		if err != nil {
 			return err
 		}
@@ -201,9 +230,8 @@ func doStart(socketPath string, args []string, jsonMode bool) error {
 	return printResp(resp, jsonMode)
 }
 
-func doWait(socketPath string, args []string, jsonMode bool) error {
+func doWait(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "wait"}
-
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--session":
@@ -237,48 +265,25 @@ func doWait(socketPath string, args []string, jsonMode bool) error {
 			}
 		}
 	}
-
-	resp, err := sendMsg(socketPath, msg)
-	if err != nil {
-		return err
-	}
-
-	if err := checkError(resp); err != nil {
-		return err
-	}
-
-	return printResp(resp, jsonMode)
+	return doSimple(c, msg, jsonMode)
 }
 
-func doInfo(socketPath string, args []string, jsonMode bool) error {
+func doInfo(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "info"}
-
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--session":
+		if args[i] == "--session" {
 			i++
 			if i < len(args) {
 				msg["sessionId"] = args[i]
 			}
 		}
 	}
-
-	resp, err := sendMsg(socketPath, msg)
-	if err != nil {
-		return err
-	}
-
-	if err := checkError(resp); err != nil {
-		return err
-	}
-
-	return printResp(resp, jsonMode)
+	return doSimple(c, msg, jsonMode)
 }
 
-func doLs(socketPath string, args []string, jsonMode bool) error {
+func doLs(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "ls"}
 
-	// Auto-detect caller from env for ownership filtering
 	if envSession := os.Getenv("CLAUDE_POOL_SESSION_ID"); envSession != "" {
 		msg["callerId"] = envSession
 	}
@@ -293,22 +298,11 @@ func doLs(socketPath string, args []string, jsonMode bool) error {
 			msg["archived"] = true
 		}
 	}
-
-	resp, err := sendMsg(socketPath, msg)
-	if err != nil {
-		return err
-	}
-
-	if err := checkError(resp); err != nil {
-		return err
-	}
-
-	return printResp(resp, jsonMode)
+	return doSimple(c, msg, jsonMode)
 }
 
-func doCapture(socketPath string, args []string, jsonMode bool) error {
+func doCapture(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "capture"}
-
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--session":
@@ -335,22 +329,11 @@ func doCapture(socketPath string, args []string, jsonMode bool) error {
 			}
 		}
 	}
-
-	resp, err := sendMsg(socketPath, msg)
-	if err != nil {
-		return err
-	}
-
-	if err := checkError(resp); err != nil {
-		return err
-	}
-
-	return printResp(resp, jsonMode)
+	return doSimple(c, msg, jsonMode)
 }
 
-func doFollowup(socketPath string, args []string, jsonMode bool) error {
+func doFollowup(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "followup"}
-
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--session":
@@ -367,22 +350,11 @@ func doFollowup(socketPath string, args []string, jsonMode bool) error {
 			msg["force"] = true
 		}
 	}
-
-	resp, err := sendMsg(socketPath, msg)
-	if err != nil {
-		return err
-	}
-
-	if err := checkError(resp); err != nil {
-		return err
-	}
-
-	return printResp(resp, jsonMode)
+	return doSimple(c, msg, jsonMode)
 }
 
-func doSetPriority(socketPath string, args []string, jsonMode bool) error {
+func doSetPriority(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "set-priority"}
-
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--session":
@@ -399,22 +371,11 @@ func doSetPriority(socketPath string, args []string, jsonMode bool) error {
 			}
 		}
 	}
-
-	resp, err := sendMsg(socketPath, msg)
-	if err != nil {
-		return err
-	}
-
-	if err := checkError(resp); err != nil {
-		return err
-	}
-
-	return printResp(resp, jsonMode)
+	return doSimple(c, msg, jsonMode)
 }
 
-func doPin(socketPath string, args []string, jsonMode bool) error {
+func doPin(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "pin"}
-
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--session":
@@ -431,72 +392,37 @@ func doPin(socketPath string, args []string, jsonMode bool) error {
 			}
 		}
 	}
-
-	resp, err := sendMsg(socketPath, msg)
-	if err != nil {
-		return err
-	}
-
-	if err := checkError(resp); err != nil {
-		return err
-	}
-
-	return printResp(resp, jsonMode)
+	return doSimple(c, msg, jsonMode)
 }
 
-func doUnpin(socketPath string, args []string, jsonMode bool) error {
+func doUnpin(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "unpin"}
-
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--session":
+		if args[i] == "--session" {
 			i++
 			if i < len(args) {
 				msg["sessionId"] = args[i]
 			}
 		}
 	}
-
-	resp, err := sendMsg(socketPath, msg)
-	if err != nil {
-		return err
-	}
-
-	if err := checkError(resp); err != nil {
-		return err
-	}
-
-	return printResp(resp, jsonMode)
+	return doSimple(c, msg, jsonMode)
 }
 
-func doSessionCmd(socketPath, cmdType string, args []string, jsonMode bool) error {
+func doSessionCmd(c *conn, cmdType string, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": cmdType}
-
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--session":
+		if args[i] == "--session" {
 			i++
 			if i < len(args) {
 				msg["sessionId"] = args[i]
 			}
 		}
 	}
-
-	resp, err := sendMsg(socketPath, msg)
-	if err != nil {
-		return err
-	}
-
-	if err := checkError(resp); err != nil {
-		return err
-	}
-
-	return printResp(resp, jsonMode)
+	return doSimple(c, msg, jsonMode)
 }
 
-func doArchive(socketPath string, args []string, jsonMode bool) error {
+func doArchive(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "archive"}
-
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--session":
@@ -508,87 +434,31 @@ func doArchive(socketPath string, args []string, jsonMode bool) error {
 			msg["recursive"] = true
 		}
 	}
-
-	resp, err := sendMsg(socketPath, msg)
-	if err != nil {
-		return err
-	}
-
-	if err := checkError(resp); err != nil {
-		return err
-	}
-
-	return printResp(resp, jsonMode)
+	return doSimple(c, msg, jsonMode)
 }
 
-func doDestroy(socketPath string, args []string, jsonMode bool) error {
+func doDestroy(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "destroy"}
-
 	for _, a := range args {
 		if a == "--confirm" {
 			msg["confirm"] = true
 		}
 	}
+	return doSimple(c, msg, jsonMode)
+}
 
-	resp, err := sendMsg(socketPath, msg)
+func doSimple(c *conn, msg map[string]any, jsonMode bool) error {
+	resp, err := c.send(msg)
 	if err != nil {
 		return err
 	}
-
 	if err := checkError(resp); err != nil {
 		return err
 	}
-
 	return printResp(resp, jsonMode)
 }
 
-func doSimple(socketPath string, msg map[string]any, jsonMode bool) error {
-	resp, err := sendMsg(socketPath, msg)
-	if err != nil {
-		return err
-	}
-
-	if err := checkError(resp); err != nil {
-		return err
-	}
-
-	return printResp(resp, jsonMode)
-}
-
-// --- Socket communication ---
-
-func sendMsg(socketPath string, msg map[string]any) (map[string]any, error) {
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("cannot connect to pool: %w", err)
-	}
-	defer conn.Close()
-
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return nil, err
-	}
-	data = append(data, '\n')
-
-	if _, err := conn.Write(data); err != nil {
-		return nil, fmt.Errorf("write failed: %w", err)
-	}
-
-	scanner := bufio.NewScanner(conn)
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return nil, fmt.Errorf("read failed: %w", err)
-		}
-		return nil, fmt.Errorf("connection closed")
-	}
-
-	var resp map[string]any
-	if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
-		return nil, fmt.Errorf("invalid response: %w", err)
-	}
-
-	return resp, nil
-}
+// --- Output ---
 
 func checkError(resp map[string]any) error {
 	if resp["type"] == "error" {
@@ -608,50 +478,40 @@ func printResp(resp map[string]any, jsonMode bool) error {
 		return nil
 	}
 
-	// Human-readable output
 	switch resp["type"] {
 	case "pong":
 		fmt.Println("pong")
-
 	case "health":
 		health, _ := resp["health"].(map[string]any)
 		data, _ := json.MarshalIndent(health, "", "  ")
 		fmt.Println(string(data))
-
 	case "started":
 		sessionID, _ := resp["sessionId"].(string)
 		status, _ := resp["status"].(string)
 		fmt.Printf("Session %s (%s)\n", sessionID, status)
-
 	case "result":
 		content, _ := resp["content"].(string)
 		fmt.Print(content)
 		if content != "" && !strings.HasSuffix(content, "\n") {
 			fmt.Println()
 		}
-
 	case "session":
 		session, _ := resp["session"].(map[string]any)
 		data, _ := json.MarshalIndent(session, "", "  ")
 		fmt.Println(string(data))
-
 	case "sessions":
 		sessions, _ := resp["sessions"].([]any)
 		data, _ := json.MarshalIndent(sessions, "", "  ")
 		fmt.Println(string(data))
-
 	case "ok":
 		fmt.Println("ok")
-
 	case "config":
 		config, _ := resp["config"].(map[string]any)
 		data, _ := json.MarshalIndent(config, "", "  ")
 		fmt.Println(string(data))
-
 	default:
 		data, _ := json.MarshalIndent(resp, "", "  ")
 		fmt.Println(string(data))
 	}
-
 	return nil
 }
