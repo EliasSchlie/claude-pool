@@ -61,6 +61,13 @@ func TestMain(m *testing.M) {
 // hierarchies in test code.
 type Msg = map[string]any
 
+// SessionMetadataInfo holds parsed metadata from session responses.
+type SessionMetadataInfo struct {
+	Name        string
+	Description string
+	Tags        map[string]string
+}
+
 // SessionInfo holds parsed session fields from info/ls responses.
 type SessionInfo struct {
 	SessionID    string
@@ -74,6 +81,7 @@ type SessionInfo struct {
 	PID          float64
 	Pinned       bool
 	PendingInput string // empty string = nothing typed
+	Metadata     SessionMetadataInfo
 	Children     []SessionInfo
 }
 
@@ -95,6 +103,18 @@ func parseSession(t *testing.T, raw any) SessionInfo {
 		PID:          numVal(m, "pid"),
 		Pinned:       boolVal(m, "pinned"),
 		PendingInput: strVal(m, "pendingInput"),
+	}
+	if meta, ok := m["metadata"].(map[string]any); ok {
+		s.Metadata.Name = strVal(meta, "name")
+		s.Metadata.Description = strVal(meta, "description")
+		if tags, ok := meta["tags"].(map[string]any); ok {
+			s.Metadata.Tags = make(map[string]string, len(tags))
+			for k, v := range tags {
+				if sv, ok := v.(string); ok {
+					s.Metadata.Tags[k] = sv
+				}
+			}
+		}
 	}
 	if kids, ok := m["children"].([]any); ok {
 		for _, k := range kids {
