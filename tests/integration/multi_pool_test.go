@@ -17,14 +17,14 @@ package integration
 //   4.  "start session in alpha"
 //   5.  "start session in beta"
 //   6.  "sessions are isolated"
-//   7.  "concurrent operations"
+//   7.  "concurrent operations on separate pools"
 //   8.  "destroy alpha"
 //   9.  "beta unaffected by alpha destroy"
 //  10.  "alpha sessions gone after destroy"
 
 import (
-	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -53,7 +53,6 @@ func TestMultiPool(t *testing.T) {
 	})
 
 	t.Run("pools lists both", func(t *testing.T) {
-		// Both pools should appear in the shared registry
 		resp := alpha.runJSON("pools")
 		pools, ok := resp["pools"].([]any)
 		if !ok {
@@ -91,35 +90,57 @@ func TestMultiPool(t *testing.T) {
 	})
 
 	t.Run("sessions are isolated", func(t *testing.T) {
-		// Alpha's ls should only show alpha's sessions
+		// Alpha's ls should show alpha's session and NOT beta's
 		alphaSessions := alpha.listSessions()
+		alphaFound := false
 		for _, s := range alphaSessions {
+			if s.SessionID == alphaSession {
+				alphaFound = true
+			}
 			if s.SessionID == betaSession {
 				t.Fatal("alpha should not see beta's sessions")
 			}
 		}
+		if !alphaFound {
+			t.Fatal("alpha's own session missing from its list")
+		}
 
-		// Beta's ls should only show beta's sessions
+		// Beta's ls should show beta's session and NOT alpha's
 		betaSessions := beta.listSessions()
+		betaFound := false
 		for _, s := range betaSessions {
+			if s.SessionID == betaSession {
+				betaFound = true
+			}
 			if s.SessionID == alphaSession {
 				t.Fatal("beta should not see alpha's sessions")
 			}
 		}
+		if !betaFound {
+			t.Fatal("beta's own session missing from its list")
+		}
 
-		// Info on alpha's session from beta should fail
+		// Cross-pool info should fail
 		result := beta.run("info", "--session", alphaSession, "--json")
 		assertExitError(t, result)
 
-		// Info on beta's session from alpha should fail
 		result = alpha.run("info", "--session", betaSession, "--json")
 		assertExitError(t, result)
 	})
 
-	t.Run("concurrent operations", func(t *testing.T) {
-		// Send followups to both pools simultaneously
-		alpha.run("followup", "--session", alphaSession, "--prompt", "respond with exactly: alpha-concurrent")
-		beta.run("followup", "--session", betaSession, "--prompt", "respond with exactly: beta-concurrent")
+	t.Run("concurrent operations on separate pools", func(t *testing.T) {
+		// Send followups to both pools truly in parallel
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			alpha.run("followup", "--session", alphaSession, "--prompt", "respond with exactly: alpha-concurrent")
+		}()
+		go func() {
+			defer wg.Done()
+			beta.run("followup", "--session", betaSession, "--prompt", "respond with exactly: beta-concurrent")
+		}()
+		wg.Wait()
 
 		alphaResp := alpha.waitForIdle(alphaSession, 300*time.Second)
 		betaResp := beta.waitForIdle(betaSession, 300*time.Second)
@@ -134,7 +155,6 @@ func TestMultiPool(t *testing.T) {
 	})
 
 	t.Run("beta unaffected by alpha destroy", func(t *testing.T) {
-		// Beta should still be fully functional
 		result := beta.run("ping")
 		assertExitOK(t, result)
 
@@ -143,22 +163,18 @@ func TestMultiPool(t *testing.T) {
 			t.Fatalf("expected beta size 1, got %v", numVal(health, "size"))
 		}
 
-		// Beta's session should still be accessible
 		info := beta.getSessionInfo(betaSession)
 		assertStatus(t, info, "idle")
 
-		// Followup still works
 		resp := beta.runJSON("followup", "--session", betaSession,
 			"--prompt", "respond with exactly: beta-still-alive", "--block")
 		assertContains(t, strVal(resp, "content"), "beta-still-alive")
 	})
 
 	t.Run("alpha sessions gone after destroy", func(t *testing.T) {
-		// Alpha commands should fail — daemon is dead
 		result := alpha.run("ping")
 		assertExitError(t, result)
 
-		// Pools should show alpha as stopped
 		poolsResp := beta.runJSON("pools")
 		pools, _ := poolsResp["pools"].([]any)
 		for _, p := range pools {
@@ -171,6 +187,4 @@ func TestMultiPool(t *testing.T) {
 			}
 		}
 	})
-
-	_ = fmt.Sprint() // keep fmt import for newNamedPool path building
 }
