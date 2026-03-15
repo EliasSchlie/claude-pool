@@ -2,17 +2,24 @@ package integration
 
 // helpers_test.go — Shared test infrastructure
 //
-// Two pool types for two kinds of tests:
+// Single pool type for all tests:
 //
-//   cliPool — For tests that exercise the CLI (pool, session, slots, offload, parent_child).
-//     Setup: build daemon + CLI binaries, run `init` via CLI, which starts the daemon.
+//   pool — All operations go through CLI commands, just like production.
+//     Setup: build daemon + CLI binaries, run `init` via CLI (which starts the daemon).
 //     Operations: run CLI commands as subprocesses, parse JSON output.
 //     Waiting: poll `info --json` for status, use `wait` CLI command for idle.
 //
-//   testPool — For tests that need raw socket access (attach, subscribe).
-//     Setup: start daemon directly, connect socket, send init.
-//     Operations: send JSON messages on socket, read responses.
-//     Kept because attach and subscribe are API-only features not exposed in the CLI.
+//   For API-only features (attach, subscribe), pool.dial() opens a raw socket
+//   connection to the daemon for direct JSON messaging.
+//
+// Isolation:
+//
+//   Each test gets its own directory under ~/.cache/claude-pool-tests/:
+//     <testDir>/.claude-pool/   ← CLAUDE_POOL_HOME (registry, pool data)
+//     <testDir>/workdir/        ← session spawn directory
+//
+//   CLAUDE_POOL_HOME mirrors the production ~/.claude-pool/ structure.
+//   CLAUDE_POOL_DAEMON tells the CLI where to find the daemon binary.
 
 import (
 	"bufio"
@@ -23,7 +30,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -161,16 +167,14 @@ var (
 )
 
 // ====================================================================
-// CLI-based pool (for pool, session, slots, offload, parent_child tests)
+// Pool — all operations go through CLI commands
 // ====================================================================
 
-type cliPool struct {
-	t            *testing.T
-	poolDir      string
-	poolName     string
-	registryPath string
-	cliBin       string
-	daemonBin    string
+type pool struct {
+	t       *testing.T
+	name    string
+	homeDir string // CLAUDE_POOL_HOME
+	workDir string // session spawn directory
 }
 
 type cmdResult struct {
@@ -179,213 +183,70 @@ type cmdResult struct {
 	ExitCode int
 }
 
-// setupCLIPool creates a pool via CLI init: starts the daemon, initializes
-// the pool, and returns a cliPool ready for CLI commands.
-func setupCLIPool(t *testing.T, size int) *cliPool {
+// newPool creates the directory structure but does NOT init.
+// For tests that need to control init timing (e.g., TestPool).
+func newPool(t *testing.T) *pool {
 	t.Helper()
 
-	poolDir := filepath.Join(runDir, t.Name())
-	if err := os.MkdirAll(poolDir, 0755); err != nil {
-		t.Fatalf("failed to create pool dir: %v", err)
+	testDir := filepath.Join(runDir, t.Name())
+	cpHome := filepath.Join(testDir, ".claude-pool")
+	workDir := filepath.Join(testDir, "workdir")
+
+	if err := os.MkdirAll(cpHome, 0755); err != nil {
+		t.Fatalf("failed to create .claude-pool dir: %v", err)
+	}
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatalf("failed to create workdir: %v", err)
 	}
 
-	poolName := "test"
-
-	// Write registry so CLI can resolve pool name → socket
-	registryDir := filepath.Join(poolDir, "registry")
-	if err := os.MkdirAll(registryDir, 0755); err != nil {
-		t.Fatalf("failed to create registry dir: %v", err)
-	}
-	socketPath := filepath.Join(poolDir, "api.sock")
-	registry := Msg{poolName: Msg{"socket": socketPath}}
-	registryBytes, _ := json.Marshal(registry)
-	registryPath := filepath.Join(registryDir, "pools.json")
-	if err := os.WriteFile(registryPath, registryBytes, 0644); err != nil {
-		t.Fatalf("failed to write registry: %v", err)
+	p := &pool{
+		t:       t,
+		name:    "test",
+		homeDir: cpHome,
+		workDir: workDir,
 	}
 
-	// Write pool config
-	configPath := filepath.Join(poolDir, "config.json")
-	config := Msg{
-		"flags": "--dangerously-skip-permissions --model haiku",
-		"size":  size,
-	}
-	configBytes, _ := json.Marshal(config)
-	if err := os.WriteFile(configPath, configBytes, 0644); err != nil {
-		t.Fatalf("failed to write config: %v", err)
+	t.Cleanup(func() {
+		p.run("destroy", "--confirm")
+	})
+
+	return p
+}
+
+// setupPool creates a pool via CLI init and waits for all slots to become idle.
+func setupPool(t *testing.T, size int) *pool {
+	t.Helper()
+
+	p := newPool(t)
+
+	result := p.run("init", "--size", fmt.Sprintf("%d", size),
+		"--dir", p.workDir,
+		"--flags", "--dangerously-skip-permissions --model haiku")
+	if result.ExitCode != 0 {
+		t.Fatalf("init failed (exit %d): %s", result.ExitCode, result.Stderr)
 	}
 
-	p := &cliPool{
-		t:            t,
-		poolDir:      poolDir,
-		poolName:     poolName,
-		registryPath: registryPath,
-		cliBin:       cliBinPath,
-		daemonBin:    daemonBinPath,
-	}
-
-	// Start daemon process
-	daemon := exec.Command(daemonBinPath, "--pool-dir", poolDir)
-	daemon.Stdout = os.Stdout
-	daemon.Stderr = os.Stderr
-	if err := daemon.Start(); err != nil {
-		t.Fatalf("failed to start daemon: %v", err)
-	}
-
-	// Wait for socket to appear
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(socketPath); err == nil {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if _, err := os.Stat(socketPath); err != nil {
-		daemon.Process.Kill()
-		t.Fatalf("daemon socket never appeared at %s", socketPath)
-	}
-
-	// Init via CLI
-	initResult := p.run("init", "--size", fmt.Sprintf("%d", size))
-	if initResult.ExitCode != 0 {
-		daemon.Process.Kill()
-		t.Fatalf("init failed: %s", initResult.Stderr)
-	}
-
-	// Wait for all initial sessions to become idle
 	p.waitForIdleCount(size, 90*time.Second)
-
-	t.Cleanup(func() {
-		// Best-effort destroy via CLI
-		p.run("destroy", "--confirm")
-		daemon.Process.Kill()
-		daemon.Wait()
-	})
-
 	return p
-}
-
-// setupCLIDaemon starts the daemon but does NOT init. For tests that need
-// to control init timing (e.g., testing ping/config before init).
-func setupCLIDaemon(t *testing.T, size int) *cliPool {
-	t.Helper()
-
-	poolDir := filepath.Join(runDir, t.Name())
-	if err := os.MkdirAll(poolDir, 0755); err != nil {
-		t.Fatalf("failed to create pool dir: %v", err)
-	}
-
-	poolName := "test"
-	socketPath := filepath.Join(poolDir, "api.sock")
-
-	// Write registry
-	registryDir := filepath.Join(poolDir, "registry")
-	if err := os.MkdirAll(registryDir, 0755); err != nil {
-		t.Fatalf("failed to create registry dir: %v", err)
-	}
-	registry := Msg{poolName: Msg{"socket": socketPath}}
-	registryBytes, _ := json.Marshal(registry)
-	registryPath := filepath.Join(registryDir, "pools.json")
-	if err := os.WriteFile(registryPath, registryBytes, 0644); err != nil {
-		t.Fatalf("failed to write registry: %v", err)
-	}
-
-	// Write pool config
-	configPath := filepath.Join(poolDir, "config.json")
-	config := Msg{
-		"flags": "--dangerously-skip-permissions --model haiku",
-		"size":  size,
-	}
-	configBytes, _ := json.Marshal(config)
-	if err := os.WriteFile(configPath, configBytes, 0644); err != nil {
-		t.Fatalf("failed to write config: %v", err)
-	}
-
-	p := &cliPool{
-		t:            t,
-		poolDir:      poolDir,
-		poolName:     poolName,
-		registryPath: registryPath,
-		cliBin:       cliBinPath,
-		daemonBin:    daemonBinPath,
-	}
-
-	p.startDaemon()
-
-	t.Cleanup(func() {
-		p.run("destroy", "--confirm")
-		p.killDaemon()
-	})
-
-	return p
-}
-
-// startDaemon starts (or restarts) the daemon process and waits for the socket.
-func (p *cliPool) startDaemon() {
-	p.t.Helper()
-	socketPath := filepath.Join(p.poolDir, "api.sock")
-
-	daemon := exec.Command(p.daemonBin, "--pool-dir", p.poolDir)
-	daemon.Stdout = os.Stdout
-	daemon.Stderr = os.Stderr
-	if err := daemon.Start(); err != nil {
-		p.t.Fatalf("failed to start daemon: %v", err)
-	}
-
-	// Store for cleanup
-	p.setDaemon(daemon)
-
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(socketPath); err == nil {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	daemon.Process.Kill()
-	p.t.Fatalf("daemon socket never appeared at %s", socketPath)
-}
-
-// daemon tracking — stored separately since cliPool is value-oriented
-var daemonProcs sync.Map // poolDir → *exec.Cmd
-
-func (p *cliPool) setDaemon(cmd *exec.Cmd) {
-	daemonProcs.Store(p.poolDir, cmd)
-}
-
-func (p *cliPool) killDaemon() {
-	if v, ok := daemonProcs.Load(p.poolDir); ok {
-		cmd := v.(*exec.Cmd)
-		cmd.Process.Kill()
-		cmd.Wait()
-		daemonProcs.Delete(p.poolDir)
-	}
-}
-
-// awaitSocketGone polls until the socket file disappears.
-func (p *cliPool) awaitSocketGone(timeout time.Duration) {
-	p.t.Helper()
-	socketPath := filepath.Join(p.poolDir, "api.sock")
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(socketPath); os.IsNotExist(err) {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	p.t.Fatalf("socket still exists after %v", timeout)
 }
 
 // --- CLI execution ---
 
+func (p *pool) cliEnv() []string {
+	return append(os.Environ(),
+		"CLAUDE_POOL_HOME="+p.homeDir,
+		"CLAUDE_POOL_DAEMON="+daemonBinPath,
+	)
+}
+
 // run executes a CLI command with --pool prepended.
-func (p *cliPool) run(args ...string) cmdResult {
+func (p *pool) run(args ...string) cmdResult {
 	p.t.Helper()
 	return p.execCLI(nil, args...)
 }
 
 // runJSON executes a CLI command with --json and parses stdout.
-func (p *cliPool) runJSON(args ...string) Msg {
+func (p *pool) runJSON(args ...string) Msg {
 	p.t.Helper()
 	result := p.run(append(args, "--json")...)
 	if result.ExitCode != 0 {
@@ -399,7 +260,7 @@ func (p *cliPool) runJSON(args ...string) Msg {
 }
 
 // runInSession executes a CLI command with CLAUDE_POOL_SESSION_ID set.
-func (p *cliPool) runInSession(sessionID string, args ...string) cmdResult {
+func (p *pool) runInSession(sessionID string, args ...string) cmdResult {
 	p.t.Helper()
 	return p.execCLI([]string{
 		fmt.Sprintf("CLAUDE_POOL_SESSION_ID=%s", sessionID),
@@ -407,7 +268,7 @@ func (p *cliPool) runInSession(sessionID string, args ...string) cmdResult {
 }
 
 // runInSessionJSON is runInSession + JSON parsing.
-func (p *cliPool) runInSessionJSON(sessionID string, args ...string) Msg {
+func (p *pool) runInSessionJSON(sessionID string, args ...string) Msg {
 	p.t.Helper()
 	result := p.runInSession(sessionID, append(args, "--json")...)
 	if result.ExitCode != 0 {
@@ -420,14 +281,11 @@ func (p *cliPool) runInSessionJSON(sessionID string, args ...string) Msg {
 	return msg
 }
 
-func (p *cliPool) execCLI(extraEnv []string, args ...string) cmdResult {
+func (p *pool) execCLI(extraEnv []string, args ...string) cmdResult {
 	p.t.Helper()
-	fullArgs := append([]string{"--pool", p.poolName}, args...)
-	cmd := exec.Command(p.cliBin, fullArgs...)
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("CLAUDE_POOL_REGISTRY=%s", p.registryPath),
-	)
-	cmd.Env = append(cmd.Env, extraEnv...)
+	fullArgs := append([]string{"--pool", p.name}, args...)
+	cmd := exec.Command(cliBinPath, fullArgs...)
+	cmd.Env = append(p.cliEnv(), extraEnv...)
 
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -453,7 +311,7 @@ func (p *cliPool) execCLI(extraEnv []string, args ...string) cmdResult {
 // --- Waiting helpers (CLI-based) ---
 
 // waitForStatus polls `info --json` until the session reaches the target status.
-func (p *cliPool) waitForStatus(sessionID, target string, timeout time.Duration) SessionInfo {
+func (p *pool) waitForStatus(sessionID, target string, timeout time.Duration) SessionInfo {
 	p.t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -471,14 +329,13 @@ func (p *cliPool) waitForStatus(sessionID, target string, timeout time.Duration)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	// Final check for error message
 	result := p.run("info", "--session", sessionID, "--json")
 	p.t.Fatalf("waitForStatus(%s, %q): timed out after %v\nlast info: %s", sessionID, target, timeout, result.Stdout)
 	return SessionInfo{}
 }
 
 // waitForIdle uses the CLI wait command.
-func (p *cliPool) waitForIdle(sessionID string, timeout time.Duration) Msg {
+func (p *pool) waitForIdle(sessionID string, timeout time.Duration) Msg {
 	p.t.Helper()
 	result := p.run("wait", "--session", sessionID, "--timeout", fmt.Sprintf("%d", timeout.Milliseconds()), "--json")
 	if result.ExitCode != 0 {
@@ -492,7 +349,7 @@ func (p *cliPool) waitForIdle(sessionID string, timeout time.Duration) Msg {
 }
 
 // waitForIdleCount polls health until at least n sessions are idle.
-func (p *cliPool) waitForIdleCount(n int, timeout time.Duration) {
+func (p *pool) waitForIdleCount(n int, timeout time.Duration) {
 	p.t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -515,7 +372,7 @@ func (p *cliPool) waitForIdleCount(n int, timeout time.Duration) {
 }
 
 // waitForPoolSize polls health until the pool reaches the target slot count.
-func (p *cliPool) waitForPoolSize(target int, timeout time.Duration) {
+func (p *pool) waitForPoolSize(target int, timeout time.Duration) {
 	p.t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -535,8 +392,41 @@ func (p *cliPool) waitForPoolSize(target int, timeout time.Duration) {
 	p.t.Fatalf("waitForPoolSize(%d): timed out after %v", target, timeout)
 }
 
+// waitForPendingInput polls info until pendingInput matches.
+func (p *pool) waitForPendingInput(sessionID string, match func(string) bool, timeout time.Duration) string {
+	p.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		info := p.getSessionInfo(sessionID)
+		if match(info.PendingInput) {
+			return info.PendingInput
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	info := p.getSessionInfo(sessionID)
+	p.t.Fatalf("waitForPendingInput(%s): timed out after %v, pendingInput was %q",
+		sessionID, timeout, info.PendingInput)
+	return ""
+}
+
+// awaitSocketGone polls until the pool's socket file disappears.
+func (p *pool) awaitSocketGone(timeout time.Duration) {
+	p.t.Helper()
+	socketPath := filepath.Join(p.homeDir, p.name, "api.sock")
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	p.t.Fatalf("socket still exists after %v", timeout)
+}
+
+// --- Convenience helpers ---
+
 // getSessionInfo runs info --json and returns parsed session.
-func (p *cliPool) getSessionInfo(sessionID string) SessionInfo {
+func (p *pool) getSessionInfo(sessionID string) SessionInfo {
 	p.t.Helper()
 	resp := p.runJSON("info", "--session", sessionID)
 	session, ok := resp["session"].(map[string]any)
@@ -547,7 +437,7 @@ func (p *cliPool) getSessionInfo(sessionID string) SessionInfo {
 }
 
 // getHealth runs health --json and returns the health object.
-func (p *cliPool) getHealth() Msg {
+func (p *pool) getHealth() Msg {
 	p.t.Helper()
 	resp := p.runJSON("health")
 	health, ok := resp["health"].(map[string]any)
@@ -558,7 +448,7 @@ func (p *cliPool) getHealth() Msg {
 }
 
 // listSessions runs ls --json with optional args and returns parsed sessions.
-func (p *cliPool) listSessions(args ...string) []SessionInfo {
+func (p *pool) listSessions(args ...string) []SessionInfo {
 	p.t.Helper()
 	fullArgs := append([]string{"ls"}, args...)
 	resp := p.runJSON(fullArgs...)
@@ -566,317 +456,90 @@ func (p *cliPool) listSessions(args ...string) []SessionInfo {
 }
 
 // ====================================================================
-// Socket-based pool (for attach and subscribe tests)
+// Socket connection — for API-only features (attach, subscribe)
 // ====================================================================
 
-type testPool struct {
+type socketConn struct {
 	t          *testing.T
-	dir        string
-	binPath    string
-	socketPath string
 	conn       net.Conn
 	scanner    *bufio.Scanner
-	daemon     *exec.Cmd
+	socketPath string
 	nextID     atomic.Int64
 }
 
-// setupPool builds the daemon, starts it, calls init, and returns a connected testPool.
-func setupPool(t *testing.T, size int) *testPool {
-	t.Helper()
-	p := setupDaemon(t, size)
-
-	resp := p.send(Msg{"type": "init", "size": size})
-	if resp["type"] == "error" {
-		t.Fatalf("init failed: %v", resp["error"])
+// dial opens a socket connection to the pool's API socket.
+func (p *pool) dial() *socketConn {
+	p.t.Helper()
+	socketPath := filepath.Join(p.homeDir, p.name, "api.sock")
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		p.t.Fatalf("failed to connect to socket %s: %v", socketPath, err)
 	}
-
-	return p
-}
-
-// setupDaemon starts a daemon but does NOT call init.
-func setupDaemon(t *testing.T, size int) *testPool {
-	t.Helper()
-
-	poolDir := filepath.Join(runDir, t.Name())
-	if err := os.MkdirAll(poolDir, 0755); err != nil {
-		t.Fatalf("failed to create pool dir: %v", err)
-	}
-	socketPath := filepath.Join(poolDir, "api.sock")
-
-	configPath := filepath.Join(poolDir, "config.json")
-	config := Msg{
-		"flags": "--dangerously-skip-permissions --model haiku",
-		"size":  size,
-	}
-	configBytes, _ := json.Marshal(config)
-	if err := os.WriteFile(configPath, configBytes, 0644); err != nil {
-		t.Fatalf("failed to write config: %v", err)
-	}
-
-	p := &testPool{
-		t:          t,
-		dir:        poolDir,
-		binPath:    daemonBinPath,
+	sc := &socketConn{
+		t:          p.t,
+		conn:       conn,
+		scanner:    bufio.NewScanner(conn),
 		socketPath: socketPath,
 	}
-
-	p.startDaemon()
-
-	t.Cleanup(func() {
-		p.send(Msg{"type": "destroy", "confirm": true})
-		p.conn.Close()
-		if p.daemon != nil && p.daemon.Process != nil {
-			p.daemon.Process.Kill()
-		}
-	})
-
-	return p
+	p.t.Cleanup(func() { conn.Close() })
+	return sc
 }
 
-func (p *testPool) startDaemon() {
-	p.t.Helper()
-
-	daemon := exec.Command(p.binPath, "--pool-dir", p.dir)
-	daemon.Stdout = os.Stdout
-	daemon.Stderr = os.Stderr
-	if err := daemon.Start(); err != nil {
-		p.t.Fatalf("failed to start daemon: %v", err)
-	}
-	p.daemon = daemon
-
-	daemonDied := make(chan struct{})
-	go func() {
-		daemon.Wait()
-		close(daemonDied)
-	}()
-
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(p.socketPath); err == nil {
-			break
-		}
-		select {
-		case <-daemonDied:
-			p.t.Fatalf("daemon exited before socket appeared")
-		default:
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if _, err := os.Stat(p.socketPath); err != nil {
-		daemon.Process.Kill()
-		p.t.Fatalf("daemon socket never appeared at %s", p.socketPath)
-	}
-
-	conn, err := net.Dial("unix", p.socketPath)
-	if err != nil {
-		daemon.Process.Kill()
-		p.t.Fatalf("failed to connect to daemon socket: %v", err)
-	}
-	p.conn = conn
-	p.scanner = bufio.NewScanner(conn)
+func (sc *socketConn) send(msg Msg) Msg {
+	sc.t.Helper()
+	msg["id"] = int(sc.nextID.Add(1))
+	return sc.doSend(sc.conn, sc.scanner, msg, 10*time.Second)
 }
 
-func (p *testPool) send(msg Msg) Msg {
-	p.t.Helper()
-	msg["id"] = int(p.nextID.Add(1))
-	return p.doSend(p.conn, p.scanner, msg, 10*time.Second)
+func (sc *socketConn) sendLong(msg Msg, readTimeout time.Duration) Msg {
+	sc.t.Helper()
+	msg["id"] = int(sc.nextID.Add(1))
+	return sc.doSend(sc.conn, sc.scanner, msg, readTimeout)
 }
 
-func (p *testPool) sendLong(msg Msg, readTimeout time.Duration) Msg {
-	p.t.Helper()
-	msg["id"] = int(p.nextID.Add(1))
-	return p.doSend(p.conn, p.scanner, msg, readTimeout)
-}
-
-func (p *testPool) doSend(conn net.Conn, scanner *bufio.Scanner, msg Msg, readTimeout time.Duration) Msg {
-	p.t.Helper()
+func (sc *socketConn) doSend(conn net.Conn, scanner *bufio.Scanner, msg Msg, readTimeout time.Duration) Msg {
+	sc.t.Helper()
 
 	data, err := json.Marshal(msg)
 	if err != nil {
-		p.t.Fatalf("marshal: %v", err)
+		sc.t.Fatalf("marshal: %v", err)
 	}
 	data = append(data, '\n')
 
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if _, err := conn.Write(data); err != nil {
-		p.t.Fatalf("write: %v", err)
+		sc.t.Fatalf("write: %v", err)
 	}
 
 	conn.SetReadDeadline(time.Now().Add(readTimeout))
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {
-			p.t.Fatalf("read: %v", err)
+			sc.t.Fatalf("read: %v", err)
 		}
-		p.t.Fatal("connection closed while reading response")
+		sc.t.Fatal("connection closed while reading response")
 	}
 
 	var resp Msg
 	if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
-		p.t.Fatalf("unmarshal response: %v\nraw: %s", err, scanner.Text())
+		sc.t.Fatalf("unmarshal response: %v\nraw: %s", err, scanner.Text())
 	}
 	return resp
 }
 
-func (p *testPool) newConn() (net.Conn, *bufio.Scanner) {
-	p.t.Helper()
-	conn, err := net.Dial("unix", p.socketPath)
+func (sc *socketConn) newConn() (net.Conn, *bufio.Scanner) {
+	sc.t.Helper()
+	conn, err := net.Dial("unix", sc.socketPath)
 	if err != nil {
-		p.t.Fatalf("failed to open new connection: %v", err)
+		sc.t.Fatalf("failed to open new connection: %v", err)
 	}
-	p.t.Cleanup(func() { conn.Close() })
+	sc.t.Cleanup(func() { conn.Close() })
 	return conn, bufio.NewScanner(conn)
 }
 
-func (p *testPool) sendOn(conn net.Conn, scanner *bufio.Scanner, msg Msg) Msg {
-	p.t.Helper()
-	msg["id"] = int(p.nextID.Add(1))
-	return p.doSend(conn, scanner, msg, 10*time.Second)
-}
-
-// awaitStatus uses subscribe to wait for a session to reach a target status.
-func (p *testPool) awaitStatus(sessionID, target string, timeout time.Duration) SessionInfo {
-	p.t.Helper()
-
-	sub := p.subscribe(Msg{
-		"sessions": []string{sessionID},
-		"events":   []string{"status"},
-		"statuses": []string{target},
-	})
-	defer sub.close()
-
-	resp := p.send(Msg{"type": "info", "sessionId": sessionID})
-	if resp["type"] == "error" {
-		p.t.Fatalf("awaitStatus info failed: %v", resp["error"])
-	}
-	info := parseSession(p.t, resp["session"])
-	if info.Status == target {
-		return info
-	}
-
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		ev, ok := sub.nextWithin(time.Until(deadline))
-		if !ok {
-			break
-		}
-		if strVal(ev, "sessionId") == sessionID && strVal(ev, "status") == target {
-			resp = p.send(Msg{"type": "info", "sessionId": sessionID})
-			if resp["type"] == "error" {
-				p.t.Fatalf("awaitStatus info failed: %v", resp["error"])
-			}
-			return parseSession(p.t, resp["session"])
-		}
-	}
-
-	resp = p.send(Msg{"type": "info", "sessionId": sessionID})
-	info = parseSession(p.t, resp["session"])
-	p.t.Fatalf("awaitStatus(%s, %q): timed out after %v, last status was %q",
-		sessionID, target, timeout, info.Status)
-	return SessionInfo{}
-}
-
-func (p *testPool) awaitIdleCount(n int, timeout time.Duration) {
-	p.t.Helper()
-
-	sub := p.subscribe(Msg{"events": []string{"status"}, "statuses": []string{"idle"}})
-	defer sub.close()
-
-	resp := p.send(Msg{"type": "health"})
-	health, _ := resp["health"].(map[string]any)
-	counts, _ := health["counts"].(map[string]any)
-	if int(numVal(counts, "idle")) >= n {
-		return
-	}
-
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		_, ok := sub.nextWithin(time.Until(deadline))
-		if !ok {
-			break
-		}
-		resp = p.send(Msg{"type": "health"})
-		health, _ = resp["health"].(map[string]any)
-		counts, _ = health["counts"].(map[string]any)
-		if int(numVal(counts, "idle")) >= n {
-			return
-		}
-	}
-	p.t.Fatalf("awaitIdleCount(%d): timed out after %v", n, timeout)
-}
-
-func (p *testPool) awaitPoolSize(target int, timeout time.Duration) {
-	p.t.Helper()
-
-	sub := p.subscribe(Msg{"events": []string{"pool"}})
-	defer sub.close()
-
-	resp := p.send(Msg{"type": "health"})
-	health, _ := resp["health"].(map[string]any)
-	if int(numVal(health, "size")) == target {
-		return
-	}
-
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		_, ok := sub.nextWithin(time.Until(deadline))
-		if !ok {
-			break
-		}
-		resp = p.send(Msg{"type": "health"})
-		health, _ = resp["health"].(map[string]any)
-		if int(numVal(health, "size")) == target {
-			return
-		}
-	}
-	p.t.Fatalf("awaitPoolSize(%d): timed out after %v", target, timeout)
-}
-
-func (p *testPool) awaitPendingInputSet(sessionID string, timeout time.Duration) string {
-	p.t.Helper()
-	return p.awaitPendingInput(sessionID, func(v string) bool { return v != "" }, timeout)
-}
-
-func (p *testPool) awaitPendingInputClear(sessionID string, timeout time.Duration) {
-	p.t.Helper()
-	p.awaitPendingInput(sessionID, func(v string) bool { return v == "" }, timeout)
-}
-
-func (p *testPool) awaitPendingInput(sessionID string, match func(string) bool, timeout time.Duration) string {
-	p.t.Helper()
-
-	sub := p.subscribe(Msg{
-		"sessions": []string{sessionID},
-		"events":   []string{"updated"},
-		"fields":   []string{"pendingInput"},
-	})
-	defer sub.close()
-
-	resp := p.send(Msg{"type": "info", "sessionId": sessionID})
-	if resp["type"] == "error" {
-		p.t.Fatalf("awaitPendingInput info failed: %v", resp["error"])
-	}
-	info := parseSession(p.t, resp["session"])
-	if match(info.PendingInput) {
-		return info.PendingInput
-	}
-
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		ev, ok := sub.nextWithin(time.Until(deadline))
-		if !ok {
-			break
-		}
-		val := strVal(ev, "pendingInput")
-		if match(val) {
-			return val
-		}
-	}
-
-	resp = p.send(Msg{"type": "info", "sessionId": sessionID})
-	info = parseSession(p.t, resp["session"])
-	p.t.Fatalf("awaitPendingInput(%s): timed out after %v, pendingInput was %q",
-		sessionID, timeout, info.PendingInput)
-	return ""
+func (sc *socketConn) sendOn(conn net.Conn, scanner *bufio.Scanner, msg Msg) Msg {
+	sc.t.Helper()
+	msg["id"] = int(sc.nextID.Add(1))
+	return sc.doSend(conn, scanner, msg, 10*time.Second)
 }
 
 // --- Subscribe ---
@@ -889,19 +552,19 @@ type subscription struct {
 
 func (s *subscription) close() { s.conn.Close() }
 
-func (p *testPool) subscribe(opts Msg) *subscription {
-	p.t.Helper()
+func (sc *socketConn) subscribe(opts Msg) *subscription {
+	sc.t.Helper()
 	opts["type"] = "subscribe"
-	conn, scanner := p.newConn()
+	conn, scanner := sc.newConn()
 
 	data, _ := json.Marshal(opts)
 	data = append(data, '\n')
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if _, err := conn.Write(data); err != nil {
-		p.t.Fatalf("subscribe write: %v", err)
+		sc.t.Fatalf("subscribe write: %v", err)
 	}
 
-	return &subscription{t: p.t, conn: conn, scanner: scanner}
+	return &subscription{t: sc.t, conn: conn, scanner: scanner}
 }
 
 func (s *subscription) resubscribe(opts Msg) {

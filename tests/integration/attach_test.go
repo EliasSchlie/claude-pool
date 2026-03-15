@@ -9,8 +9,8 @@ package integration
 // while attached, and pipe lifecycle (eviction closes pipe, re-attach
 // after restore).
 //
-// Attach is an API-only feature (not exposed in CLI), so this test uses
-// the socket API directly.
+// Attach is an API-only feature (not exposed in CLI). The pool is created
+// via CLI init, then pool.dial() opens a socket connection for API commands.
 //
 // Flow:
 //
@@ -34,7 +34,8 @@ import (
 )
 
 func TestAttach(t *testing.T) {
-	pool := setupPool(t, 2)
+	p := setupPool(t, 2)
+	sc := p.dial()
 
 	var s1 string
 	var attachConn net.Conn
@@ -46,18 +47,17 @@ func TestAttach(t *testing.T) {
 	})
 
 	t.Run("start and pin session", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "start", "prompt": "respond with exactly: attach-init"})
-		assertNotError(t, resp)
+		resp := p.runJSON("start", "--prompt", "respond with exactly: attach-init")
 		s1 = strVal(resp, "sessionId")
-		pool.awaitStatus(s1, "idle", 60*time.Second)
+		p.waitForStatus(s1, "idle", 60*time.Second)
 
 		// Pin to prevent eviction during attach tests
-		pinResp := pool.send(Msg{"type": "set", "sessionId": s1, "pinned": 300})
+		pinResp := sc.send(Msg{"type": "set", "sessionId": s1, "pinned": 300})
 		assertNotError(t, pinResp)
 	})
 
 	t.Run("attach to idle session", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "attach", "sessionId": s1})
+		resp := sc.send(Msg{"type": "attach", "sessionId": s1})
 		assertNotError(t, resp)
 		assertType(t, resp, "attached")
 
@@ -97,14 +97,14 @@ func TestAttach(t *testing.T) {
 		if _, err := attachConn.Write([]byte("hello")); err != nil {
 			t.Fatalf("write to attach socket: %v", err)
 		}
-		pool.awaitPendingInputSet(s1, 10*time.Second)
+		p.waitForPendingInput(s1, func(v string) bool { return v != "" }, 10*time.Second)
 	})
 
 	t.Run("clearing input clears pendingInput", func(t *testing.T) {
 		if _, err := attachConn.Write([]byte("\x15")); err != nil {
 			t.Fatalf("write Ctrl-U: %v", err)
 		}
-		pool.awaitPendingInputClear(s1, 10*time.Second)
+		p.waitForPendingInput(s1, func(v string) bool { return v == "" }, 10*time.Second)
 	})
 
 	t.Run("submit via attach triggers processing and completes", func(t *testing.T) {
@@ -112,10 +112,10 @@ func TestAttach(t *testing.T) {
 			t.Fatalf("write prompt: %v", err)
 		}
 
-		pool.awaitStatus(s1, "processing", 15*time.Second)
-		pool.awaitStatus(s1, "idle", 30*time.Second)
+		p.waitForStatus(s1, "processing", 15*time.Second)
+		p.waitForStatus(s1, "idle", 30*time.Second)
 
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "detail": "last"})
+		resp := sc.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "detail": "last"})
 		assertNotError(t, resp)
 		assertContains(t, strVal(resp, "content"), "attach-test-output")
 	})
@@ -123,13 +123,13 @@ func TestAttach(t *testing.T) {
 	t.Run("followup via API while attached", func(t *testing.T) {
 		drainAttach(attachConn)
 
-		resp := pool.send(Msg{
+		resp := sc.send(Msg{
 			"type": "followup", "sessionId": s1,
 			"prompt": "respond with exactly: followup-while-attached",
 		})
 		assertNotError(t, resp)
 
-		pool.awaitStatus(s1, "processing", 15*time.Second)
+		p.waitForStatus(s1, "processing", 15*time.Second)
 
 		buf := make([]byte, 8192)
 		attachConn.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -141,28 +141,28 @@ func TestAttach(t *testing.T) {
 			t.Fatal("expected terminal output from followup on attach pipe")
 		}
 
-		pool.awaitStatus(s1, "idle", 30*time.Second)
+		p.waitForStatus(s1, "idle", 30*time.Second)
 
-		captureResp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "detail": "last"})
+		captureResp := sc.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "detail": "last"})
 		assertNotError(t, captureResp)
 		assertContains(t, strVal(captureResp, "content"), "followup-while-attached")
 	})
 
 	t.Run("eviction closes attach pipe", func(t *testing.T) {
 		// Unpin s1 so it can be evicted
-		pool.send(Msg{"type": "set", "sessionId": s1, "pinned": false})
+		sc.send(Msg{"type": "set", "sessionId": s1, "pinned": false})
 
 		// Start a new session to use the other fresh slot
-		r := pool.send(Msg{"type": "start", "prompt": "respond with exactly: filler"})
+		r := sc.send(Msg{"type": "start", "prompt": "respond with exactly: filler"})
 		assertNotError(t, r)
 		sNew := strVal(r, "sessionId")
-		pool.awaitStatus(sNew, "idle", 60*time.Second)
+		p.waitForStatus(sNew, "idle", 60*time.Second)
 
 		// Now both slots are full (s1 + sNew). Start another → s1 (LRU) gets evicted.
-		r2 := pool.send(Msg{"type": "start", "prompt": "respond with exactly: evict-trigger"})
+		r2 := sc.send(Msg{"type": "start", "prompt": "respond with exactly: evict-trigger"})
 		assertNotError(t, r2)
 
-		pool.awaitStatus(s1, "offloaded", 15*time.Second)
+		p.waitForStatus(s1, "offloaded", 15*time.Second)
 
 		// Drain residual PTY output before expecting EOF
 		buf := make([]byte, 4096)
@@ -179,20 +179,18 @@ func TestAttach(t *testing.T) {
 	})
 
 	t.Run("attach fails on offloaded session", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "attach", "sessionId": s1})
+		resp := sc.send(Msg{"type": "attach", "sessionId": s1})
 		assertError(t, resp)
 	})
 
 	t.Run("restore and re-attach", func(t *testing.T) {
-		// Restore s1 via followup (triggers load from offloaded state)
-		resp := pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: restored"})
+		resp := sc.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: restored"})
 		assertNotError(t, resp)
-		pool.awaitStatus(s1, "idle", 60*time.Second)
+		p.waitForStatus(s1, "idle", 60*time.Second)
 
-		// Pin to keep it loaded
-		pool.send(Msg{"type": "set", "sessionId": s1, "pinned": 300})
+		sc.send(Msg{"type": "set", "sessionId": s1, "pinned": 300})
 
-		attachResp := pool.send(Msg{"type": "attach", "sessionId": s1})
+		attachResp := sc.send(Msg{"type": "attach", "sessionId": s1})
 		assertNotError(t, attachResp)
 		assertType(t, attachResp, "attached")
 

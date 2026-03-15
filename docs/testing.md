@@ -18,9 +18,15 @@ Co-located with source (Go convention, `package pool`). For pure logic that does
 go test ./internal/pool/ -v
 ```
 
-### API Integration Tests (`tests/integration/`)
+### Integration Tests (`tests/integration/`)
 
-Test the daemon's behavior through the socket API with real Claude sessions. Raw JSON over Unix socket — no CLI involved. Flow-based: each file initializes a pool and walks through a sequence of operations.
+Test end-to-end behavior through the CLI with real Claude sessions. Each test runs
+`claude-pool-cli init` — the same command a real user would run. No manual daemon
+start, no hand-written config, no synthetic registry.
+
+Isolation via `CLAUDE_POOL_HOME` env var: each test gets its own directory that mirrors
+production's `~/.claude-pool/` structure. API-only features (attach, subscribe) use a
+socket connection opened after CLI init.
 
 See [tests/integration/CLAUDE.md](../tests/integration/CLAUDE.md) for philosophy, file listing, and guidelines.
 
@@ -32,10 +38,10 @@ See [tests/cli/CLAUDE.md](../tests/cli/CLAUDE.md) for philosophy and file listin
 
 ## Test Pool Config
 
-Integration tests use `--model haiku` to minimize API costs:
+Integration tests use `--model haiku` to minimize API costs, passed via `--flags` on init:
 
-```go
-config set flags "--dangerously-skip-permissions --model haiku"
+```
+claude-pool-cli init --size 2 --flags "--dangerously-skip-permissions --model haiku"
 ```
 
 ## Claude Code Constraints
