@@ -22,7 +22,7 @@ func (m *Manager) saveOffloadMeta(s *Session) {
 	meta := map[string]any{
 		"sessionId":  s.ID,
 		"claudeUUID": s.ClaudeUUID,
-		"parentId":   s.ParentID,
+		"parent":     s.ParentID,
 		"priority":   s.Priority,
 		"spawnCwd":   s.SpawnCwd,
 		"cwd":        s.Cwd,
@@ -51,7 +51,7 @@ func (m *Manager) savePoolState() {
 			"sessionId":  s.ID,
 			"claudeUUID": s.ClaudeUUID,
 			"status":     s.Status,
-			"parentId":   s.ParentID,
+			"parent":     s.ParentID,
 			"priority":   s.Priority,
 			"spawnCwd":   s.SpawnCwd,
 			"cwd":        s.Cwd,
@@ -135,7 +135,7 @@ func (m *Manager) sessionFromMap(sm map[string]any) *Session {
 	s := &Session{
 		ID:         sid,
 		ClaudeUUID: strVal(sm, "claudeUUID"),
-		ParentID:   strVal(sm, "parentId"),
+		ParentID:   coalesce(strVal(sm, "parent"), strVal(sm, "parentId")),
 		Priority:   numVal(sm, "priority"),
 		SpawnCwd:   strVal(sm, "spawnCwd"),
 		Cwd:        strVal(sm, "cwd"),

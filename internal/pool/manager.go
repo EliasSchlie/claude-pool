@@ -128,6 +128,8 @@ func (m *Manager) Handle(conn net.Conn, req api.Msg) api.Msg {
 		return m.handleArchive(id, req)
 	case "unarchive":
 		return m.handleUnarchive(id, req)
+	case "set":
+		return m.handleSet(id, req)
 	case "pin":
 		return m.handlePin(id, req)
 	case "unpin":
@@ -140,6 +142,12 @@ func (m *Manager) Handle(conn net.Conn, req api.Msg) api.Msg {
 		return m.handleResize(id, req)
 	case "input":
 		return m.handleInput(id, req)
+	case "debug-slots":
+		return m.handleDebugSlots(id)
+	case "debug-capture":
+		return m.handleDebugCapture(id, req)
+	case "debug-logs":
+		return m.handleDebugLogs(id, req)
 	case "attach":
 		return m.handleAttach(id, req)
 	case "subscribe":
@@ -183,6 +191,15 @@ func configToMsg(cfg Config) api.Msg {
 		m["flags"] = cfg.Flags
 	}
 	return m
+}
+
+func coalesce(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func strVal(m map[string]any, key string) string {

@@ -1,12 +1,22 @@
 package pool
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"time"
 
 	"github.com/EliasSchlie/claude-pool/internal/api"
 )
+
+// parentFromReq reads the parent field with backward compat fallback.
+func parentFromReq(req api.Msg) string {
+	if v, _ := req["parent"].(string); v != "" {
+		return v
+	}
+	v, _ := req["parentId"].(string)
+	return v
+}
 
 // --- Config ---
 
@@ -176,7 +186,7 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 	if prompt == "" {
 		return api.ErrorResponse(id, "prompt is required")
 	}
-	parentID, _ := req["parentId"].(string)
+	parentID := parentFromReq(req)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -218,7 +228,7 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 		m.startWatchers(s, proc)
 		m.broadcastEvent(api.Msg{
 			"type": "event", "event": "created",
-			"sessionId": s.ID, "status": StatusProcessing, "parentId": s.ParentID,
+			"sessionId": s.ID, "status": StatusProcessing, "parent": s.ParentID,
 		})
 		m.savePoolState()
 		return api.Response(id, "started", api.Msg{
@@ -234,7 +244,7 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 	m.queue = append(m.queue, s)
 	m.broadcastEvent(api.Msg{
 		"type": "event", "event": "created",
-		"sessionId": s.ID, "status": s.Status, "parentId": s.ParentID,
+		"sessionId": s.ID, "status": s.Status, "parent": s.ParentID,
 	})
 
 	m.tryDequeueWithEviction(s, "")
@@ -377,6 +387,7 @@ func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 
 func (m *Manager) handleWait(id any, req api.Msg) api.Msg {
 	sessionID, _ := req["sessionId"].(string)
+	parentFilter := parentFromReq(req)
 	timeoutMs := 300000.0
 	if t, ok := req["timeout"].(float64); ok {
 		timeoutMs = t
@@ -388,13 +399,17 @@ func (m *Manager) handleWait(id any, req api.Msg) api.Msg {
 	m.mu.Lock()
 
 	if sessionID == "" {
-		// Pick the most recently created busy user session (not pre-warmed)
+		// Find the most recently created busy session matching the filter
 		var busySession *Session
 		for _, s := range m.sessions {
 			if s.PreWarmed {
 				continue
 			}
 			if s.Status == StatusProcessing || s.Status == StatusQueued || s.Status == StatusFresh {
+				// Apply parent filter if set
+				if parentFilter != "" && s.ParentID != parentFilter {
+					continue
+				}
 				if busySession == nil || s.CreatedAt.After(busySession.CreatedAt) {
 					busySession = s
 				}
@@ -494,9 +509,8 @@ func (m *Manager) handleStop(id any, req api.Msg) api.Msg {
 
 	switch s.Status {
 	case StatusIdle, StatusFresh:
-		log.Printf("[stop] session %s: already %s, nothing to stop", s.ID, s.Status)
 		m.mu.Unlock()
-		return api.OkResponse(id)
+		return api.ErrorResponse(id, "session is not processing or queued (status: "+s.ExternalStatus()+")")
 
 	case StatusQueued:
 		log.Printf("[stop] session %s: removing from queue", s.ID)
@@ -653,6 +667,7 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 	all, _ := req["all"].(bool)
 	tree, _ := req["tree"].(bool)
 	showArchived, _ := req["archived"].(bool)
+	callerId, _ := req["callerId"].(string)
 
 	// Parse optional statuses filter
 	var statusFilter map[string]bool
@@ -680,14 +695,22 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 		if statusFilter != nil && !statusFilter[s.Status] {
 			continue
 		}
-		if !all {
-			// TODO: ownership filtering
+
+		// Ownership filtering: if callerId is set (and not "all"), only
+		// show direct children of the caller
+		if callerId != "" && !all {
+			if s.ParentID != callerId {
+				continue
+			}
 		}
 
 		if tree {
-			if s.ParentID != "" {
-				if _, hasParent := m.sessions[s.ParentID]; hasParent {
-					continue
+			// In tree mode without ownership filter, only show root-level sessions
+			if callerId == "" && !all {
+				if s.ParentID != "" {
+					if _, hasParent := m.sessions[s.ParentID]; hasParent {
+						continue
+					}
 				}
 			}
 			results = append(results, s.ToMsgWithChildren(m.sessions))
@@ -800,11 +823,87 @@ func (m *Manager) handleUnarchive(id any, req api.Msg) api.Msg {
 	return api.OkResponse(id)
 }
 
+// --- Set (unified priority/pinned/metadata) ---
+
+func (m *Manager) handleSet(id any, req api.Msg) api.Msg {
+	sessionID, _ := req["sessionId"].(string)
+	if sessionID == "" {
+		return api.ErrorResponse(id, "sessionId is required")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s := m.resolveSession(sessionID)
+	if s == nil {
+		return api.ErrorResponse(id, "session not found: "+sessionID)
+	}
+
+	// Priority
+	if priority, ok := req["priority"].(float64); ok {
+		log.Printf("[set] session %s: priority %.1f → %.1f", s.ID, s.Priority, priority)
+		s.Priority = priority
+		m.broadcastEvent(api.Msg{
+			"type": "event", "event": "updated",
+			"sessionId": s.ID, "changes": api.Msg{"priority": priority},
+		})
+	}
+
+	// Pinned
+	if pinned, ok := req["pinned"]; ok {
+		switch v := pinned.(type) {
+		case bool:
+			if !v {
+				log.Printf("[set] session %s: unpinning", s.ID)
+				s.Pinned = false
+				m.broadcastEvent(api.Msg{
+					"type": "event", "event": "updated",
+					"sessionId": s.ID, "changes": api.Msg{"pinned": false},
+				})
+			}
+		case float64:
+			duration := v
+			log.Printf("[set] session %s: pinning for %.0fs", s.ID, duration)
+			s.Pinned = true
+			s.PinExpiry = time.Now().Add(time.Duration(duration) * time.Second)
+
+			// If offloaded, queue for loading
+			if s.Status == StatusOffloaded || s.Status == StatusError {
+				prevStatus := s.Status
+				s.Status = StatusQueued
+				m.queue = append([]*Session{s}, m.queue...)
+				m.broadcastStatus(s, prevStatus)
+				m.tryDequeueWithEviction(s, s.ID)
+			}
+
+			m.broadcastEvent(api.Msg{
+				"type": "event", "event": "updated",
+				"sessionId": s.ID, "changes": api.Msg{"pinned": true},
+			})
+		}
+	}
+
+	// Metadata
+	if metadata, ok := req["metadata"].(map[string]any); ok {
+		if s.Metadata.Tags == nil {
+			s.Metadata.Tags = map[string]string{}
+		}
+		for k, v := range metadata {
+			if sv, ok := v.(string); ok {
+				s.Metadata.Tags[k] = sv
+			}
+		}
+	}
+
+	m.savePoolState()
+	return api.OkResponse(id)
+}
+
 // --- Pin ---
 
 func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 	sessionID, _ := req["sessionId"].(string)
-	parentID, _ := req["parentId"].(string)
+	parentID := parentFromReq(req)
 	duration := 120.0
 	if d, ok := req["duration"].(float64); ok {
 		duration = d
@@ -1330,4 +1429,66 @@ func (m *Manager) handleSubscribe(conn net.Conn, req api.Msg) {
 	// Commit after a short delay to allow a potential re-subscribe to
 	// clear the buffer and update filters before events are flushed.
 	api.CommitAfter(sub, 10*time.Millisecond)
+}
+
+// --- Debug commands ---
+
+// handleDebugSlots shows slot states and slot↔session mappings.
+func (m *Manager) handleDebugSlots(id any) api.Msg {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	slots := make([]any, 0)
+	for sid, proc := range m.procs {
+		s := m.sessions[sid]
+		slot := api.Msg{
+			"sessionId": sid,
+			"pid":       float64(proc.PID()),
+			"pidAlive":  isPidAlive(proc.PID()),
+		}
+		if s != nil {
+			slot["status"] = s.Status
+			slot["claudeUUID"] = s.ClaudeUUID
+		}
+		slots = append(slots, slot)
+	}
+
+	return api.Response(id, "debug-slots", api.Msg{"slots": slots})
+}
+
+// handleDebugCapture captures raw terminal buffer from a slot by index.
+func (m *Manager) handleDebugCapture(id any, req api.Msg) api.Msg {
+	slotIdx, ok := req["slot"].(float64)
+	if !ok {
+		return api.ErrorResponse(id, "slot is required")
+	}
+	raw, _ := req["raw"].(bool)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	idx := int(slotIdx)
+	i := 0
+	for _, proc := range m.procs {
+		if i == idx {
+			content := string(proc.Buffer())
+			if !raw {
+				content = stripANSI(content)
+			}
+			return api.Response(id, "result", api.Msg{"content": content})
+		}
+		i++
+	}
+
+	return api.ErrorResponse(id, fmt.Sprintf("slot %d not found", idx))
+}
+
+// handleDebugLogs tails the daemon log.
+func (m *Manager) handleDebugLogs(id any, req api.Msg) api.Msg {
+	// Logs are written to stdout/stderr by the standard log package.
+	// A full implementation would read from a log file. For now, return
+	// a message indicating the logs are on stderr.
+	return api.Response(id, "result", api.Msg{
+		"content": "logs are written to daemon stderr (use --follow with process output)",
+	})
 }

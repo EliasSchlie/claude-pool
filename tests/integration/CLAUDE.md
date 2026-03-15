@@ -2,10 +2,10 @@
 
 ## Philosophy
 
-These tests run against **real Claude Code sessions** through the full socket API.
-No mocking here — these validate end-to-end behavior with real processes. Pure logic
-tests (parsing, filtering, state transitions) belong in unit tests co-located with
-the source (`internal/*/`).
+These tests run against **real Claude Code sessions** through the CLI and socket API.
+No mocking — these validate end-to-end behavior with real processes. Pure logic tests
+(parsing, filtering, state transitions) belong in unit tests co-located with the
+source (`internal/*/`).
 
 Every test pool uses `--model haiku` to keep API costs low.
 
@@ -14,51 +14,57 @@ the model to write a long essay — have it run a slow bash command like `sleep 
 This keeps the session processing without burning tokens on LLM output. Only use real
 prompts when you actually need to verify the content of the response.
 
+## Two Test Modes
+
+### CLI-based tests (most tests)
+
+Operations go through the CLI binary as subprocess calls — the same way real users
+and Claude sessions interact with pools. The test helpers (`cliPool`) build the CLI
+binary, start the daemon, and run `claude-pool-cli` commands.
+
+Files: `pool_test.go`, `session_test.go`, `slots_test.go`, `offload_test.go`, `parent_child_test.go`
+
+### Socket-based tests (API-only features)
+
+Attach and subscribe are API-only features not exposed in the CLI. These tests use
+the socket API directly via `testPool`.
+
+Files: `attach_test.go`, `subscribe_test.go`
+
 ## Design: Flow-Based Tests
 
 Tests are organized as **user flows**, not isolated unit assertions. Each test file
 tells a story: it initializes a pool, builds up state through a sequence of commands,
-and asserts at each step. This mirrors how the pool is actually used.
+and asserts at each step.
 
-Why flows instead of isolated tests:
-- **Setup cost is real.** Spinning up a pool with real Claude sessions takes 10-30s.
-  Doing that per assertion would make the suite take hours.
-- **State is the point.** Most interesting behavior depends on prior state (eviction
-  needs a full pool, archive needs children, restore needs a prior run). Building
-  state naturally through a flow is more reliable than trying to synthetically
-  recreate it.
-- **Failures are still locatable.** Each step is a named `t.Run` subtest, so when
-  something fails you see exactly which checkpoint broke.
-
-Tradeoff: a failure mid-flow can cascade. We accept this — fixing the first failure
-fixes the cascade, and the alternative (isolated tests) would be 10x slower and
-require duplicating all the state-building logic.
+Why flows:
+- **Setup cost is real.** Spinning up a pool takes 10-30s. Per-assertion setup would take hours.
+- **State is the point.** Most interesting behavior depends on prior state.
+- **Failures are locatable.** Each step is a named `t.Run` subtest.
 
 ## Claude Code `cd` Constraint
 
-Sessions can only `cd` into **subdirectories** of their spawn directory. `cd` to paths above the spawn dir (e.g., `/tmp/`, `~/other-project/`) silently fails — cwd resets to spawn dir. All cwd-related test prompts must use relative subdirectories.
+Sessions can only `cd` into **subdirectories** of their spawn directory. All cwd-related
+test prompts must use relative subdirectories.
 
 ## Structure
 
-Each test file = one pool, one flow, multiple subtests:
-
-| File | Pool size | What it covers |
-|------|-----------|----------------|
-| `pool_test.go` | 2 | Init, config, resize, health, destroy, re-init with restore |
-| `session_test.go` | 3 | Start, wait, capture, followup, output formats, input |
-| `slots_test.go` | 2 | Queue, priority, pin/eviction, capture on queued, queued-session behavior |
-| `offload_test.go` | 2 | Offload, capture while offloaded, restore, process death → offloaded, wait on death, stop on offloaded/archived, archive lifecycle |
-| ~~`error_test.go`~~ | — | *Deferred: no reliable way to trigger repeated load failures in tests. Will add when a real scenario surfaces.* |
-| `parent_child_test.go` | 3 | Ownership, ls/tree, info, recursive archive |
-| `subscribe_test.go` | 2 | Event stream, filters, re-subscribe, updated events |
-| `attach_test.go` | 2 | Attach pipe, pendingInput detection, followup while attached, all API commands work during attach, offload closes pipe, re-attach |
+| File | Pool size | Mode | What it covers |
+|------|-----------|------|----------------|
+| `pool_test.go` | 2 | CLI | Init, ping, config, resize, health, destroy, re-init with restore |
+| `session_test.go` | 3 | CLI | Start, wait, capture, followup, info, set (metadata), stop, --block, prefix resolution |
+| `slots_test.go` | 2 | CLI | Queue, set priority, set pinned, eviction order, LRU |
+| `offload_test.go` | 2 | CLI | Eviction→offload, capture offloaded, followup restores, process death, archive/unarchive lifecycle |
+| `parent_child_test.go` | 3 | CLI | --parent flag, env auto-detection, --parent none, ls filtering, verbosity, recursive archive |
+| `attach_test.go` | 2 | Socket | Attach pipe, pendingInput, keystroke/submit, eviction closes pipe, re-attach |
+| `subscribe_test.go` | 2 | Socket | Event stream, filters, re-subscribe, updated events |
 
 Shared infrastructure:
 
 | File | Purpose |
 |------|---------|
-| `helpers_test.go` | Pool setup/teardown, socket client, assertion helpers |
-| `../testutil/testutil.go` | TestMain utilities: find repo root, build binary, setup run dir, JSON value extractors |
+| `helpers_test.go` | Both pool types (CLI + socket), assertion helpers, waiting helpers |
+| `../testutil/testutil.go` | TestMain utilities: find repo root, build binary, setup run dir |
 
 ## Running
 
@@ -70,48 +76,26 @@ go test ./tests/integration/ -v -timeout 10m
 go test ./tests/integration/ -v -run TestSession -timeout 5m
 ```
 
-The `-timeout` is important — real Claude sessions can take time.
-
 ## Code Style
 
-### Protocol calls
+### CLI tests
 
-Use `pool.send(Msg{...})` directly for all protocol commands. No wrapper methods.
-Every request and response should be visible in the test — the reader should see
-exactly what JSON goes over the wire without tracing through helpers.
+Use `pool.run("command", "--flag", "value")` or `pool.runJSON(...)` for all CLI operations.
+Every command and its flags should be visible in the test.
+
+### Socket tests
+
+Use `pool.send(Msg{...})` directly for all protocol commands. Every request and response
+should be visible — no hidden abstractions.
 
 ### Comments
 
-Only comment when the intent isn't obvious from the code. Don't narrate what
-the code already says — comment *why* something is done, not *what*.
-
-Good:
-```go
-// Offload s1 so we can test that input errors on sessions without a live terminal
-offloadResp := pool.send(Msg{"type": "offload", "sessionId": s1})
-```
-
-```go
-// s2 should still be processing — followup must error without force
-resp := pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "ignore"})
-```
-
-Bad:
-```go
-// Send a start command
-resp := pool.send(Msg{"type": "start", "prompt": "hello"})
-// Check that there's no error
-assertNotError(t, resp)
-```
-
-The `t.Run` name describes the step. Inline comments explain non-obvious
-setup, preconditions, or why a particular assertion matters.
+Only comment when the intent isn't obvious. The `t.Run` name describes the step.
+Inline comments explain non-obvious setup, preconditions, or why an assertion matters.
 
 ## Adding Tests
 
 1. If your test fits naturally into an existing flow, add a `t.Run` subtest at the
    appropriate point in the sequence.
-2. If it needs fundamentally different pool state (different size, special config),
-   create a new file with its own pool.
-3. Keep flows linear — don't branch. Each subtest should depend only on the state
-   built by previous subtests in the same flow.
+2. If it needs fundamentally different pool state, create a new file with its own pool.
+3. Keep flows linear — each subtest depends only on prior subtests in the same flow.

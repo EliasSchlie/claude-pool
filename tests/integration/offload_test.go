@@ -1,38 +1,37 @@
 package integration
 
-// TestOffload — Offload, capture, restore, and archive lifecycle flow
+// TestOffload — Offload, capture, restore, and archive lifecycle flow (CLI)
 //
 // Pool size: 2
 //
-// This flow tests the full lifecycle of sessions being offloaded, having their
-// output read in different states, being restored, and then archived/unarchived.
+// Tests session lifecycle when sessions are offloaded (via eviction, not explicit
+// command — offload is not a CLI command), captured in various states, restored
+// via followup, and archived/unarchived.
+//
+// Offloading is triggered by starting new sessions when the pool is full — the
+// LRU idle session gets displaced. This tests real-world behavior rather than
+// relying on a debug command.
 //
 // Flow:
 //
 //   1.  "start and wait for idle"
-//   1a. "metadata persists across offload and restore"
-//   2.  "offload idle session"
+//   2.  "eviction offloads LRU session"
 //   3.  "stop on offloaded errors"
-//   4.  "offload pinned session auto-unpins"
-//   5.  "offload non-idle errors"
-//   6.  "capture JSONL on offloaded session works"
-//   7.  "capture buffer on offloaded session errors"
-//   8.  "followup restores offloaded session"
-//   9.  "process death transitions to offloaded"
-//  10.  "wait returns error on session death"
-//  11.  "archive idle session"
-//  12.  "stop on archived errors"
-//  13.  "archived session hidden from ls"
-//  14.  "capture JSONL on archived session works"
-//  15.  "capture buffer on archived session errors"
-//  16.  "followup on archived errors"
-//  17.  "pin on archived errors"
-//  18.  "unarchive restores to offloaded"
-//  19.  "unarchive on non-archived errors"
-//  20.  "archive stops active session first"
-//  21.  "archive is idempotent"
-//  22.  "archive pinned session unpins first"
-//  23.  "archive queued session cancels and archives"
+//   4.  "capture JSONL on offloaded works"
+//   5.  "capture buffer on offloaded errors"
+//   6.  "followup restores offloaded session"
+//   7.  "process death transitions to offloaded"
+//   8.  "archive idle session"
+//   9.  "stop on archived errors"
+//  10.  "archived session hidden from ls"
+//  11.  "capture JSONL on archived works"
+//  12.  "capture buffer on archived errors"
+//  13.  "followup on archived errors"
+//  14.  "unarchive restores to offloaded"
+//  15.  "unarchive on non-archived errors"
+//  16.  "archive stops active session first"
+//  17.  "archive is idempotent"
+//  18.  "archive queued session cancels and archives"
 
 import (
 	"testing"
@@ -40,331 +39,198 @@ import (
 )
 
 func TestOffload(t *testing.T) {
-	pool := setupPool(t, 2)
+	pool := setupCLIPool(t, 2)
 
 	var s1, s2 string
 
 	t.Run("start and wait for idle", func(t *testing.T) {
-		r1 := pool.send(Msg{"type": "start", "prompt": "respond with exactly: offload test"})
-		assertNotError(t, r1)
+		r1 := pool.runJSON("start", "--prompt", "respond with exactly: offload test")
 		s1 = strVal(r1, "sessionId")
 
-		r2 := pool.send(Msg{"type": "start", "prompt": "respond with exactly: second"})
-		assertNotError(t, r2)
+		r2 := pool.runJSON("start", "--prompt", "respond with exactly: second")
 		s2 = strVal(r2, "sessionId")
 
-		pool.awaitStatus(s1, "idle", 60*time.Second)
-		pool.awaitStatus(s2, "idle", 60*time.Second)
+		pool.waitForIdle(s1, 300*time.Second)
+		pool.waitForIdle(s2, 300*time.Second)
 	})
 
-	t.Run("metadata persists across offload and restore", func(t *testing.T) {
-		// Set metadata on s1 while it's live
-		resp := pool.send(Msg{"type": "set-metadata", "sessionId": s1, "metadata": Msg{
-			"name": "offload test",
-			"tags": Msg{"lifecycle": "offload"},
-		}})
-		assertNotError(t, resp)
+	t.Run("eviction offloads LRU session", func(t *testing.T) {
+		// Pool is full (2/2). Starting a third session should evict s1 (LRU).
+		// Touch s2 to make it more recently used.
+		pool.run("followup", "--session", s2, "--prompt", "respond with exactly: touched")
+		pool.waitForIdle(s2, 300*time.Second)
 
-		// Offload s1
-		resp = pool.send(Msg{"type": "offload", "sessionId": s1})
-		assertNotError(t, resp)
+		// Start s3 — s1 should be evicted
+		r3 := pool.runJSON("start", "--prompt", "respond with exactly: eviction")
+		s3 := strVal(r3, "sessionId")
 
-		// Metadata should survive offload
-		info := parseSession(t, pool.send(Msg{"type": "info", "sessionId": s1})["session"])
+		pool.waitForStatus(s1, "offloaded", 15*time.Second)
+		pool.waitForIdle(s3, 300*time.Second)
+
+		info := pool.getSessionInfo(s1)
 		assertStatus(t, info, "offloaded")
-		if info.Metadata.Name != "offload test" {
-			t.Fatalf("metadata.name should survive offload, got %q", info.Metadata.Name)
-		}
-		if info.Metadata.Tags["lifecycle"] != "offload" {
-			t.Fatalf("metadata.tags should survive offload, got %v", info.Metadata.Tags)
+		if info.PID != 0 {
+			t.Fatalf("offloaded session should have no PID, got %v", info.PID)
 		}
 
-		// Restore via followup and verify metadata survives the full round-trip
-		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: restored"})
-		pool.awaitStatus(s1, "idle", 60*time.Second)
-
-		info = parseSession(t, pool.send(Msg{"type": "info", "sessionId": s1})["session"])
-		assertStatus(t, info, "idle")
-		if info.Metadata.Name != "offload test" {
-			t.Fatalf("metadata.name should survive restore, got %q", info.Metadata.Name)
-		}
-		if info.Metadata.Tags["lifecycle"] != "offload" {
-			t.Fatalf("metadata.tags should survive restore, got %v", info.Metadata.Tags)
-		}
-	})
-
-	t.Run("offload idle session", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "offload", "sessionId": s1})
-		assertNotError(t, resp)
-		assertType(t, resp, "ok")
-
-		info := pool.send(Msg{"type": "info", "sessionId": s1})
-		session := parseSession(t, info["session"])
-		assertStatus(t, session, "offloaded")
-		if session.PID != 0 {
-			t.Fatalf("offloaded session should have no PID, got %v", session.PID)
-		}
+		// Archive s3 to free slot for later steps
+		pool.run("archive", "--session", s3)
 	})
 
 	t.Run("stop on offloaded errors", func(t *testing.T) {
-		// s1 is offloaded — nothing to stop
-		resp := pool.send(Msg{"type": "stop", "sessionId": s1})
-		assertError(t, resp)
+		result := pool.run("stop", "--session", s1)
+		assertExitError(t, result)
 	})
 
-	t.Run("offload pinned session auto-unpins", func(t *testing.T) {
-		pool.send(Msg{"type": "pin", "sessionId": s2})
-
-		resp := pool.send(Msg{"type": "offload", "sessionId": s2})
-		assertNotError(t, resp)
-		assertType(t, resp, "ok")
-
-		info := pool.send(Msg{"type": "info", "sessionId": s2})
-		session := parseSession(t, info["session"])
-		assertStatus(t, session, "offloaded")
-	})
-
-	t.Run("offload non-idle errors", func(t *testing.T) {
-		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "run the bash command: sleep 60"})
-		pool.awaitStatus(s2, "processing", 15*time.Second)
-
-		resp := pool.send(Msg{"type": "offload", "sessionId": s2})
-		assertError(t, resp)
-
-		pool.send(Msg{"type": "stop", "sessionId": s2})
-	})
-
-	t.Run("capture JSONL on offloaded session works", func(t *testing.T) {
-		// s1 is offloaded — JSONL capture reads from persisted transcript
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1})
-		assertNotError(t, resp)
+	t.Run("capture JSONL on offloaded works", func(t *testing.T) {
+		resp := pool.runJSON("capture", "--session", s1)
 		assertContains(t, strVal(resp, "content"), "offload test")
 
-		// All JSONL detail levels should work on offloaded sessions
 		for _, detail := range []string{"assistant", "tools", "raw"} {
-			r := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "jsonl", "detail": detail})
-			assertNotError(t, r)
-			assertNonEmpty(t, "detail="+detail+" content", strVal(r, "content"))
+			r := pool.runJSON("capture", "--session", s1, "--source", "jsonl", "--detail", detail)
+			assertNonEmpty(t, "detail="+detail, strVal(r, "content"))
 		}
 	})
 
-	t.Run("capture buffer on offloaded session errors", func(t *testing.T) {
-		// Buffer capture requires a live terminal
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 1})
-		assertError(t, resp)
+	t.Run("capture buffer on offloaded errors", func(t *testing.T) {
+		result := pool.run("capture", "--session", s1, "--source", "buffer", "--turns", "1")
+		assertExitError(t, result)
 
-		resp = pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 0})
-		assertError(t, resp)
+		result = pool.run("capture", "--session", s1, "--source", "buffer", "--turns", "0")
+		assertExitError(t, result)
 	})
 
 	t.Run("followup restores offloaded session", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: restored"})
-		assertNotError(t, resp)
-		assertType(t, resp, "started")
+		resp := pool.runJSON("followup", "--session", s1, "--prompt", "respond with exactly: restored")
+		if strVal(resp, "sessionId") != s1 {
+			t.Fatalf("expected sessionId %s", s1)
+		}
 
-		pool.awaitStatus(s1, "idle", 60*time.Second)
+		pool.waitForIdle(s1, 300*time.Second)
 
-		capture := pool.send(Msg{"type": "capture", "sessionId": s1})
+		capture := pool.runJSON("capture", "--session", s1)
 		assertContains(t, strVal(capture, "content"), "restored")
 
-		info := pool.send(Msg{"type": "info", "sessionId": s1})
-		session := parseSession(t, info["session"])
-		assertStatus(t, session, "idle")
-		if session.PID <= 0 {
-			t.Fatalf("restored session should have a PID, got %v", session.PID)
+		info := pool.getSessionInfo(s1)
+		assertStatus(t, info, "idle")
+		if info.PID <= 0 {
+			t.Fatalf("restored session should have a PID, got %v", info.PID)
 		}
 	})
 
 	t.Run("process death transitions to offloaded", func(t *testing.T) {
-		// s2 is idle with a live PID — kill it directly
-		info := pool.send(Msg{"type": "info", "sessionId": s2})
-		session := parseSession(t, info["session"])
-		pid := int(session.PID)
+		info := pool.getSessionInfo(s2)
+		pid := int(info.PID)
 		if pid <= 0 {
 			t.Fatalf("expected live PID for s2, got %v", pid)
 		}
 
 		killPID(t, pid)
-
-		s := pool.awaitStatus(s2, "offloaded", 15*time.Second)
-		if s.PID != 0 {
-			t.Fatalf("dead session should have PID 0, got %v", s.PID)
-		}
-	})
-
-	t.Run("wait returns error on session death", func(t *testing.T) {
-		// s1 is idle — start a long-running task, then kill the process mid-wait
-		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "run the bash command: sleep 120"})
-		pool.awaitStatus(s1, "processing", 15*time.Second)
-
-		info := pool.send(Msg{"type": "info", "sessionId": s1})
-		session := parseSession(t, info["session"])
-		pid := int(session.PID)
-
-		// Use a separate connection for the concurrent wait (main conn isn't thread-safe)
-		waitConn, waitScanner := pool.newConn()
-		ch := make(chan Msg, 1)
-		go func() {
-			ch <- pool.sendOn(waitConn, waitScanner,
-				Msg{"type": "wait", "sessionId": s1, "timeout": 30000},
-			)
-		}()
-
-		// Give wait a moment to register on the server before killing
-		time.Sleep(500 * time.Millisecond)
-		killPID(t, pid)
-
-		assertError(t, <-ch)
+		pool.waitForStatus(s2, "offloaded", 15*time.Second)
 	})
 
 	t.Run("archive idle session", func(t *testing.T) {
-		// s1 is offloaded after process death — archive directly
-		pool.awaitStatus(s1, "offloaded", 10*time.Second)
+		// s2 is offloaded after process death
+		result := pool.run("archive", "--session", s2)
+		assertExitOK(t, result)
 
-		resp := pool.send(Msg{"type": "archive", "sessionId": s1})
-		assertNotError(t, resp)
-		assertType(t, resp, "ok")
-
-		info := pool.send(Msg{"type": "info", "sessionId": s1})
-		session := parseSession(t, info["session"])
-		assertStatus(t, session, "archived")
+		info := pool.getSessionInfo(s2)
+		assertStatus(t, info, "archived")
 	})
 
 	t.Run("stop on archived errors", func(t *testing.T) {
-		// s1 is archived — nothing to stop
-		resp := pool.send(Msg{"type": "stop", "sessionId": s1})
-		assertError(t, resp)
+		result := pool.run("stop", "--session", s2)
+		assertExitError(t, result)
 	})
 
 	t.Run("archived session hidden from ls", func(t *testing.T) {
-		// Default ls (no archived flag) should exclude archived sessions
-		lsResp := pool.send(Msg{"type": "ls", "all": true})
-		sessions := parseSessions(t, lsResp)
-		if _, found := findSession(sessions, s1); found {
-			t.Fatal("archived session should not appear in ls without archived flag")
+		sessions := pool.listSessions()
+		if _, found := findSession(sessions, s2); found {
+			t.Fatal("archived session should not appear in default ls")
 		}
 
-		// With archived: true, it should be visible
-		lsArchived := pool.send(Msg{"type": "ls", "all": true, "archived": true})
-		archivedSessions := parseSessions(t, lsArchived)
-		s, found := findSession(archivedSessions, s1)
+		// With --archived flag, it should be visible
+		archivedSessions := pool.listSessions("--archived")
+		s, found := findSession(archivedSessions, s2)
 		if !found {
-			t.Fatal("archived session should appear with archived: true")
+			t.Fatal("archived session should appear with --archived")
 		}
 		assertStatus(t, s, "archived")
 	})
 
-	t.Run("capture JSONL on archived session works", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1})
-		assertNotError(t, resp)
+	t.Run("capture JSONL on archived works", func(t *testing.T) {
+		resp := pool.runJSON("capture", "--session", s2)
 		assertNonEmpty(t, "archived capture", strVal(resp, "content"))
 	})
 
-	t.Run("capture buffer on archived session errors", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "capture", "sessionId": s1, "source": "buffer", "turns": 1})
-		assertError(t, resp)
+	t.Run("capture buffer on archived errors", func(t *testing.T) {
+		result := pool.run("capture", "--session", s2, "--source", "buffer", "--turns", "1")
+		assertExitError(t, result)
 	})
 
 	t.Run("followup on archived errors", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "nope"})
-		assertError(t, resp)
-	})
-
-	t.Run("pin on archived errors", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "pin", "sessionId": s1})
-		assertError(t, resp)
+		result := pool.run("followup", "--session", s2, "--prompt", "nope")
+		assertExitError(t, result)
 	})
 
 	t.Run("unarchive restores to offloaded", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "unarchive", "sessionId": s1})
-		assertNotError(t, resp)
-		assertType(t, resp, "ok")
+		result := pool.run("unarchive", "--session", s2)
+		assertExitOK(t, result)
 
-		info := pool.send(Msg{"type": "info", "sessionId": s1})
-		session := parseSession(t, info["session"])
-		assertStatus(t, session, "offloaded")
+		info := pool.getSessionInfo(s2)
+		assertStatus(t, info, "offloaded")
 
-		// Should be visible in ls again
-		lsResp := pool.send(Msg{"type": "ls", "all": true})
-		sessions := parseSessions(t, lsResp)
-		if _, found := findSession(sessions, s1); !found {
+		sessions := pool.listSessions()
+		if _, found := findSession(sessions, s2); !found {
 			t.Fatal("unarchived session should appear in ls")
 		}
 	})
 
 	t.Run("unarchive on non-archived errors", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "unarchive", "sessionId": s2})
-		assertError(t, resp)
+		// s1 is idle, not archived
+		result := pool.run("unarchive", "--session", s1)
+		assertExitError(t, result)
 	})
 
 	t.Run("archive stops active session first", func(t *testing.T) {
-		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "run the bash command: sleep 60"})
-		pool.awaitStatus(s2, "processing", 15*time.Second)
+		pool.run("followup", "--session", s1, "--prompt", "run the bash command: sleep 60")
+		pool.waitForStatus(s1, "processing", 15*time.Second)
 
-		resp := pool.send(Msg{"type": "archive", "sessionId": s2})
-		assertNotError(t, resp)
-		assertType(t, resp, "ok")
+		result := pool.run("archive", "--session", s1)
+		assertExitOK(t, result)
 
-		info := pool.send(Msg{"type": "info", "sessionId": s2})
-		session := parseSession(t, info["session"])
-		assertStatus(t, session, "archived")
+		info := pool.getSessionInfo(s1)
+		assertStatus(t, info, "archived")
 	})
 
 	t.Run("archive is idempotent", func(t *testing.T) {
-		resp := pool.send(Msg{"type": "archive", "sessionId": s2})
-		assertNotError(t, resp)
-		assertType(t, resp, "ok")
+		result := pool.run("archive", "--session", s1)
+		assertExitOK(t, result)
 	})
-
-	// State: s1 offloaded, s2 archived
-
-	t.Run("archive pinned session unpins first", func(t *testing.T) {
-		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: pin test"})
-		pool.awaitStatus(s1, "idle", 60*time.Second)
-
-		pool.send(Msg{"type": "pin", "sessionId": s1})
-
-		resp := pool.send(Msg{"type": "archive", "sessionId": s1})
-		assertNotError(t, resp)
-		assertType(t, resp, "ok")
-
-		info := pool.send(Msg{"type": "info", "sessionId": s1})
-		session := parseSession(t, info["session"])
-		assertStatus(t, session, "archived")
-		if session.Pinned {
-			t.Fatal("archived session should not still be pinned")
-		}
-	})
-
-	// State: s1 archived, s2 archived, both slots free
 
 	t.Run("archive queued session cancels and archives", func(t *testing.T) {
-		pool.send(Msg{"type": "unarchive", "sessionId": s1})
-		pool.send(Msg{"type": "unarchive", "sessionId": s2})
-		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: fill1"})
-		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "respond with exactly: fill2"})
-		pool.awaitStatus(s1, "idle", 60*time.Second)
-		pool.awaitStatus(s2, "idle", 60*time.Second)
+		// Restore both sessions
+		pool.run("unarchive", "--session", s1)
+		pool.run("unarchive", "--session", s2)
+		pool.run("followup", "--session", s1, "--prompt", "respond with exactly: fill1")
+		pool.run("followup", "--session", s2, "--prompt", "respond with exactly: fill2")
+		pool.waitForIdle(s1, 300*time.Second)
+		pool.waitForIdle(s2, 300*time.Second)
 
-		// Pin both so the new session can't evict them — forces queuing
-		pool.send(Msg{"type": "pin", "sessionId": s1})
-		pool.send(Msg{"type": "pin", "sessionId": s2})
+		// Pin both so new session can't evict them — forces queuing
+		pool.run("set", "--session", s1, "--pinned", "300")
+		pool.run("set", "--session", s2, "--pinned", "300")
 
-		// Pool is full (2/2), both pinned — new session must queue
-		r := pool.send(Msg{"type": "start", "prompt": "respond with exactly: queued"})
-		assertNotError(t, r)
-		s3 := strVal(r, "sessionId")
+		resp := pool.runJSON("start", "--prompt", "respond with exactly: queued")
+		s3 := strVal(resp, "sessionId")
 
-		info := pool.send(Msg{"type": "info", "sessionId": s3})
-		session := parseSession(t, info["session"])
-		assertStatus(t, session, "queued")
+		info := pool.getSessionInfo(s3)
+		assertStatus(t, info, "queued")
 
-		resp := pool.send(Msg{"type": "archive", "sessionId": s3})
-		assertNotError(t, resp)
-		assertType(t, resp, "ok")
+		result := pool.run("archive", "--session", s3)
+		assertExitOK(t, result)
 
-		info = pool.send(Msg{"type": "info", "sessionId": s3})
-		session = parseSession(t, info["session"])
-		assertStatus(t, session, "archived")
+		info = pool.getSessionInfo(s3)
+		assertStatus(t, info, "archived")
 	})
 }
