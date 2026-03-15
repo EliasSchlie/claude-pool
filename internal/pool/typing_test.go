@@ -65,4 +65,23 @@ func TestParseBufferInput(t *testing.T) {
 			t.Fatalf("expected %q, got %q", "hello", got)
 		}
 	})
+
+	// Prevents: false positive pendingInput from TUI status bar artifacts
+	// when \r separates prompt and status bar on the same "line"
+	t.Run("CR-separated status bar not detected as input", func(t *testing.T) {
+		buf := []byte("❯ \r────────────────\r~/.cache/cpt/workdir\r  13%  Haiku 4.5\r")
+		got := parseBufferInput(buf)
+		if got != "" {
+			t.Fatalf("expected empty (TUI artifact), got %q", got)
+		}
+	})
+
+	// Prevents: missing input detection when prompt line ends with \r instead of \n
+	t.Run("prompt with CR line ending", func(t *testing.T) {
+		buf := []byte("output\r❯ typed text\r")
+		got := parseBufferInput(buf)
+		if got != "typed text" {
+			t.Fatalf("expected %q, got %q", "typed text", got)
+		}
+	})
 }

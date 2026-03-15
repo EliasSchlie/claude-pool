@@ -300,22 +300,16 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 		return err
 	}
 
-	logPath := filepath.Join(dir, "logs")
-	os.MkdirAll(logPath, 0755)
-	daemonLogFile, err := os.OpenFile(filepath.Join(logPath, "daemon.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("cannot open daemon log: %w", err)
-	}
-
+	// Daemon handles its own logging to daemon.log. Don't pipe its
+	// stdout/stderr anywhere — the CLI must not hold open file descriptors
+	// to the daemon (otherwise cmd.Run() in tests blocks until daemon exits).
 	daemon := exec.Command(bin, "--pool-dir", dir)
-	daemon.Stdout = daemonLogFile
-	daemon.Stderr = daemonLogFile
+	daemon.Stdout = nil
+	daemon.Stderr = nil
 	daemon.Stdin = nil
 	if err := daemon.Start(); err != nil {
-		daemonLogFile.Close()
 		return fmt.Errorf("cannot start daemon: %w", err)
 	}
-	daemonLogFile.Close() // CLI doesn't need this fd anymore
 
 	// Wait for socket to appear
 	deadline := time.Now().Add(10 * time.Second)

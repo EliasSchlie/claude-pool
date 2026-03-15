@@ -1229,6 +1229,9 @@ func (m *Manager) handleInput(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "write error: "+err.Error())
 	}
 
+	// Track pendingInput the same way attach does
+	m.trackInput(s, []byte(data))
+
 	log.Printf("[input] session %s: wrote %d bytes", s.ID, len(data))
 	return api.OkResponse(id)
 }
@@ -1287,13 +1290,49 @@ func (m *Manager) handleAttach(id any, req api.Msg) api.Msg {
 // handleAttachInput processes raw input from attach pipe clients for typing
 // detection and prompt delivery.
 //
-// When Enter is detected, the accumulated text is delivered via deliverPrompt
-// (Escape → Ctrl-U → text → Enter with proper timing) to ensure Claude Code's
-// TUI processes the prompt reliably. Raw PTY writes without this ceremony can
-// be lost when text + Enter arrive in a single chunk.
+// trackInput updates pendingInput based on raw bytes written to a session's PTY.
+// Caller must hold m.mu. Used by both handleInput (debug input) and handleAttachInput.
+func (m *Manager) trackInput(s *Session, data []byte) {
+	hasCtrlU := false
+	var printable []byte
+	for _, b := range data {
+		switch {
+		case b == 0x15: // Ctrl-U
+			hasCtrlU = true
+		case b >= 0x20 && b != 0x7f: // printable (not DEL)
+			printable = append(printable, b)
+		}
+	}
+
+	switch {
+	case hasCtrlU:
+		if s.PendingInput != "" {
+			s.PendingInput = ""
+			s.LastUsedAt = time.Now()
+			delete(m.attachTyping, s.ID)
+			m.broadcastEvent(api.Msg{
+				"type": "event", "event": "updated",
+				"sessionId": s.ID, "changes": api.Msg{"pendingInput": ""},
+			})
+		}
+	case len(printable) > 0 && (s.Status == StatusIdle || s.Status == StatusFresh):
+		m.attachTyping[s.ID] = append(m.attachTyping[s.ID], printable...)
+		s.PendingInput = string(m.attachTyping[s.ID])
+		s.LastUsedAt = time.Now()
+		m.broadcastEvent(api.Msg{
+			"type": "event", "event": "updated",
+			"sessionId": s.ID, "changes": api.Msg{"pendingInput": s.PendingInput},
+		})
+	}
+}
+
 // handleAttachInput classifies raw bytes from an attach client and manages
 // pendingInput property and state transitions. Raw bytes always pass through
 // to the PTY (the attach pipe writes them directly).
+//
+// When Enter is detected, the accumulated text is delivered via deliverPrompt
+// (Escape → Ctrl-U → text → Enter with proper timing) to ensure Claude Code's
+// TUI processes the prompt reliably.
 func (m *Manager) handleAttachInput(sessionID string, data []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
