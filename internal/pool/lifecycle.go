@@ -47,7 +47,11 @@ func (m *Manager) resolveSession(sessionID string) *Session {
 func (m *Manager) spawnSession(s *Session, resume bool) {
 	cfg, _ := m.config.Load()
 	flags := cfg.Flags
-	log.Printf("[spawn] session %s: resume=%v flags=%q cwd=%s", s.ID, resume, flags, m.paths.Root)
+	cwd := cfg.Dir
+	if cwd == "" {
+		cwd = m.paths.Root
+	}
+	log.Printf("[spawn] session %s: resume=%v flags=%q cwd=%s", s.ID, resume, flags, cwd)
 
 	env := map[string]string{
 		"CLAUDE_POOL_DIR":        m.paths.Root,
@@ -56,7 +60,7 @@ func (m *Manager) spawnSession(s *Session, resume bool) {
 
 	opts := ptyPkg.SpawnOpts{
 		Flags: flags,
-		Cwd:   m.paths.Root,
+		Cwd:   cwd,
 		Env:   env,
 	}
 	if resume && s.ClaudeUUID != "" {
