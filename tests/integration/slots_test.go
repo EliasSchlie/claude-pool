@@ -19,7 +19,10 @@ package integration
 //   7.  "LRU within same priority"
 //   8.  "set pinned prevents eviction"
 //   9.  "set pinned false clears pin"
-//  10.  "followup on queued errors"
+//  10.  "pendingInput resets LRU timestamp"
+//  11.  "followup on queued errors"
+//  12.  "debug input sends raw bytes"
+//  13.  "debug capture reads slot buffer"
 
 import (
 	"testing"
@@ -241,6 +244,54 @@ func TestSlots(t *testing.T) {
 		}
 	})
 
+	t.Run("pendingInput resets LRU timestamp", func(t *testing.T) {
+		sessions := pool.listSessions()
+		var slotA, slotB string
+		for _, s := range sessions {
+			if s.Status == "idle" {
+				if slotA == "" {
+					slotA = s.SessionID
+				} else {
+					slotB = s.SessionID
+				}
+			}
+		}
+		if slotA == "" || slotB == "" {
+			t.Fatal("expected 2 idle sessions in slots")
+		}
+
+		pool.run("set", "--session", slotA, "--priority", "0")
+		pool.run("set", "--session", slotB, "--priority", "0")
+
+		// Touch slotB to make it MRU — slotA is now the LRU candidate
+		pool.run("followup", "--session", slotB, "--prompt", "respond with exactly: touch-lru")
+		pool.waitForIdle(slotB, 300*time.Second)
+
+		// Type into slotA via debug input — pendingInput should reset its LRU timestamp
+		pool.run("debug", "input", "--session", slotA, "--data", "some text")
+
+		// Verify pendingInput was populated
+		pool.waitForPendingInput(slotA, func(v string) bool { return v != "" }, 10*time.Second)
+
+		// Start new session — slotB should be evicted (slotA's LRU was reset by pendingInput)
+		resp := pool.runJSON("start", "--prompt", "respond with exactly: lru-pending")
+		newSid := strVal(resp, "sessionId")
+
+		pool.waitForStatus(slotB, "offloaded", 15*time.Second)
+
+		infoA := pool.getSessionInfo(slotA)
+		if infoA.Status == "offloaded" {
+			t.Fatal("session with pendingInput activity should survive eviction")
+		}
+
+		pool.waitForIdle(newSid, 300*time.Second)
+
+		// Clear pendingInput and verify it was cleared
+		pool.run("debug", "input", "--session", slotA, "--data", "\x15")
+		pool.waitForPendingInput(slotA, func(v string) bool { return v == "" }, 10*time.Second)
+		pool.run("archive", "--session", slotB)
+	})
+
 	t.Run("followup on queued errors", func(t *testing.T) {
 		sessions := pool.listSessions()
 		var idle []string
@@ -269,6 +320,40 @@ func TestSlots(t *testing.T) {
 		pool.run("stop", "--session", queuedSid)
 		for _, sid := range idle {
 			pool.run("stop", "--session", sid)
+		}
+	})
+
+	t.Run("debug input sends raw bytes", func(t *testing.T) {
+		sessions := pool.listSessions()
+		var target string
+		for _, s := range sessions {
+			if s.Status == "idle" {
+				target = s.SessionID
+				break
+			}
+		}
+		if target == "" {
+			t.Fatal("no idle session for debug input test")
+		}
+
+		// Send text via debug input — should populate pendingInput
+		result := pool.run("debug", "input", "--session", target, "--data", "debug-test")
+		assertExitOK(t, result)
+
+		// Verify the bytes arrived
+		pool.waitForPendingInput(target, func(v string) bool { return v != "" }, 10*time.Second)
+
+		// Clear it and verify
+		pool.run("debug", "input", "--session", target, "--data", "\x15")
+		pool.waitForPendingInput(target, func(v string) bool { return v == "" }, 10*time.Second)
+	})
+
+	t.Run("debug capture reads slot buffer", func(t *testing.T) {
+		// debug capture works on slot index, not session ID
+		result := pool.run("debug", "capture", "--slot", "0")
+		assertExitOK(t, result)
+		if result.Stdout == "" {
+			t.Fatal("expected non-empty slot buffer")
 		}
 	})
 }

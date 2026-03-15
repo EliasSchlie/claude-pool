@@ -81,8 +81,10 @@ func TestMain(m *testing.M) {
 	}
 
 	code := m.Run()
-	if code == 0 {
+	if code == 0 && os.Getenv("CLAUDE_POOL_TEST_KEEP") == "" {
 		os.RemoveAll(runDir)
+	} else if code == 0 {
+		fmt.Fprintf(os.Stderr, "\n=== CLAUDE_POOL_TEST_KEEP: artifacts at %s ===\n", runDir)
 	} else {
 		fmt.Fprintf(os.Stderr, "\n=== Test artifacts preserved at: %s ===\n", runDir)
 	}
