@@ -2,6 +2,7 @@ package pool
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 )
@@ -71,12 +72,19 @@ func (cm *ConfigManager) Update(update map[string]any) (Config, error) {
 	}
 
 	if v, ok := update["size"]; ok {
-		switch n := v.(type) {
+		var n int
+		switch val := v.(type) {
 		case float64:
-			cfg.Size = int(n)
+			n = int(val)
 		case int:
-			cfg.Size = n
+			n = val
+		default:
+			return Config{}, fmt.Errorf("size must be a number")
 		}
+		if n < 1 {
+			return Config{}, fmt.Errorf("size must be >= 1")
+		}
+		cfg.Size = n
 	}
 	if v, ok := update["flags"].(string); ok {
 		cfg.Flags = v

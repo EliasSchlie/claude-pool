@@ -105,7 +105,7 @@ Transport: Unix domain socket, newline-delimited JSON. See [docs/protocol.md](do
 
 - **`ping`** — Health check. Returns immediately.
 - **`init`** — Initialize the pool. Reads flags from `config.json`. Restores previously live sessions by default (skip with `noRestore`). Errors if already initialized.
-- **`resize`** — Change slot count. Growing spawns new slots. Shrinking uses kill tokens — processing sessions finish naturally, pinned sessions are never evicted, queued requests are never dropped.
+- **`resize`** — Change slot count (minimum 1). Growing spawns new slots. Shrinking uses kill tokens — processing sessions finish naturally, pinned sessions are never evicted, queued requests are never dropped.
 - **`health`** — Pool health report. Shows all sessions regardless of ownership.
 - **`destroy`** — Kill all sessions, daemon exits. Pool directory and config persist — can re-init later. Requires `confirm: true`.
 - **`config`** — Read or update `config.json`. Changes affect future spawns only.
