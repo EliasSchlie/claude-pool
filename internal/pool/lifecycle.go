@@ -480,76 +480,37 @@ func (m *Manager) deliverPromptAsync(sessionID, prompt string) {
 	m.mu.Unlock()
 }
 
-func (m *Manager) deliverPromptWhenReady(s *Session) {
-	sid := s.ID
-	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-		deadline := time.After(120 * time.Second)
-		for {
-			select {
-			case <-deadline:
-				log.Printf("[deliver] session %s: timed out waiting for idle to deliver prompt", sid)
-				return
-			case <-m.done:
-				return
-			case <-ticker.C:
-				m.mu.Lock()
-				sess := m.sessions[sid]
-				if sess == nil {
-					m.mu.Unlock()
-					log.Printf("[deliver] session %s: gone before prompt delivery", sid)
-					return
-				}
-				if sess.Status == StatusIdle {
-					prompt := sess.PendingPrompt
-					if prompt == "" {
-						m.mu.Unlock()
-						return
-					}
-					sess.PendingPrompt = ""
-					sess.Status = StatusProcessing
-					log.Printf("[deliver] session %s: idle → processing, delivering queued prompt (%d chars)", sid, len(prompt))
-					m.broadcastStatus(sess, StatusIdle)
-					m.deliverPrompt(sess, prompt)
-					m.mu.Unlock()
-					return
-				}
-				m.mu.Unlock()
-			}
-		}
-	}()
-}
-
-// waitForSessionReady polls until a session transitions out of StatusFresh.
+// waitForSessionReady waits until a session transitions out of StatusFresh.
 // Must be called WITHOUT m.mu held. Returns an API response.
 func (m *Manager) waitForSessionReady(id any, sid string, timeout time.Duration) api.Msg {
 	deadline := time.After(timeout)
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
 
+	m.mu.Lock()
 	for {
+		s := m.sessions[sid]
+		if s == nil {
+			m.mu.Unlock()
+			log.Printf("[followup] session %s: died before ready", sid)
+			return api.ErrorResponse(id, "session died before ready")
+		}
+		status := s.Status
+		if status == StatusProcessing || status == StatusIdle {
+			m.mu.Unlock()
+			log.Printf("[followup] session %s: ready (status=%s)", sid, status)
+			return api.Response(id, "started", api.Msg{
+				"sessionId": sid,
+				"status":    status,
+			})
+		}
+		ch := m.statusNotify
+		m.mu.Unlock()
+
 		select {
 		case <-deadline:
 			log.Printf("[followup] session %s: timed out waiting for ready", sid)
 			return api.ErrorResponse(id, "session failed to become ready")
-		case <-ticker.C:
+		case <-ch:
 			m.mu.Lock()
-			s := m.sessions[sid]
-			if s == nil {
-				m.mu.Unlock()
-				log.Printf("[followup] session %s: died before ready", sid)
-				return api.ErrorResponse(id, "session died before ready")
-			}
-			status := s.Status
-			m.mu.Unlock()
-			if status == StatusProcessing || status == StatusIdle {
-				log.Printf("[followup] session %s: ready (status=%s)", sid, status)
-				return api.Response(id, "started", api.Msg{
-					"sessionId": sid,
-					"status":    status,
-				})
-			}
 		}
 	}
 }
@@ -625,9 +586,8 @@ func (m *Manager) tryDequeue() {
 		log.Printf("[dequeue] dequeuing session %s (active=%d/%d, remaining queue=%d)", s.ID, active, m.poolSize, len(m.queue))
 		s.Status = StatusFresh
 		m.spawnSession(s, s.ClaudeUUID != "")
-		if s.PendingPrompt != "" {
-			m.deliverPromptWhenReady(s)
-		}
+		// PendingPrompt is delivered by watchIdleSignal when the session
+		// becomes ready (Fresh → idle signal → checks PendingPrompt).
 		active++
 	}
 }
