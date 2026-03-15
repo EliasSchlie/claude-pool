@@ -28,6 +28,7 @@ func (m *Manager) saveOffloadMeta(s *Session) {
 		"cwd":        s.Cwd,
 		"createdAt":  s.CreatedAt.UTC().Format(time.RFC3339),
 		"flags":      s.Flags,
+		"metadata":   s.Metadata,
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
@@ -58,6 +59,7 @@ func (m *Manager) savePoolState() {
 			"lastUsedAt": s.LastUsedAt.UTC().Format(time.RFC3339),
 			"flags":      s.Flags,
 			"pinned":     s.Pinned,
+			"metadata":   s.Metadata,
 		}
 		sessions = append(sessions, sess)
 	}
@@ -139,6 +141,7 @@ func (m *Manager) sessionFromMap(sm map[string]any) *Session {
 		Cwd:        strVal(sm, "cwd"),
 		Flags:      strVal(sm, "flags"),
 		Pinned:     boolVal(sm, "pinned"),
+		Metadata:   metadataFromMap(sm),
 	}
 
 	if t := strVal(sm, "createdAt"); t != "" {

@@ -182,7 +182,7 @@ These flags are available on every command:
   → `health`: object — Slot count, session states, queue depth.
 
 **resize** — Change slot count immediately and update config.
-  `--size <n>` (required) — New slot count.
+  `--size <n>` (required) — New slot count (minimum 1).
 
 **config** — Read or update pool config. Default keys: `flags` (string, Claude CLI flags), `size` (integer, default slot count). Arbitrary key-value pairs can also be stored for session metadata.
   `--set <key>=<value>` — Update a config field. Omit to read.

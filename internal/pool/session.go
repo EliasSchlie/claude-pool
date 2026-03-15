@@ -17,6 +17,13 @@ const (
 	StatusArchived   = "archived"
 )
 
+// SessionMetadata holds user-defined session labels.
+type SessionMetadata struct {
+	Name        string            `json:"name,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Tags        map[string]string `json:"tags,omitempty"`
+}
+
 // Session represents a managed Claude Code session.
 type Session struct {
 	ID           string
@@ -32,6 +39,7 @@ type Session struct {
 	LastUsedAt   time.Time // updated on prompt delivery, used for LRU eviction
 	PID          int
 	PendingInput string // Un-submitted text in terminal buffer (attach pipe)
+	Metadata     SessionMetadata
 
 	// Internal: pool-owned pre-warmed session (can be claimed by start/pin)
 	PreWarmed bool
@@ -58,21 +66,23 @@ func (s *Session) IsBusy() bool {
 	return s.Status == StatusProcessing || s.Status == StatusQueued
 }
 
+// ExternalStatus returns the API-visible status. Fresh is internal —
+// externally exposed as idle (or processing if a prompt is pending).
+func (s *Session) ExternalStatus() string {
+	if s.Status == StatusFresh {
+		if s.PendingPrompt != "" {
+			return StatusProcessing
+		}
+		return StatusIdle
+	}
+	return s.Status
+}
+
 // ToMsg converts a session to a protocol message.
 func (s *Session) ToMsg() map[string]any {
-	// Fresh is internal — externally exposed as idle (or processing if
-	// a prompt is pending delivery).
-	status := s.Status
-	if status == StatusFresh {
-		if s.PendingPrompt != "" {
-			status = StatusProcessing
-		} else {
-			status = StatusIdle
-		}
-	}
 	m := map[string]any{
 		"sessionId": s.ID,
-		"status":    status,
+		"status":    s.ExternalStatus(),
 		"priority":  s.Priority,
 		"pinned":    s.Pinned,
 		"createdAt": s.CreatedAt.UTC().Format(time.RFC3339),
@@ -96,6 +106,23 @@ func (s *Session) ToMsg() map[string]any {
 	if s.IsLive() {
 		m["pendingInput"] = s.PendingInput
 	}
+	// Always include metadata (empty object if unset)
+	meta := map[string]any{}
+	if s.Metadata.Name != "" {
+		meta["name"] = s.Metadata.Name
+	}
+	if s.Metadata.Description != "" {
+		meta["description"] = s.Metadata.Description
+	}
+	if len(s.Metadata.Tags) > 0 {
+		// Shallow copy to prevent callers from mutating session state
+		tags := make(map[string]string, len(s.Metadata.Tags))
+		for k, v := range s.Metadata.Tags {
+			tags[k] = v
+		}
+		meta["tags"] = tags
+	}
+	m["metadata"] = meta
 	return m
 }
 

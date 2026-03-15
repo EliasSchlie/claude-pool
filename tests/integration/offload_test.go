@@ -10,6 +10,7 @@ package integration
 // Flow:
 //
 //   1.  "start and wait for idle"
+//   1a. "metadata persists across offload and restore"
 //   2.  "offload idle session"
 //   3.  "stop on offloaded errors"
 //   4.  "offload pinned session auto-unpins"
@@ -54,6 +55,42 @@ func TestOffload(t *testing.T) {
 
 		pool.awaitStatus(s1, "idle", 60*time.Second)
 		pool.awaitStatus(s2, "idle", 60*time.Second)
+	})
+
+	t.Run("metadata persists across offload and restore", func(t *testing.T) {
+		// Set metadata on s1 while it's live
+		resp := pool.send(Msg{"type": "set-metadata", "sessionId": s1, "metadata": Msg{
+			"name": "offload test",
+			"tags": Msg{"lifecycle": "offload"},
+		}})
+		assertNotError(t, resp)
+
+		// Offload s1
+		resp = pool.send(Msg{"type": "offload", "sessionId": s1})
+		assertNotError(t, resp)
+
+		// Metadata should survive offload
+		info := parseSession(t, pool.send(Msg{"type": "info", "sessionId": s1})["session"])
+		assertStatus(t, info, "offloaded")
+		if info.Metadata.Name != "offload test" {
+			t.Fatalf("metadata.name should survive offload, got %q", info.Metadata.Name)
+		}
+		if info.Metadata.Tags["lifecycle"] != "offload" {
+			t.Fatalf("metadata.tags should survive offload, got %v", info.Metadata.Tags)
+		}
+
+		// Restore via followup and verify metadata survives the full round-trip
+		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: restored"})
+		pool.awaitStatus(s1, "idle", 60*time.Second)
+
+		info = parseSession(t, pool.send(Msg{"type": "info", "sessionId": s1})["session"])
+		assertStatus(t, info, "idle")
+		if info.Metadata.Name != "offload test" {
+			t.Fatalf("metadata.name should survive restore, got %q", info.Metadata.Name)
+		}
+		if info.Metadata.Tags["lifecycle"] != "offload" {
+			t.Fatalf("metadata.tags should survive restore, got %v", info.Metadata.Tags)
+		}
 	})
 
 	t.Run("offload idle session", func(t *testing.T) {

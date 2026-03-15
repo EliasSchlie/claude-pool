@@ -16,6 +16,10 @@ package integration
 //   1.  "start returns sessionId and status"
 //   2.  "wait returns result"
 //   3.  "info shows session details"
+//   3a. "set-metadata merge semantics"
+//   3b. "set-metadata clear with null"
+//   3c. "set-metadata type validation"
+//   3d. "metadata visible in ls"
 //   4.  "cwd updates on directory change"
 //   5.  "wait on already-idle returns immediately"
 //   6.  "capture — detail=tools"
@@ -107,6 +111,132 @@ func TestSession(t *testing.T) {
 		assertNonEmpty(t, "createdAt", info.CreatedAt)
 		if len(info.Children) != 0 {
 			t.Fatalf("expected no children, got %d", len(info.Children))
+		}
+		// s1 was started without metadata — should be empty
+		if info.Metadata.Name != "" {
+			t.Fatalf("expected empty metadata name, got %q", info.Metadata.Name)
+		}
+		if info.Metadata.Tags != nil {
+			t.Fatalf("expected nil metadata tags, got %v", info.Metadata.Tags)
+		}
+	})
+
+	t.Run("set-metadata merge semantics", func(t *testing.T) {
+		// Set name and tags
+		resp := pool.send(Msg{"type": "set-metadata", "sessionId": s1, "metadata": Msg{
+			"name": "test session",
+			"tags": Msg{"env": "test", "project": "pool"},
+		}})
+		assertNotError(t, resp)
+		assertType(t, resp, "ok")
+
+		info := parseSession(t, pool.send(Msg{"type": "info", "sessionId": s1})["session"])
+		if info.Metadata.Name != "test session" {
+			t.Fatalf("expected name %q, got %q", "test session", info.Metadata.Name)
+		}
+		if info.Metadata.Tags["env"] != "test" || info.Metadata.Tags["project"] != "pool" {
+			t.Fatalf("expected tags {env:test, project:pool}, got %v", info.Metadata.Tags)
+		}
+
+		// Merge: set description without touching name or tags
+		resp = pool.send(Msg{"type": "set-metadata", "sessionId": s1, "metadata": Msg{
+			"description": "integration test session",
+		}})
+		assertNotError(t, resp)
+
+		info = parseSession(t, pool.send(Msg{"type": "info", "sessionId": s1})["session"])
+		if info.Metadata.Name != "test session" {
+			t.Fatalf("merge should preserve name, got %q", info.Metadata.Name)
+		}
+		if info.Metadata.Description != "integration test session" {
+			t.Fatalf("expected description set, got %q", info.Metadata.Description)
+		}
+		if info.Metadata.Tags["env"] != "test" {
+			t.Fatalf("merge should preserve tags, got %v", info.Metadata.Tags)
+		}
+
+		// Merge tags: add a key, leave existing keys
+		resp = pool.send(Msg{"type": "set-metadata", "sessionId": s1, "metadata": Msg{
+			"tags": Msg{"owner": "ci"},
+		}})
+		assertNotError(t, resp)
+
+		info = parseSession(t, pool.send(Msg{"type": "info", "sessionId": s1})["session"])
+		if info.Metadata.Tags["owner"] != "ci" {
+			t.Fatalf("expected new tag owner=ci, got %v", info.Metadata.Tags)
+		}
+		if info.Metadata.Tags["env"] != "test" {
+			t.Fatalf("existing tags should be preserved, got %v", info.Metadata.Tags)
+		}
+	})
+
+	t.Run("set-metadata clear with null", func(t *testing.T) {
+		// Clear description with null
+		resp := pool.send(Msg{"type": "set-metadata", "sessionId": s1, "metadata": Msg{
+			"description": nil,
+		}})
+		assertNotError(t, resp)
+
+		info := parseSession(t, pool.send(Msg{"type": "info", "sessionId": s1})["session"])
+		if info.Metadata.Description != "" {
+			t.Fatalf("expected description cleared, got %q", info.Metadata.Description)
+		}
+		if info.Metadata.Name != "test session" {
+			t.Fatalf("null on description should not affect name, got %q", info.Metadata.Name)
+		}
+
+		// Delete a single tag with null
+		resp = pool.send(Msg{"type": "set-metadata", "sessionId": s1, "metadata": Msg{
+			"tags": Msg{"owner": nil},
+		}})
+		assertNotError(t, resp)
+
+		info = parseSession(t, pool.send(Msg{"type": "info", "sessionId": s1})["session"])
+		if _, exists := info.Metadata.Tags["owner"]; exists {
+			t.Fatalf("expected tag 'owner' deleted, got %v", info.Metadata.Tags)
+		}
+		if info.Metadata.Tags["env"] != "test" {
+			t.Fatalf("other tags should be preserved, got %v", info.Metadata.Tags)
+		}
+	})
+
+	t.Run("set-metadata type validation", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "set-metadata", "sessionId": s1, "metadata": Msg{
+			"name": 123,
+		}})
+		assertError(t, resp)
+		assertContains(t, strVal(resp, "error"), "string")
+
+		resp = pool.send(Msg{"type": "set-metadata", "sessionId": s1, "metadata": Msg{
+			"tags": Msg{"bad": 456},
+		}})
+		assertError(t, resp)
+		assertContains(t, strVal(resp, "error"), "string")
+
+		// Verify metadata wasn't corrupted by the failed requests
+		info := parseSession(t, pool.send(Msg{"type": "info", "sessionId": s1})["session"])
+		if info.Metadata.Name != "test session" {
+			t.Fatalf("failed set-metadata should not change name, got %q", info.Metadata.Name)
+		}
+	})
+
+	t.Run("metadata visible in ls", func(t *testing.T) {
+		resp := pool.send(Msg{"type": "ls", "all": true})
+		assertNotError(t, resp)
+
+		sessions := parseSessions(t, resp)
+		found := false
+		for _, s := range sessions {
+			if s.SessionID == s1 {
+				found = true
+				if s.Metadata.Name != "test session" {
+					t.Fatalf("ls should include metadata, got name=%q", s.Metadata.Name)
+				}
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("s1 not found in ls results")
 		}
 	})
 

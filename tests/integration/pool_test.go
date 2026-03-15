@@ -18,11 +18,13 @@ package integration
 //   6.  "health"
 //   7.  "resize up to 3"
 //   8.  "resize down to 1"
-//   9.  "resize respects pins"
-//  10.  "destroy without confirm errors"
-//  11.  "destroy"
-//  12.  "re-init restores sessions and config"
-//  13.  "re-init with noRestore"
+//   9.  "resize reversal clears pending kill tokens"
+//  10.  "deferred eviction of processing sessions"
+//  11.  "resize respects pins"
+//  12.  "destroy without confirm errors"
+//  13.  "destroy"
+//  14.  "re-init restores sessions and config"
+//  15.  "re-init with noRestore"
 
 import (
 	"testing"
@@ -168,15 +170,79 @@ func TestPool(t *testing.T) {
 		pool.awaitPoolSize(1, 15*time.Second)
 	})
 
+	t.Run("resize reversal clears pending kill tokens", func(t *testing.T) {
+		// Grow to 2 so we have sessions to work with
+		pool.send(Msg{"type": "resize", "size": 2})
+		pool.awaitIdleCount(2, 60*time.Second)
+
+		lsResp := pool.send(Msg{"type": "ls", "all": true, "statuses": []string{"idle", "fresh"}})
+		sessions := parseSessions(t, lsResp)
+		if len(sessions) < 2 {
+			t.Fatalf("expected 2 idle sessions, got %d", len(sessions))
+		}
+		sa, sb := sessions[0].SessionID, sessions[1].SessionID
+
+		// Make both processing so kill tokens can't be consumed
+		pool.send(Msg{"type": "followup", "sessionId": sa, "prompt": "run the bash command: sleep 60"})
+		pool.send(Msg{"type": "followup", "sessionId": sb, "prompt": "run the bash command: sleep 60"})
+		pool.awaitStatus(sa, "processing", 15*time.Second)
+		pool.awaitStatus(sb, "processing", 15*time.Second)
+
+		// Resize to 1 — 1 kill token lingers (both processing, nothing evictable)
+		pool.send(Msg{"type": "resize", "size": 1})
+
+		// Change mind — resize back to 2. Token must be cleared.
+		pool.send(Msg{"type": "resize", "size": 2})
+
+		// Both sessions must still be processing (no premature eviction)
+		infoA := parseSession(t, pool.send(Msg{"type": "info", "sessionId": sa})["session"])
+		infoB := parseSession(t, pool.send(Msg{"type": "info", "sessionId": sb})["session"])
+		if infoA.Status != "processing" {
+			t.Fatalf("expected sa still processing, got %s", infoA.Status)
+		}
+		if infoB.Status != "processing" {
+			t.Fatalf("expected sb still processing, got %s", infoB.Status)
+		}
+
+		// Stop both — neither should be evicted (tokens were cleared)
+		pool.send(Msg{"type": "stop", "sessionId": sa})
+		pool.send(Msg{"type": "stop", "sessionId": sb})
+		pool.awaitIdleCount(2, 60*time.Second)
+	})
+
+	t.Run("deferred eviction of processing sessions", func(t *testing.T) {
+		// State: poolSize=2, 2 idle sessions from previous step
+		lsResp := pool.send(Msg{"type": "ls", "all": true, "statuses": []string{"idle", "fresh"}})
+		sessions := parseSessions(t, lsResp)
+		if len(sessions) < 2 {
+			t.Fatalf("expected 2 idle sessions, got %d", len(sessions))
+		}
+		sa, sb := sessions[0].SessionID, sessions[1].SessionID
+
+		// Make both processing
+		pool.send(Msg{"type": "followup", "sessionId": sa, "prompt": "run the bash command: sleep 60"})
+		pool.send(Msg{"type": "followup", "sessionId": sb, "prompt": "run the bash command: sleep 60"})
+		pool.awaitStatus(sa, "processing", 15*time.Second)
+		pool.awaitStatus(sb, "processing", 15*time.Second)
+
+		// Resize to 1 — 1 kill token lingers (both processing)
+		pool.send(Msg{"type": "resize", "size": 1})
+
+		// Stop both — the lingering token should evict one when it becomes idle
+		pool.send(Msg{"type": "stop", "sessionId": sa})
+		pool.send(Msg{"type": "stop", "sessionId": sb})
+
+		pool.awaitPoolSize(1, 15*time.Second)
+	})
+
 	t.Run("resize respects pins", func(t *testing.T) {
 		pool.send(Msg{"type": "resize", "size": 2})
 		pool.awaitIdleCount(2, 60*time.Second)
 
-		// Identify current sessions
-		lsResp := pool.send(Msg{"type": "ls", "all": true})
+		lsResp := pool.send(Msg{"type": "ls", "all": true, "statuses": []string{"idle", "fresh"}})
 		sessions := parseSessions(t, lsResp)
 		if len(sessions) < 2 {
-			t.Fatalf("expected at least 2 sessions, got %d", len(sessions))
+			t.Fatalf("expected 2 idle sessions, got %d", len(sessions))
 		}
 
 		pinned := sessions[0].SessionID
@@ -196,14 +262,13 @@ func TestPool(t *testing.T) {
 		}
 
 		pool.send(Msg{"type": "unpin", "sessionId": pinned})
+
 	})
 
 	t.Run("destroy without confirm errors", func(t *testing.T) {
 		resp := pool.send(Msg{"type": "destroy"})
 		assertError(t, resp)
 	})
-
-	// s1 was the first session — we'll check if it's restored after re-init
 
 	t.Run("destroy", func(t *testing.T) {
 		resp := pool.send(Msg{"type": "destroy", "confirm": true})
@@ -236,19 +301,18 @@ func TestPool(t *testing.T) {
 			pool.awaitStatus(sid, "idle", 60*time.Second)
 		}
 
-		// Session restoration is a contract — s1 must survive destroy+re-init
-		if s1 != "" {
-			found := false
-			for _, raw := range sessions {
-				sm, _ := raw.(map[string]any)
-				if strVal(sm, "sessionId") == s1 {
-					found = true
-					break
-				}
+		// At least one session must be restored (has a Claude UUID from prior run),
+		// not freshly spawned
+		hasRestored := false
+		for _, raw := range sessions {
+			sm, _ := raw.(map[string]any)
+			if strVal(sm, "claudeUUID") != "" {
+				hasRestored = true
+				break
 			}
-			if !found {
-				t.Fatalf("expected session %s to be restored after re-init, but it wasn't in pool sessions", s1)
-			}
+		}
+		if !hasRestored {
+			t.Fatal("expected at least one restored session with a Claude UUID after re-init")
 		}
 	})
 

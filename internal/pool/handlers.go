@@ -143,10 +143,7 @@ func (m *Manager) handleHealth(id any) api.Msg {
 		if s.Status == StatusArchived {
 			continue
 		}
-		status := s.Status
-		if status == StatusFresh {
-			status = StatusIdle
-		}
+		status := s.ExternalStatus()
 		counts[status]++
 
 		hs := api.Msg{
@@ -190,8 +187,11 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 
 	s := m.newSession(parentID)
 	s.PendingPrompt = prompt
+	if _, hasMetadata := req["metadata"]; hasMetadata {
+		s.Metadata = metadataFromMap(req)
+	}
 	m.sessions[s.ID] = s
-	log.Printf("[start] created session %s (parent=%s, prompt=%d chars)", s.ID, parentID, len(prompt))
+	log.Printf("[start] created session %s (parent=%s, prompt=%d chars, name=%q)", s.ID, parentID, len(prompt), s.Metadata.Name)
 
 	// Try to claim a fresh/idle slot
 	if fresh := m.findFreshSlot(); fresh != nil {
@@ -654,6 +654,17 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 	tree, _ := req["tree"].(bool)
 	showArchived, _ := req["archived"].(bool)
 
+	// Parse optional statuses filter
+	var statusFilter map[string]bool
+	if raw, ok := req["statuses"].([]any); ok && len(raw) > 0 {
+		statusFilter = make(map[string]bool, len(raw))
+		for _, v := range raw {
+			if s, ok := v.(string); ok {
+				statusFilter[s] = true
+			}
+		}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -664,6 +675,9 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 	results := make([]any, 0)
 	for _, s := range m.sessions {
 		if s.Status == StatusArchived && !showArchived {
+			continue
+		}
+		if statusFilter != nil && !statusFilter[s.Status] {
 			continue
 		}
 		if !all {
@@ -805,6 +819,9 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 
 	if sessionID == "" {
 		s := m.newSession(parentID)
+		if _, hasMetadata := req["metadata"]; hasMetadata {
+			s.Metadata = metadataFromMap(req)
+		}
 		m.sessions[s.ID] = s
 		log.Printf("[pin] creating new pinned session %s (parent=%s duration=%.0fs)", s.ID, parentID, duration)
 
@@ -933,6 +950,95 @@ func (m *Manager) handleSetPriority(id any, req api.Msg) api.Msg {
 	return api.OkResponse(id)
 }
 
+// --- Set Metadata ---
+
+func (m *Manager) handleSetMetadata(id any, req api.Msg) api.Msg {
+	sessionID, _ := req["sessionId"].(string)
+	if sessionID == "" {
+		return api.ErrorResponse(id, "sessionId is required")
+	}
+	metaRaw, hasMetadata := req["metadata"].(map[string]any)
+	if !hasMetadata {
+		return api.ErrorResponse(id, "metadata is required")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s := m.resolveSession(sessionID)
+	if s == nil {
+		return api.ErrorResponse(id, "session not found: "+sessionID)
+	}
+
+	changes := map[string]any{}
+
+	// Merge semantics: only update fields that are present in the request.
+	// Explicit null clears the field. Wrong types are rejected.
+	if v, ok := metaRaw["name"]; ok {
+		if v == nil {
+			s.Metadata.Name = ""
+		} else if sv, ok := v.(string); ok {
+			s.Metadata.Name = sv
+		} else {
+			return api.ErrorResponse(id, "metadata.name must be a string or null")
+		}
+		changes["name"] = s.Metadata.Name
+	}
+	if v, ok := metaRaw["description"]; ok {
+		if v == nil {
+			s.Metadata.Description = ""
+		} else if sv, ok := v.(string); ok {
+			s.Metadata.Description = sv
+		} else {
+			return api.ErrorResponse(id, "metadata.description must be a string or null")
+		}
+		changes["description"] = s.Metadata.Description
+	}
+	if v, ok := metaRaw["tags"]; ok {
+		if v == nil {
+			s.Metadata.Tags = nil
+		} else if tagMap, ok := v.(map[string]any); ok {
+			if s.Metadata.Tags == nil {
+				s.Metadata.Tags = make(map[string]string)
+			}
+			for tk, tv := range tagMap {
+				if tv == nil {
+					delete(s.Metadata.Tags, tk)
+				} else if sv, ok := tv.(string); ok {
+					s.Metadata.Tags[tk] = sv
+				} else {
+					return api.ErrorResponse(id, "metadata.tags values must be strings or null")
+				}
+			}
+			if len(s.Metadata.Tags) == 0 {
+				s.Metadata.Tags = nil
+			}
+		} else {
+			return api.ErrorResponse(id, "metadata.tags must be an object or null")
+		}
+		// Report current tags state in changes (copy to avoid aliasing)
+		if len(s.Metadata.Tags) > 0 {
+			tagsCopy := make(map[string]string, len(s.Metadata.Tags))
+			for k, v := range s.Metadata.Tags {
+				tagsCopy[k] = v
+			}
+			changes["tags"] = tagsCopy
+		} else {
+			changes["tags"] = nil
+		}
+	}
+
+	log.Printf("[set-metadata] session %s: updated metadata (name=%q, desc=%d chars, tags=%d)",
+		s.ID, s.Metadata.Name, len(s.Metadata.Description), len(s.Metadata.Tags))
+
+	m.broadcastEvent(api.Msg{
+		"type": "event", "event": "updated",
+		"sessionId": s.ID, "changes": api.Msg{"metadata": changes},
+	})
+	m.savePoolState()
+	return api.OkResponse(id)
+}
+
 // --- Resize ---
 
 func (m *Manager) handleResize(id any, req api.Msg) api.Msg {
@@ -949,8 +1055,15 @@ func (m *Manager) handleResize(id any, req api.Msg) api.Msg {
 	}
 
 	target := int(newSize)
-	if target < 0 {
-		return api.ErrorResponse(id, "size must be >= 0")
+	if target < 1 {
+		return api.ErrorResponse(id, "size must be >= 1")
+	}
+
+	// Reset kill tokens — resize is absolute ("to size N"), so any pending
+	// evictions from a prior shrink are superseded by the new target.
+	if m.killTokens > 0 {
+		log.Printf("[resize] clearing %d kill tokens from prior shrink", m.killTokens)
+		m.killTokens = 0
 	}
 
 	oldSize := m.poolSize
@@ -968,7 +1081,7 @@ func (m *Manager) handleResize(id any, req api.Msg) api.Msg {
 		}
 	} else if target < oldSize {
 		log.Printf("[resize] shrinking: adding %d kill tokens", oldSize-target)
-		m.killTokens += oldSize - target
+		m.killTokens = oldSize - target
 		m.tryKillTokens()
 	}
 
