@@ -287,7 +287,9 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 	configPath := filepath.Join(dir, "config.json")
 	var cfg map[string]any
 	if data, err := os.ReadFile(configPath); err == nil {
-		json.Unmarshal(data, &cfg)
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: corrupt config.json, starting fresh: %v\n", err)
+		}
 	}
 	if cfg == nil {
 		cfg = map[string]any{}
@@ -318,6 +320,14 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 		return fmt.Errorf("cannot start daemon: %w", err)
 	}
 
+	// Kill daemon on any subsequent failure — cleared on success.
+	killDaemon := true
+	defer func() {
+		if killDaemon {
+			daemon.Process.Kill()
+		}
+	}()
+
 	// Wait for socket to appear
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -327,14 +337,12 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if _, err := os.Stat(sock); err != nil {
-		daemon.Process.Kill()
 		return fmt.Errorf("daemon socket never appeared at %s", sock)
 	}
 
 	// Connect and send init
 	c, err := dial(sock)
 	if err != nil {
-		daemon.Process.Kill()
 		return fmt.Errorf("cannot connect to daemon: %w", err)
 	}
 	defer c.close()
@@ -349,13 +357,13 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 
 	resp, err := c.send(initMsg)
 	if err != nil {
-		daemon.Process.Kill()
 		return err
 	}
 	if err := checkError(resp); err != nil {
-		daemon.Process.Kill()
 		return err
 	}
+
+	killDaemon = false // success — don't kill on exit
 
 	// Register pool
 	if err := registerPool(poolName, sock); err != nil {
