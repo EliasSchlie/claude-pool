@@ -26,47 +26,111 @@ func homeDir() (string, error) {
 }
 
 func cmdInstall() error {
-	home, err := homeDir()
+	changed, err := doInstall()
 	if err != nil {
 		return err
+	}
+	if changed {
+		fmt.Println("\n✅ claude-pool installed!")
+		fmt.Println("   Start a new Claude session to activate.")
+	} else {
+		fmt.Println("✅ claude-pool already installed (up to date).")
+	}
+	return nil
+}
+
+// doInstall ensures skill, hook-runner, and hooks are installed.
+// Only writes files that are missing or outdated. Returns true if anything changed.
+func doInstall() (bool, error) {
+	home, err := homeDir()
+	if err != nil {
+		return false, err
 	}
 	claudeBase := filepath.Join(home, ".claude")
 	poolBase := filepath.Join(home, ".claude-pool")
 
-	// 1. Install skill
+	changed := false
+
+	// 1. Install skill (only if content differs)
 	skillDir := filepath.Join(claudeBase, "skills", "claude-pool")
-	if err := os.MkdirAll(skillDir, 0o755); err != nil {
-		return fmt.Errorf("create skill dir: %w", err)
-	}
+	skillPath := filepath.Join(skillDir, "SKILL.md")
 	skillContent, err := embeddedSkill.ReadFile("embedded/skill.md")
 	if err != nil {
-		return fmt.Errorf("read embedded skill: %w", err)
+		return false, fmt.Errorf("read embedded skill: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), skillContent, 0o644); err != nil {
-		return fmt.Errorf("write skill: %w", err)
+	if !fileMatchesContent(skillPath, skillContent) {
+		if err := os.MkdirAll(skillDir, 0o755); err != nil {
+			return false, fmt.Errorf("create skill dir: %w", err)
+		}
+		if err := os.WriteFile(skillPath, skillContent, 0o644); err != nil {
+			return false, fmt.Errorf("write skill: %w", err)
+		}
+		fmt.Println("  ✅ Skill installed")
+		changed = true
 	}
-	fmt.Println("  ✅ Skill installed")
 
-	// 2. Install hook runner
-	if err := os.MkdirAll(poolBase, 0o755); err != nil {
-		return fmt.Errorf("create pool base dir: %w", err)
-	}
+	// 2. Install hook runner (only if content differs)
 	runnerPath := filepath.Join(poolBase, "hook-runner.sh")
-	if err := os.WriteFile(runnerPath, hookfiles.HookRunner, 0o755); err != nil {
-		return fmt.Errorf("write hook-runner.sh: %w", err)
+	if !fileMatchesContent(runnerPath, hookfiles.HookRunner) {
+		if err := os.MkdirAll(poolBase, 0o755); err != nil {
+			return false, fmt.Errorf("create pool base dir: %w", err)
+		}
+		if err := os.WriteFile(runnerPath, hookfiles.HookRunner, 0o755); err != nil {
+			return false, fmt.Errorf("write hook-runner.sh: %w", err)
+		}
+		fmt.Println("  ✅ Hook runner installed")
+		changed = true
 	}
-	fmt.Println("  ✅ Hook runner installed")
 
-	// 3. Register hooks in settings.json
+	// 3. Register hooks in settings.json (only if missing)
 	settingsPath := filepath.Join(claudeBase, "settings.json")
-	if err := addHooksToSettings(settingsPath, runnerPath); err != nil {
-		return fmt.Errorf("register hooks: %w", err)
+	if !hooksRegistered(settingsPath) {
+		if err := addHooksToSettings(settingsPath, runnerPath); err != nil {
+			return false, fmt.Errorf("register hooks: %w", err)
+		}
+		fmt.Println("  ✅ Hooks registered in settings.json")
+		changed = true
 	}
-	fmt.Println("  ✅ Hooks registered in settings.json")
 
-	fmt.Println("\n✅ claude-pool installed!")
-	fmt.Println("   Start a new Claude session to activate.")
-	return nil
+	return changed, nil
+}
+
+// fileMatchesContent returns true if the file at path exists and has the given content.
+func fileMatchesContent(path string, content []byte) bool {
+	existing, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return string(existing) == string(content)
+}
+
+// hooksRegistered checks if claude-pool hooks are present in settings.json.
+func hooksRegistered(settingsPath string) bool {
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return false
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return false
+	}
+	hooks, _ := data["hooks"].(map[string]interface{})
+	if hooks == nil {
+		return false
+	}
+	// Check that at least one event type has a pool entry
+	for _, val := range hooks {
+		entries, ok := val.([]interface{})
+		if !ok {
+			continue
+		}
+		for _, entry := range entries {
+			if entryBelongsToPool(entry) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func cmdUninstall() error {
