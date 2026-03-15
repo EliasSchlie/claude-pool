@@ -475,7 +475,12 @@
           "id": { "type": "integer" },
           "all": { "type": "boolean", "default": false },
           "tree": { "type": "boolean", "default": false },
-          "archived": { "type": "boolean", "default": false }
+          "archived": { "type": "boolean", "default": false },
+          "statuses": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Filter by session status (e.g. [\"idle\", \"processing\"]). Omit for no filtering."
+          }
         },
         "required": ["type"]
       },
