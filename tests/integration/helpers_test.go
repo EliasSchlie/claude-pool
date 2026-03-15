@@ -708,6 +708,14 @@ func assertHasChild(t *testing.T, parent SessionInfo, childID string) {
 	t.Fatalf("expected session %s to have child %s", parent.SessionID, childID)
 }
 
+func assertNumVal(t *testing.T, m Msg, key string, expected float64) {
+	t.Helper()
+	got := numVal(m, key)
+	if got != expected {
+		t.Fatalf("expected %s=%v, got %v", key, expected, got)
+	}
+}
+
 func assertExitError(t *testing.T, result cmdResult) {
 	t.Helper()
 	if result.ExitCode == 0 {

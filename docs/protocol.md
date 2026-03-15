@@ -77,6 +77,8 @@ Field tables and basic behavior are in SPEC.md. This section documents per-state
 
 ### `init`
 
+Response: `{ type: "health", health }` — same format as `health` command.
+
 If previous session state exists, `init` restores sessions that were **live** (idle or processing) when the pool last shut down via `/resume`. Excess sessions beyond `size` stay offloaded. `noRestore: true` ignores previous state.
 
 ### `resize`
@@ -111,7 +113,7 @@ Long-polls until target session reaches `idle`. Returns immediately if already i
 
 ### `archive`
 
-Live → stop + offload + archive (slot freed). Has unarchived children → errors unless `recursive: true` (depth-first). Pinned → unpinned first.
+If processing → stopped first. If loaded (idle) → offloaded first. Has unarchived children → errors unless `recursive: true` (depth-first). Pinned → unpinned first. Idempotent on already-archived sessions.
 
 ### `set`
 
@@ -125,7 +127,11 @@ API-only — not exposed in the CLI. For user interfaces (e.g. Open Cockpit).
 
 ### `attach`
 
-Creates a temporary Unix socket for raw PTY I/O. Multiple clients can attach simultaneously (broadcast). Pipe closes on offload/death/shutdown. Only works for live sessions. Attaching does not affect other operations.
+Creates a temporary Unix socket for raw PTY I/O. Response includes current PTY dimensions (`cols`, `rows`) so clients can create viewports at matching size before writing replay buffer. Multiple clients can attach simultaneously (broadcast). Pipe closes on offload/death/shutdown. Only works for live sessions. Attaching does not affect other operations.
+
+### `pty-resize`
+
+Sets a session's PTY dimensions (`cols`, `rows`). Triggers SIGWINCH on the underlying process. Only works on live sessions (idle, processing).
 
 ### `subscribe`
 

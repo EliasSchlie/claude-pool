@@ -13,23 +13,24 @@ package integration
 //   1.  "ping before init fails"
 //   2.  "pools before init"
 //   3.  "init"
-//   4.  "init errors if already running"
-//   5.  "ping after init"
-//   6.  "health"
-//   7.  "pools lists the pool"
-//   8.  "config read"
-//   9.  "config set"
-//   9a. "config keepFresh"
-//  10.  "resize rejects size 0"
-//  11.  "resize up to 3"
-//  12.  "resize down to 1"
-//  13.  "resize reversal clears pending kill tokens"
-//  14.  "deferred eviction of processing sessions"
-//  15.  "resize respects pins"
-//  16.  "destroy without confirm errors"
-//  17.  "destroy"
-//  18.  "re-init restores sessions and config"
-//  19.  "re-init with no-restore"
+//   4.  "init response matches health"
+//   5.  "init errors if already running"
+//   6.  "ping after init"
+//   7.  "health"
+//   8.  "pools lists the pool"
+//   9.  "config read"
+//  10.  "config set"
+//  10a. "config keepFresh"
+//  11.  "resize rejects size 0"
+//  12.  "resize up to 3"
+//  13.  "resize down to 1"
+//  14.  "resize reversal clears pending kill tokens"
+//  15.  "deferred eviction of processing sessions"
+//  16.  "resize respects pins"
+//  17.  "destroy without confirm errors"
+//  18.  "destroy"
+//  19.  "re-init restores sessions and config"
+//  20.  "re-init with no-restore"
 
 import (
 	"testing"
@@ -59,13 +60,12 @@ func TestPool(t *testing.T) {
 			"--keep-fresh", "0",
 			"--flags", "--dangerously-skip-permissions --model haiku")
 
-		poolState, ok := resp["pool"].(map[string]any)
+		// SPEC: init response is "same as health"
+		health, ok := resp["health"].(map[string]any)
 		if !ok {
-			t.Fatalf("expected pool object in init response, got %v", resp)
+			t.Fatalf("expected health object in init response, got %v", resp)
 		}
-		if numVal(poolState, "size") != 2 {
-			t.Fatalf("expected pool size 2, got %v", numVal(poolState, "size"))
-		}
+		assertNumVal(t, health, "size", 2)
 
 		pool.waitForIdleCount(2, 90*time.Second)
 
@@ -75,6 +75,24 @@ func TestPool(t *testing.T) {
 		}
 		s1 = sessions[0].SessionID
 		s2 = sessions[1].SessionID
+	})
+
+	// Prevents: init response diverging from health response
+	// (SPEC: "Pool state after initialization (same as health).")
+	t.Run("init response matches health", func(t *testing.T) {
+		health := pool.getHealth()
+
+		// Verify health fields present — same ones we check in the health step
+		assertNumVal(t, health, "size", 2)
+		if _, ok := health["counts"]; !ok {
+			t.Fatal("init health response missing 'counts'")
+		}
+		if _, ok := health["queueDepth"]; !ok {
+			t.Fatal("init health response missing 'queueDepth'")
+		}
+		if _, ok := health["sessions"]; !ok {
+			t.Fatal("init health response missing 'sessions'")
+		}
 	})
 
 	t.Run("init errors if already running", func(t *testing.T) {
@@ -90,16 +108,10 @@ func TestPool(t *testing.T) {
 	t.Run("health", func(t *testing.T) {
 		health := pool.getHealth()
 
-		if numVal(health, "size") != 2 {
-			t.Fatalf("expected size 2, got %v", numVal(health, "size"))
-		}
+		assertNumVal(t, health, "size", 2)
 		counts, _ := health["counts"].(map[string]any)
-		if numVal(counts, "idle") != 2 {
-			t.Fatalf("expected 2 idle, got %v", numVal(counts, "idle"))
-		}
-		if numVal(health, "queueDepth") != 0 {
-			t.Fatalf("expected queue depth 0, got %v", numVal(health, "queueDepth"))
-		}
+		assertNumVal(t, counts, "idle", 2)
+		assertNumVal(t, health, "queueDepth", 0)
 	})
 
 	t.Run("pools lists the pool", func(t *testing.T) {
@@ -116,23 +128,17 @@ func TestPool(t *testing.T) {
 			t.Fatalf("expected config object, got %T", resp["config"])
 		}
 		assertContains(t, strVal(cfg, "flags"), "haiku")
-		if numVal(cfg, "size") != 2 {
-			t.Fatalf("expected size 2, got %v", numVal(cfg, "size"))
-		}
+		assertNumVal(t, cfg, "size", 2)
 	})
 
 	t.Run("config set", func(t *testing.T) {
 		resp := pool.runJSON("config", "--set", "size=4")
 		cfg, _ := resp["config"].(map[string]any)
-		if numVal(cfg, "size") != 4 {
-			t.Fatalf("expected size 4 after set, got %v", numVal(cfg, "size"))
-		}
+		assertNumVal(t, cfg, "size", 4)
 
 		readResp := pool.runJSON("config")
 		readCfg, _ := readResp["config"].(map[string]any)
-		if numVal(readCfg, "size") != 4 {
-			t.Fatalf("config not persisted: expected 4, got %v", numVal(readCfg, "size"))
-		}
+		assertNumVal(t, readCfg, "size", 4)
 
 		pool.run("config", "--set", "size=2")
 	})
@@ -141,23 +147,17 @@ func TestPool(t *testing.T) {
 		// Init used --keep-fresh 0, verify it was persisted
 		resp := pool.runJSON("config")
 		cfg, _ := resp["config"].(map[string]any)
-		if numVal(cfg, "keepFresh") != 0 {
-			t.Fatalf("expected keepFresh 0, got %v", numVal(cfg, "keepFresh"))
-		}
+		assertNumVal(t, cfg, "keepFresh", 0)
 
 		// Set keepFresh via config
 		setResp := pool.runJSON("config", "--set", "keepFresh=2")
 		setCfg, _ := setResp["config"].(map[string]any)
-		if numVal(setCfg, "keepFresh") != 2 {
-			t.Fatalf("expected keepFresh 2 after set, got %v", numVal(setCfg, "keepFresh"))
-		}
+		assertNumVal(t, setCfg, "keepFresh", 2)
 
 		// Verify persistence
 		readResp := pool.runJSON("config")
 		readCfg, _ := readResp["config"].(map[string]any)
-		if numVal(readCfg, "keepFresh") != 2 {
-			t.Fatalf("keepFresh not persisted: expected 2, got %v", numVal(readCfg, "keepFresh"))
-		}
+		assertNumVal(t, readCfg, "keepFresh", 2)
 
 		// Restore to 0
 		pool.run("config", "--set", "keepFresh=0")
@@ -290,13 +290,11 @@ func TestPool(t *testing.T) {
 		pool.awaitSocketGone(10 * time.Second)
 
 		resp := pool.runJSON("init", "--size", "2", "--dir", pool.workDir, "--keep-fresh", "0")
-		poolState, ok := resp["pool"].(map[string]any)
+		health, ok := resp["health"].(map[string]any)
 		if !ok {
-			t.Fatalf("expected pool object in init response")
+			t.Fatalf("expected health object in init response")
 		}
-		if numVal(poolState, "size") != 2 {
-			t.Fatalf("expected size 2, got %v", numVal(poolState, "size"))
-		}
+		assertNumVal(t, health, "size", 2)
 
 		pool.waitForIdleCount(2, 90*time.Second)
 

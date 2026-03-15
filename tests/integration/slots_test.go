@@ -45,9 +45,7 @@ func TestSlots(t *testing.T) {
 		pool.waitForIdle(s2, 300*time.Second)
 
 		health := pool.getHealth()
-		if numVal(health, "queueDepth") != 0 {
-			t.Fatalf("expected queue depth 0, got %v", numVal(health, "queueDepth"))
-		}
+		assertNumVal(t, health, "queueDepth", 0)
 	})
 
 	var s3 string
@@ -73,9 +71,7 @@ func TestSlots(t *testing.T) {
 		}
 
 		health := pool.getHealth()
-		if numVal(health, "queueDepth") != 1 {
-			t.Fatalf("expected queue depth 1, got %v", numVal(health, "queueDepth"))
-		}
+		assertNumVal(t, health, "queueDepth", 1)
 	})
 
 	t.Run("capture on fresh-queued session errors", func(t *testing.T) {
@@ -99,9 +95,7 @@ func TestSlots(t *testing.T) {
 		assertExitError(t, infoResult)
 
 		health := pool.getHealth()
-		if numVal(health, "queueDepth") != 0 {
-			t.Fatalf("expected queue depth 0, got %v", numVal(health, "queueDepth"))
-		}
+		assertNumVal(t, health, "queueDepth", 0)
 	})
 
 	var s4 string
