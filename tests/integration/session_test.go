@@ -46,7 +46,7 @@ import (
 )
 
 func TestSession(t *testing.T) {
-	pool := setupCLIPool(t, 3)
+	pool := setupPool(t, 3)
 
 	var s1 string
 
@@ -258,7 +258,6 @@ func TestSession(t *testing.T) {
 		s2 = strVal(startResp, "sessionId")
 		pool.waitForStatus(s2, "processing", 15*time.Second)
 
-		// Followup on processing session should error (spec says: "Errors if session is busy")
 		result := pool.run("followup", "--session", s2, "--prompt", "ignore", "--json")
 		assertExitError(t, result)
 	})
@@ -278,7 +277,6 @@ func TestSession(t *testing.T) {
 		sid := strVal(resp, "sessionId")
 		assertNonEmpty(t, "block sessionId", sid)
 
-		// Clean up
 		pool.run("archive", "--session", sid)
 	})
 
@@ -287,7 +285,6 @@ func TestSession(t *testing.T) {
 		sid := strVal(startResp, "sessionId")
 		pool.waitForStatus(sid, "processing", 15*time.Second)
 
-		// 1ms timeout — guaranteed to expire
 		result := pool.run("wait", "--session", sid, "--timeout", "1", "--json")
 		assertExitError(t, result)
 
@@ -328,7 +325,6 @@ func TestSession(t *testing.T) {
 	})
 
 	t.Run("stop on idle errors", func(t *testing.T) {
-		// s1 is idle — stop should error (spec: "Errors if session is not processing or queued")
 		result := pool.run("stop", "--session", s1)
 		assertExitError(t, result)
 	})

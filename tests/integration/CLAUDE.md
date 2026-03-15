@@ -2,7 +2,7 @@
 
 ## Philosophy
 
-These tests run against **real Claude Code sessions** through the CLI and socket API.
+These tests run against **real Claude Code sessions** through the CLI.
 No mocking — these validate end-to-end behavior with real processes. Pure logic tests
 (parsing, filtering, state transitions) belong in unit tests co-located with the
 source (`internal/*/`).
@@ -14,20 +14,37 @@ the model to write a long essay — have it run a slow bash command like `sleep 
 This keeps the session processing without burning tokens on LLM output. Only use real
 prompts when you actually need to verify the content of the response.
 
-## Two Test Modes
+## Test Setup
 
-### CLI-based tests (most tests)
+All tests use the **same pool type** (`pool`). Setup via `setupPool(t, size)` runs
+`claude-pool-cli init` — the same command a real user would run. No manual daemon
+start, no hand-written config, no synthetic registry.
+
+**Isolation via `CLAUDE_POOL_HOME`:** Each test gets its own directory that mirrors
+production's `~/.claude-pool/` structure:
+
+```
+~/.cache/claude-pool-tests/<run-id>/<TestName>/
+  .claude-pool/          ← CLAUDE_POOL_HOME (registry, pool data, socket)
+  workdir/               ← session spawn directory (--dir flag)
+```
+
+Two env vars drive isolation:
+- `CLAUDE_POOL_HOME` — redirects all pool state (registry, pool dirs)
+- `CLAUDE_POOL_DAEMON` — tells CLI where to find the daemon binary
+
+### CLI tests (most tests)
 
 Operations go through the CLI binary as subprocess calls — the same way real users
-and Claude sessions interact with pools. The test helpers (`cliPool`) build the CLI
-binary, start the daemon, and run `claude-pool-cli` commands.
+and Claude sessions interact with pools.
 
 Files: `pool_test.go`, `session_test.go`, `slots_test.go`, `offload_test.go`, `parent_child_test.go`
 
-### Socket-based tests (API-only features)
+### Socket tests (API-only features)
 
-Attach and subscribe are API-only features not exposed in the CLI. These tests use
-the socket API directly via `testPool`.
+Attach and subscribe are API-only features not exposed in the CLI. These tests
+set up the pool via CLI init (same as above), then call `pool.dial()` to open a
+raw socket connection for API-only commands.
 
 Files: `attach_test.go`, `subscribe_test.go`
 
@@ -49,21 +66,21 @@ test prompts must use relative subdirectories.
 
 ## Structure
 
-| File | Pool size | Mode | What it covers |
-|------|-----------|------|----------------|
-| `pool_test.go` | 2 | CLI | Init, ping, config, resize, health, destroy, re-init with restore |
-| `session_test.go` | 3 | CLI | Start, wait, capture, followup, info, set (metadata), stop, --block, prefix resolution |
-| `slots_test.go` | 2 | CLI | Queue, set priority, set pinned, eviction order, LRU |
-| `offload_test.go` | 2 | CLI | Eviction→offload, capture offloaded, followup restores, process death, archive/unarchive lifecycle |
-| `parent_child_test.go` | 3 | CLI | --parent flag, env auto-detection, --parent none, ls filtering, verbosity, recursive archive |
-| `attach_test.go` | 2 | Socket | Attach pipe, pendingInput, keystroke/submit, eviction closes pipe, re-attach |
-| `subscribe_test.go` | 2 | Socket | Event stream, filters, re-subscribe, updated events |
+| File | Pool size | What it covers |
+|------|-----------|----------------|
+| `pool_test.go` | 2 | Init, ping, config, resize, health, destroy, re-init with restore |
+| `session_test.go` | 3 | Start, wait, capture, followup, info, set (metadata), stop, --block, prefix resolution |
+| `slots_test.go` | 2 | Queue, set priority, set pinned, eviction order, LRU |
+| `offload_test.go` | 2 | Eviction→offload, capture offloaded, followup restores, process death, archive/unarchive lifecycle |
+| `parent_child_test.go` | 3 | --parent flag, env auto-detection, --parent none, ls filtering, verbosity, recursive archive |
+| `attach_test.go` | 2 | Attach pipe, pendingInput, keystroke/submit, eviction closes pipe, re-attach |
+| `subscribe_test.go` | 2 | Event stream, filters, re-subscribe, updated events |
 
 Shared infrastructure:
 
 | File | Purpose |
 |------|---------|
-| `helpers_test.go` | Both pool types (CLI + socket), assertion helpers, waiting helpers |
+| `helpers_test.go` | Pool struct (CLI + socket), setup helpers, assertion helpers, waiting helpers |
 | `../testutil/testutil.go` | TestMain utilities: find repo root, build binary, setup run dir |
 
 ## Running
@@ -85,8 +102,9 @@ Every command and its flags should be visible in the test.
 
 ### Socket tests
 
-Use `pool.send(Msg{...})` directly for all protocol commands. Every request and response
-should be visible — no hidden abstractions.
+Use `sc.send(Msg{...})` directly for API-only commands. CLI commands still go through
+`pool.run(...)` / `pool.runJSON(...)`. Every request should be visible — no hidden
+abstractions.
 
 ### Comments
 

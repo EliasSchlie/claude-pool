@@ -7,9 +7,8 @@ package integration
 // This flow tests the subscribe system: receiving events, applying filters, dynamically
 // updating subscriptions, and verifying the "updated" event type for property changes.
 //
-// Subscribe is an API-only feature (not exposed in CLI), so this test uses the socket
-// API directly. Uses new spec field names: "parent" not "parentId", "set" not
-// "pin"/"unpin"/"set-priority".
+// Subscribe is an API-only feature (not exposed in CLI). The pool is created
+// via CLI init, then pool.dial() opens a socket connection for API commands.
 //
 // Flow:
 //
@@ -34,15 +33,15 @@ import (
 )
 
 func TestSubscribe(t *testing.T) {
-	pool := setupPool(t, 2)
+	p := setupPool(t, 2)
+	sc := p.dial()
 
 	var s1, s2 string
 
 	t.Run("subscribe receives status events", func(t *testing.T) {
-		sub := pool.subscribe(Msg{})
+		sub := sc.subscribe(Msg{})
 
-		resp := pool.send(Msg{"type": "start", "prompt": "respond with exactly: sub1"})
-		assertNotError(t, resp)
+		resp := p.runJSON("start", "--prompt", "respond with exactly: sub1")
 		s1 = strVal(resp, "sessionId")
 
 		var sawCreated, sawIdle bool
@@ -71,10 +70,9 @@ func TestSubscribe(t *testing.T) {
 	})
 
 	t.Run("subscribe receives created events with parent", func(t *testing.T) {
-		sub := pool.subscribe(Msg{"sessions": []string{}, "events": []string{"created"}})
+		sub := sc.subscribe(Msg{"sessions": []string{}, "events": []string{"created"}})
 
-		resp := pool.send(Msg{"type": "start", "prompt": "respond with exactly: sub2", "parent": s1})
-		assertNotError(t, resp)
+		resp := p.runJSON("start", "--prompt", "respond with exactly: sub2", "--parent", s1)
 		s2 = strVal(resp, "sessionId")
 
 		for i := 0; i < 10; i++ {
@@ -90,14 +88,14 @@ func TestSubscribe(t *testing.T) {
 			}
 		}
 
-		pool.awaitStatus(s2, "idle", 60*time.Second)
+		p.waitForStatus(s2, "idle", 60*time.Second)
 	})
 
 	t.Run("subscribe receives pool events", func(t *testing.T) {
-		sub := pool.subscribe(Msg{"events": []string{"pool"}})
+		sub := sc.subscribe(Msg{"events": []string{"pool"}})
 		defer sub.close()
 
-		pool.send(Msg{"type": "resize", "size": 3})
+		sc.send(Msg{"type": "resize", "size": 3})
 
 		ev, ok := sub.nextWithin(10 * time.Second)
 		if !ok {
@@ -107,15 +105,15 @@ func TestSubscribe(t *testing.T) {
 			t.Fatalf("expected pool event, got %q", strVal(ev, "event"))
 		}
 
-		pool.send(Msg{"type": "resize", "size": 2})
+		sc.send(Msg{"type": "resize", "size": 2})
 		sub.drain()
 	})
 
 	t.Run("filter by sessions", func(t *testing.T) {
-		sub := pool.subscribe(Msg{"sessions": []string{s1}})
+		sub := sc.subscribe(Msg{"sessions": []string{s1}})
 
-		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "respond with exactly: filtered"})
-		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: visible"})
+		p.run("followup", "--session", s2, "--prompt", "respond with exactly: filtered")
+		p.run("followup", "--session", s1, "--prompt", "respond with exactly: visible")
 
 		var sawS1, sawS2 bool
 		for i := 0; i < 20; i++ {
@@ -137,18 +135,17 @@ func TestSubscribe(t *testing.T) {
 			t.Fatal("should not receive events for s2 with session filter")
 		}
 
-		pool.awaitStatus(s1, "idle", 60*time.Second)
-		pool.awaitStatus(s2, "idle", 60*time.Second)
+		p.waitForStatus(s1, "idle", 60*time.Second)
+		p.waitForStatus(s2, "idle", 60*time.Second)
 	})
 
 	t.Run("filter by events", func(t *testing.T) {
-		sub := pool.subscribe(Msg{"events": []string{"status"}})
+		sub := sc.subscribe(Msg{"events": []string{"status"}})
 
-		pool.send(Msg{"type": "offload", "sessionId": s2})
-		pool.awaitStatus(s2, "offloaded", 10*time.Second)
+		sc.send(Msg{"type": "offload", "sessionId": s2})
+		p.waitForStatus(s2, "offloaded", 10*time.Second)
 
-		r := pool.send(Msg{"type": "start", "prompt": "respond with exactly: eventfilter"})
-		assertNotError(t, r)
+		r := p.runJSON("start", "--prompt", "respond with exactly: eventfilter")
 		s3 := strVal(r, "sessionId")
 
 		var sawStatus, sawCreated bool
@@ -174,15 +171,15 @@ func TestSubscribe(t *testing.T) {
 			t.Fatal("should not receive created events with events=[status] filter")
 		}
 
-		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "respond with exactly: back"})
-		pool.awaitStatus(s2, "idle", 60*time.Second)
-		pool.send(Msg{"type": "archive", "sessionId": s3})
+		p.run("followup", "--session", s2, "--prompt", "respond with exactly: back")
+		p.waitForStatus(s2, "idle", 60*time.Second)
+		p.run("archive", "--session", s3)
 	})
 
 	t.Run("filter by statuses", func(t *testing.T) {
-		sub := pool.subscribe(Msg{"statuses": []string{"idle"}})
+		sub := sc.subscribe(Msg{"statuses": []string{"idle"}})
 
-		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: statusfilter"})
+		p.run("followup", "--session", s1, "--prompt", "respond with exactly: statusfilter")
 
 		var sawIdle, sawProcessing bool
 		for i := 0; i < 10; i++ {
@@ -207,10 +204,10 @@ func TestSubscribe(t *testing.T) {
 	})
 
 	t.Run("filters are ANDed", func(t *testing.T) {
-		sub := pool.subscribe(Msg{"sessions": []string{s1}, "statuses": []string{"idle"}})
+		sub := sc.subscribe(Msg{"sessions": []string{s1}, "statuses": []string{"idle"}})
 
-		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: and1"})
-		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "respond with exactly: and2"})
+		p.run("followup", "--session", s1, "--prompt", "respond with exactly: and1")
+		p.run("followup", "--session", s2, "--prompt", "respond with exactly: and2")
 
 		var matched bool
 		for i := 0; i < 10; i++ {
@@ -233,18 +230,18 @@ func TestSubscribe(t *testing.T) {
 			t.Fatal("expected s1 idle event")
 		}
 
-		pool.awaitStatus(s1, "idle", 60*time.Second)
-		pool.awaitStatus(s2, "idle", 60*time.Second)
+		p.waitForStatus(s1, "idle", 60*time.Second)
+		p.waitForStatus(s2, "idle", 60*time.Second)
 	})
 
 	t.Run("re-subscribe replaces filters", func(t *testing.T) {
-		sub := pool.subscribe(Msg{"sessions": []string{s1}})
+		sub := sc.subscribe(Msg{"sessions": []string{s1}})
 		defer sub.close()
 
 		sub.resubscribe(Msg{"sessions": []string{s2}})
 
-		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: old"})
-		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "respond with exactly: new"})
+		p.run("followup", "--session", s1, "--prompt", "respond with exactly: old")
+		p.run("followup", "--session", s2, "--prompt", "respond with exactly: new")
 
 		var sawS1, sawS2 bool
 		for i := 0; i < 20; i++ {
@@ -266,14 +263,14 @@ func TestSubscribe(t *testing.T) {
 			t.Fatal("expected s2 events after re-subscribe")
 		}
 
-		pool.awaitStatus(s1, "idle", 60*time.Second)
-		pool.awaitStatus(s2, "idle", 60*time.Second)
+		p.waitForStatus(s1, "idle", 60*time.Second)
+		p.waitForStatus(s2, "idle", 60*time.Second)
 	})
 
 	t.Run("updated event — priority change", func(t *testing.T) {
-		sub := pool.subscribe(Msg{"events": []string{"updated"}})
+		sub := sc.subscribe(Msg{"events": []string{"updated"}})
 
-		pool.send(Msg{"type": "set", "sessionId": s1, "priority": 5})
+		sc.send(Msg{"type": "set", "sessionId": s1, "priority": 5})
 
 		ev, ok := sub.nextWithin(10 * time.Second)
 		if !ok {
@@ -291,14 +288,14 @@ func TestSubscribe(t *testing.T) {
 			t.Fatalf("expected priority 5 in changes, got %v", changes["priority"])
 		}
 
-		pool.send(Msg{"type": "set", "sessionId": s1, "priority": 0})
+		sc.send(Msg{"type": "set", "sessionId": s1, "priority": 0})
 		sub.drain()
 	})
 
 	t.Run("updated event — pin/unpin", func(t *testing.T) {
-		sub := pool.subscribe(Msg{"events": []string{"updated"}})
+		sub := sc.subscribe(Msg{"events": []string{"updated"}})
 
-		pool.send(Msg{"type": "set", "sessionId": s1, "pinned": 300})
+		sc.send(Msg{"type": "set", "sessionId": s1, "pinned": 300})
 		ev, ok := sub.nextWithin(10 * time.Second)
 		if !ok {
 			t.Fatal("expected updated event for pin")
@@ -308,7 +305,7 @@ func TestSubscribe(t *testing.T) {
 			t.Fatal("expected pinned=true in changes")
 		}
 
-		pool.send(Msg{"type": "set", "sessionId": s1, "pinned": false})
+		sc.send(Msg{"type": "set", "sessionId": s1, "pinned": false})
 		ev, ok = sub.nextWithin(10 * time.Second)
 		if !ok {
 			t.Fatal("expected updated event for unpin")
@@ -320,13 +317,10 @@ func TestSubscribe(t *testing.T) {
 	})
 
 	t.Run("updated event — cwd change", func(t *testing.T) {
-		sub := pool.subscribe(Msg{"events": []string{"updated"}, "fields": []string{"cwd"}})
+		sub := sc.subscribe(Msg{"events": []string{"updated"}, "fields": []string{"cwd"}})
 
-		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "run these bash commands: mkdir -p cwd_sub_test && cd cwd_sub_test"})
-		pool.sendLong(
-			Msg{"type": "wait", "sessionId": s1, "timeout": 60000},
-			75*time.Second,
-		)
+		p.run("followup", "--session", s1, "--prompt", "run these bash commands: mkdir -p cwd_sub_test && cd cwd_sub_test")
+		p.waitForIdle(s1, 60*time.Second)
 
 		ev, ok := sub.nextWithin(10 * time.Second)
 		if !ok {
@@ -340,9 +334,9 @@ func TestSubscribe(t *testing.T) {
 	})
 
 	t.Run("updated event — fields filter", func(t *testing.T) {
-		sub := pool.subscribe(Msg{"events": []string{"updated"}, "fields": []string{"priority"}})
+		sub := sc.subscribe(Msg{"events": []string{"updated"}, "fields": []string{"priority"}})
 
-		pool.send(Msg{"type": "set", "sessionId": s1, "priority": 3})
+		sc.send(Msg{"type": "set", "sessionId": s1, "priority": 3})
 		ev, ok := sub.nextWithin(10 * time.Second)
 		if !ok {
 			t.Fatal("expected updated event for priority change")
@@ -352,23 +346,23 @@ func TestSubscribe(t *testing.T) {
 		}
 
 		// Pin should NOT trigger event (pinned not in fields filter)
-		pool.send(Msg{"type": "set", "sessionId": s1, "pinned": 300})
+		sc.send(Msg{"type": "set", "sessionId": s1, "pinned": 300})
 		_, ok = sub.nextWithin(2 * time.Second)
 		if ok {
 			t.Fatal("should not receive updated event for pin when fields=[priority]")
 		}
 
-		pool.send(Msg{"type": "set", "sessionId": s1, "pinned": false})
-		pool.send(Msg{"type": "set", "sessionId": s1, "priority": 0})
+		sc.send(Msg{"type": "set", "sessionId": s1, "pinned": false})
+		sc.send(Msg{"type": "set", "sessionId": s1, "priority": 0})
 	})
 
 	t.Run("archived and unarchived events", func(t *testing.T) {
-		sub := pool.subscribe(Msg{"events": []string{"archived", "unarchived"}})
+		sub := sc.subscribe(Msg{"events": []string{"archived", "unarchived"}})
 
-		pool.send(Msg{"type": "offload", "sessionId": s2})
-		pool.awaitStatus(s2, "offloaded", 10*time.Second)
+		sc.send(Msg{"type": "offload", "sessionId": s2})
+		p.waitForStatus(s2, "offloaded", 10*time.Second)
 
-		pool.send(Msg{"type": "archive", "sessionId": s2})
+		sc.send(Msg{"type": "archive", "sessionId": s2})
 		ev, ok := sub.nextWithin(10 * time.Second)
 		if !ok {
 			t.Fatal("expected archived event")
@@ -380,7 +374,7 @@ func TestSubscribe(t *testing.T) {
 			t.Fatalf("expected sessionId %s, got %q", s2, strVal(ev, "sessionId"))
 		}
 
-		pool.send(Msg{"type": "unarchive", "sessionId": s2})
+		sc.send(Msg{"type": "unarchive", "sessionId": s2})
 		ev, ok = sub.nextWithin(10 * time.Second)
 		if !ok {
 			t.Fatal("expected unarchived event")
@@ -389,16 +383,16 @@ func TestSubscribe(t *testing.T) {
 			t.Fatalf("expected unarchived event, got %q", strVal(ev, "event"))
 		}
 
-		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "respond with exactly: back"})
-		pool.awaitStatus(s2, "idle", 60*time.Second)
+		p.run("followup", "--session", s2, "--prompt", "respond with exactly: back")
+		p.waitForStatus(s2, "idle", 60*time.Second)
 	})
 
 	t.Run("multiple concurrent subscribers", func(t *testing.T) {
-		sub1 := pool.subscribe(Msg{"sessions": []string{s1}})
-		sub2 := pool.subscribe(Msg{"sessions": []string{s2}})
+		sub1 := sc.subscribe(Msg{"sessions": []string{s1}})
+		sub2 := sc.subscribe(Msg{"sessions": []string{s2}})
 
-		pool.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: multi1"})
-		pool.send(Msg{"type": "followup", "sessionId": s2, "prompt": "respond with exactly: multi2"})
+		p.run("followup", "--session", s1, "--prompt", "respond with exactly: multi1")
+		p.run("followup", "--session", s2, "--prompt", "respond with exactly: multi2")
 
 		var sub1SawS1, sub1SawS2 bool
 		for i := 0; i < 10; i++ {

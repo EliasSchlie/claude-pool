@@ -39,7 +39,7 @@ import (
 )
 
 func TestOffload(t *testing.T) {
-	pool := setupCLIPool(t, 2)
+	pool := setupPool(t, 2)
 
 	var s1, s2 string
 
@@ -60,7 +60,6 @@ func TestOffload(t *testing.T) {
 		pool.run("followup", "--session", s2, "--prompt", "respond with exactly: touched")
 		pool.waitForIdle(s2, 300*time.Second)
 
-		// Start s3 — s1 should be evicted
 		r3 := pool.runJSON("start", "--prompt", "respond with exactly: eviction")
 		s3 := strVal(r3, "sessionId")
 
@@ -73,7 +72,6 @@ func TestOffload(t *testing.T) {
 			t.Fatalf("offloaded session should have no PID, got %v", info.PID)
 		}
 
-		// Archive s3 to free slot for later steps
 		pool.run("archive", "--session", s3)
 	})
 
@@ -130,7 +128,6 @@ func TestOffload(t *testing.T) {
 	})
 
 	t.Run("archive idle session", func(t *testing.T) {
-		// s2 is offloaded after process death
 		result := pool.run("archive", "--session", s2)
 		assertExitOK(t, result)
 
@@ -149,7 +146,6 @@ func TestOffload(t *testing.T) {
 			t.Fatal("archived session should not appear in default ls")
 		}
 
-		// With --archived flag, it should be visible
 		archivedSessions := pool.listSessions("--archived")
 		s, found := findSession(archivedSessions, s2)
 		if !found {
@@ -187,7 +183,6 @@ func TestOffload(t *testing.T) {
 	})
 
 	t.Run("unarchive on non-archived errors", func(t *testing.T) {
-		// s1 is idle, not archived
 		result := pool.run("unarchive", "--session", s1)
 		assertExitError(t, result)
 	})
@@ -209,7 +204,6 @@ func TestOffload(t *testing.T) {
 	})
 
 	t.Run("archive queued session cancels and archives", func(t *testing.T) {
-		// Restore both sessions
 		pool.run("unarchive", "--session", s1)
 		pool.run("unarchive", "--session", s2)
 		pool.run("followup", "--session", s1, "--prompt", "respond with exactly: fill1")

@@ -5,29 +5,30 @@ package integration
 // Pool size: 2
 //
 // Tests pool-level CLI commands: init, ping, health, config, resize, destroy,
-// and re-init with session restoration. Uses setupCLIDaemon because the first
-// steps need to interact with the daemon before init.
+// and re-init with session restoration. Uses newPool because the first steps
+// test behavior before init.
 //
 // Flow:
 //
-//   1.  "ping before init"
-//   2.  "config read before init"
-//   3.  "config set"
-//   4.  "init"
-//   5.  "init errors if already running"
-//   6.  "ping after init"
-//   7.  "health"
-//   8.  "pools lists known pools"
-//   9.  "resize rejects size 0"
-//  10.  "resize up to 3"
-//  11.  "resize down to 1"
-//  12.  "resize reversal clears pending kill tokens"
-//  13.  "deferred eviction of processing sessions"
-//  14.  "resize respects pins"
-//  15.  "destroy without confirm errors"
-//  16.  "destroy"
-//  17.  "re-init restores sessions and config"
-//  18.  "re-init with no-restore"
+//   1.  "ping before init fails"
+//   2.  "pools before init"
+//   3.  "init"
+//   4.  "init errors if already running"
+//   5.  "ping after init"
+//   6.  "health"
+//   7.  "pools lists the pool"
+//   8.  "config read"
+//   9.  "config set"
+//  10.  "resize rejects size 0"
+//  11.  "resize up to 3"
+//  12.  "resize down to 1"
+//  13.  "resize reversal clears pending kill tokens"
+//  14.  "deferred eviction of processing sessions"
+//  15.  "resize respects pins"
+//  16.  "destroy without confirm errors"
+//  17.  "destroy"
+//  18.  "re-init restores sessions and config"
+//  19.  "re-init with no-restore"
 
 import (
 	"testing"
@@ -35,49 +36,27 @@ import (
 )
 
 func TestPool(t *testing.T) {
-	pool := setupCLIDaemon(t, 2)
+	pool := newPool(t)
 
-	t.Run("ping before init", func(t *testing.T) {
+	t.Run("ping before init fails", func(t *testing.T) {
+		// No daemon running yet — ping should fail
 		result := pool.run("ping")
-		assertExitOK(t, result)
+		assertExitError(t, result)
 	})
 
-	t.Run("config read before init", func(t *testing.T) {
-		resp := pool.runJSON("config")
-		cfg, ok := resp["config"].(map[string]any)
-		if !ok {
-			t.Fatalf("expected config object, got %T", resp["config"])
-		}
-		assertContains(t, strVal(cfg, "flags"), "haiku")
-		if numVal(cfg, "size") != 2 {
-			t.Fatalf("expected size 2, got %v", numVal(cfg, "size"))
-		}
-	})
-
-	t.Run("config set", func(t *testing.T) {
-		resp := pool.runJSON("config", "--set", "size=4")
-		cfg, _ := resp["config"].(map[string]any)
-		if numVal(cfg, "size") != 4 {
-			t.Fatalf("expected size 4 after set, got %v", numVal(cfg, "size"))
-		}
-
-		// Verify persistence
-		readResp := pool.runJSON("config")
-		readCfg, _ := readResp["config"].(map[string]any)
-		if numVal(readCfg, "size") != 4 {
-			t.Fatalf("config not persisted: expected 4, got %v", numVal(readCfg, "size"))
-		}
-
-		// Restore to 2
-		pool.run("config", "--set", "size=2")
+	t.Run("pools before init", func(t *testing.T) {
+		// Registry doesn't exist yet — should succeed with empty list or no error
+		result := pool.run("pools", "--json")
+		_ = result
 	})
 
 	var s1, s2 string
 
 	t.Run("init", func(t *testing.T) {
-		resp := pool.runJSON("init", "--size", "2")
+		resp := pool.runJSON("init", "--size", "2",
+			"--dir", pool.workDir,
+			"--flags", "--dangerously-skip-permissions --model haiku")
 
-		// Init returns pool state (same structure as health)
 		poolState, ok := resp["pool"].(map[string]any)
 		if !ok {
 			t.Fatalf("expected pool object in init response, got %v", resp)
@@ -86,10 +65,8 @@ func TestPool(t *testing.T) {
 			t.Fatalf("expected pool size 2, got %v", numVal(poolState, "size"))
 		}
 
-		// Wait for both sessions to become idle
 		pool.waitForIdleCount(2, 90*time.Second)
 
-		// Get session IDs for later steps
 		sessions := pool.listSessions()
 		if len(sessions) < 2 {
 			t.Fatalf("expected at least 2 sessions, got %d", len(sessions))
@@ -123,12 +100,39 @@ func TestPool(t *testing.T) {
 		}
 	})
 
-	t.Run("pools lists known pools", func(t *testing.T) {
+	t.Run("pools lists the pool", func(t *testing.T) {
 		resp := pool.runJSON("pools")
-		// Should list at least our test pool
 		if resp == nil {
 			t.Fatal("expected non-nil pools response")
 		}
+	})
+
+	t.Run("config read", func(t *testing.T) {
+		resp := pool.runJSON("config")
+		cfg, ok := resp["config"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected config object, got %T", resp["config"])
+		}
+		assertContains(t, strVal(cfg, "flags"), "haiku")
+		if numVal(cfg, "size") != 2 {
+			t.Fatalf("expected size 2, got %v", numVal(cfg, "size"))
+		}
+	})
+
+	t.Run("config set", func(t *testing.T) {
+		resp := pool.runJSON("config", "--set", "size=4")
+		cfg, _ := resp["config"].(map[string]any)
+		if numVal(cfg, "size") != 4 {
+			t.Fatalf("expected size 4 after set, got %v", numVal(cfg, "size"))
+		}
+
+		readResp := pool.runJSON("config")
+		readCfg, _ := readResp["config"].(map[string]any)
+		if numVal(readCfg, "size") != 4 {
+			t.Fatalf("config not persisted: expected 4, got %v", numVal(readCfg, "size"))
+		}
+
+		pool.run("config", "--set", "size=2")
 	})
 
 	t.Run("resize rejects size 0", func(t *testing.T) {
@@ -143,13 +147,11 @@ func TestPool(t *testing.T) {
 	})
 
 	t.Run("resize down to 1", func(t *testing.T) {
-		// Keep s1 processing so we can observe async slot reclamation
 		pool.run("followup", "--session", s1, "--prompt", "run the bash command: sleep 60")
 		pool.waitForStatus(s1, "processing", 15*time.Second)
 
 		pool.run("resize", "--size", "1")
 
-		// Stop s1 so its slot can be reclaimed
 		pool.run("stop", "--session", s1)
 		pool.waitForPoolSize(1, 15*time.Second)
 	})
@@ -170,17 +172,14 @@ func TestPool(t *testing.T) {
 		}
 		sa, sb := idle[0], idle[1]
 
-		// Make both processing so kill tokens can't be consumed
 		pool.run("followup", "--session", sa, "--prompt", "run the bash command: sleep 60")
 		pool.run("followup", "--session", sb, "--prompt", "run the bash command: sleep 60")
 		pool.waitForStatus(sa, "processing", 15*time.Second)
 		pool.waitForStatus(sb, "processing", 15*time.Second)
 
-		// Resize to 1, then back to 2 — token must be cleared
 		pool.run("resize", "--size", "1")
 		pool.run("resize", "--size", "2")
 
-		// Both must still be processing (no premature eviction)
 		infoA := pool.getSessionInfo(sa)
 		infoB := pool.getSessionInfo(sb)
 		if infoA.Status != "processing" {
@@ -213,10 +212,8 @@ func TestPool(t *testing.T) {
 		pool.waitForStatus(sa, "processing", 15*time.Second)
 		pool.waitForStatus(sb, "processing", 15*time.Second)
 
-		// Resize to 1 — kill token lingers
 		pool.run("resize", "--size", "1")
 
-		// Stop both — lingering token should evict one
 		pool.run("stop", "--session", sa)
 		pool.run("stop", "--session", sb)
 		pool.waitForPoolSize(1, 15*time.Second)
@@ -243,7 +240,6 @@ func TestPool(t *testing.T) {
 		pool.run("resize", "--size", "1")
 		pool.waitForPoolSize(1, 15*time.Second)
 
-		// Pinned session must survive
 		info := pool.getSessionInfo(pinned)
 		if info.Status == "offloaded" || info.Status == "archived" {
 			t.Fatalf("pinned session was evicted: status=%s", info.Status)
@@ -264,18 +260,9 @@ func TestPool(t *testing.T) {
 
 	t.Run("re-init restores sessions and config", func(t *testing.T) {
 		pool.awaitSocketGone(10 * time.Second)
-		pool.startDaemon()
 
-		// Config should survive restart
-		resp := pool.runJSON("config")
-		cfg, _ := resp["config"].(map[string]any)
-		if numVal(cfg, "size") != 2 {
-			t.Fatalf("config size not persisted: expected 2, got %v", numVal(cfg, "size"))
-		}
-		assertContains(t, strVal(cfg, "flags"), "haiku")
-
-		initResp := pool.runJSON("init", "--size", "2")
-		poolState, ok := initResp["pool"].(map[string]any)
+		resp := pool.runJSON("init", "--size", "2", "--dir", pool.workDir)
+		poolState, ok := resp["pool"].(map[string]any)
 		if !ok {
 			t.Fatalf("expected pool object in init response")
 		}
@@ -284,6 +271,11 @@ func TestPool(t *testing.T) {
 		}
 
 		pool.waitForIdleCount(2, 90*time.Second)
+
+		// Config survives destroy+init cycle
+		cfgResp := pool.runJSON("config")
+		cfg, _ := cfgResp["config"].(map[string]any)
+		assertContains(t, strVal(cfg, "flags"), "haiku")
 
 		// At least one session must be restored (has Claude UUID from prior run)
 		sessions := pool.listSessions("--verbosity", "full")
@@ -302,12 +294,10 @@ func TestPool(t *testing.T) {
 	t.Run("re-init with no-restore", func(t *testing.T) {
 		pool.run("destroy", "--confirm")
 		pool.awaitSocketGone(10 * time.Second)
-		pool.startDaemon()
 
-		pool.runJSON("init", "--size", "2", "--no-restore")
+		pool.runJSON("init", "--size", "2", "--dir", pool.workDir, "--no-restore")
 		pool.waitForIdleCount(2, 90*time.Second)
 
-		// All sessions should be fresh — none should match pre-destroy IDs
 		sessions := pool.listSessions("--verbosity", "full")
 		for _, s := range sessions {
 			if s.SessionID == s1 || s.SessionID == s2 {

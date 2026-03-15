@@ -27,7 +27,7 @@ import (
 )
 
 func TestSlots(t *testing.T) {
-	pool := setupCLIPool(t, 2)
+	pool := setupPool(t, 2)
 
 	var s1, s2 string
 
@@ -76,7 +76,6 @@ func TestSlots(t *testing.T) {
 	})
 
 	t.Run("capture on fresh-queued session errors", func(t *testing.T) {
-		// s3 is queued — no UUID, no terminal
 		for _, args := range [][]string{
 			{"--source", "jsonl"},
 			{"--source", "jsonl", "--detail", "raw"},
@@ -93,7 +92,6 @@ func TestSlots(t *testing.T) {
 		result := pool.run("stop", "--session", s3)
 		assertExitOK(t, result)
 
-		// Queued session that never got a slot should be gone
 		infoResult := pool.run("info", "--session", s3, "--json")
 		assertExitError(t, infoResult)
 
@@ -106,7 +104,6 @@ func TestSlots(t *testing.T) {
 	var s4 string
 
 	t.Run("queued session gets slot when one frees", func(t *testing.T) {
-		// s1 and s2 are still processing
 		resp := pool.runJSON("start", "--prompt", "respond with exactly: dequeued")
 		s4 = strVal(resp, "sessionId")
 
@@ -133,11 +130,9 @@ func TestSlots(t *testing.T) {
 		pool.waitForStatus(s2, "idle", 10*time.Second)
 		pool.waitForStatus(s4, "idle", 10*time.Second)
 
-		// High priority = evicted last, low priority = evicted first
 		pool.run("set", "--session", s2, "--priority", "10")
 		pool.run("set", "--session", s4, "--priority", "-1")
 
-		// Start new — pool full, idle session must be evicted
 		resp := pool.runJSON("start", "--prompt", "respond with exactly: priority")
 		s5 := strVal(resp, "sessionId")
 
@@ -151,7 +146,6 @@ func TestSlots(t *testing.T) {
 
 		pool.waitForIdle(s5, 300*time.Second)
 
-		// Reset priority
 		pool.run("set", "--session", s2, "--priority", "0")
 	})
 
@@ -178,7 +172,6 @@ func TestSlots(t *testing.T) {
 		pool.run("followup", "--session", slotB, "--prompt", "respond with exactly: recent")
 		pool.waitForIdle(slotB, 300*time.Second)
 
-		// Start new — slotA (older) should be evicted
 		resp := pool.runJSON("start", "--prompt", "respond with exactly: lru")
 		newSid := strVal(resp, "sessionId")
 
@@ -208,7 +201,6 @@ func TestSlots(t *testing.T) {
 
 		pool.run("set", "--session", pinTarget, "--pinned", "300")
 
-		// Start new — unpinned should be evicted
 		resp := pool.runJSON("start", "--prompt", "respond with exactly: pintest")
 		newSid := strVal(resp, "sessionId")
 
@@ -250,7 +242,6 @@ func TestSlots(t *testing.T) {
 	})
 
 	t.Run("followup on queued errors", func(t *testing.T) {
-		// Fill both slots with processing sessions
 		sessions := pool.listSessions()
 		var idle []string
 		for _, s := range sessions {
@@ -272,7 +263,6 @@ func TestSlots(t *testing.T) {
 			t.Fatalf("expected queued, got %q", strVal(resp, "status"))
 		}
 
-		// Followup on queued should error
 		result := pool.run("followup", "--session", queuedSid, "--prompt", "nope")
 		assertExitError(t, result)
 
