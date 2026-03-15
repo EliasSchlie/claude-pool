@@ -27,6 +27,7 @@ package integration
 //  11.  "multiple clients read simultaneously"
 //  12.  "buffer-based pendingInput detection without attach"
 //  13.  "buffer-based pendingInput clears on Ctrl-U"
+//  14.  "attach to promptless session and submit"
 
 import (
 	"errors"
@@ -309,6 +310,48 @@ func TestAttach(t *testing.T) {
 		assertNotError(t, resp)
 
 		p.waitForPendingInput(s1, func(v string) bool { return v == "" }, 10*time.Second)
+	})
+
+	t.Run("attach to promptless session and submit", func(t *testing.T) {
+		// Start a session without prompt — should be idle with a live slot
+		startResp := sc.send(Msg{"type": "start"})
+		assertNotError(t, startResp)
+		sPromptless := strVal(startResp, "sessionId")
+
+		p.waitForStatus(sPromptless, "idle", 60*time.Second)
+
+		// Attach to the promptless session
+		aResp := sc.send(Msg{"type": "attach", "sessionId": sPromptless})
+		assertNotError(t, aResp)
+		assertType(t, aResp, "attached")
+
+		sockPath := strVal(aResp, "socketPath")
+		conn, err := net.Dial("unix", sockPath)
+		if err != nil {
+			t.Fatalf("connect to promptless attach socket: %v", err)
+		}
+		defer conn.Close()
+		drainAttach(conn)
+
+		// Type into the TUI via attach pipe
+		if _, err := conn.Write([]byte("respond with exactly: attached-prompt")); err != nil {
+			t.Fatalf("write to promptless session: %v", err)
+		}
+		p.waitForPendingInput(sPromptless, func(v string) bool { return v != "" }, 10*time.Second)
+
+		// Submit via Enter
+		if _, err := conn.Write([]byte("\r")); err != nil {
+			t.Fatalf("write Enter: %v", err)
+		}
+		p.waitForStatus(sPromptless, "processing", 15*time.Second)
+		p.waitForStatus(sPromptless, "idle", 60*time.Second)
+
+		// Verify the prompt was processed
+		captureResp := sc.send(Msg{"type": "capture", "sessionId": sPromptless, "source": "jsonl", "detail": "last"})
+		assertNotError(t, captureResp)
+		assertContains(t, strVal(captureResp, "content"), "attached-prompt")
+
+		p.run("archive", "--session", sPromptless)
 	})
 }
 
