@@ -93,13 +93,24 @@ Pool config.json stores flags and settings. `init` and `resize` read from config
 
 ## Hooks
 
-Hooks tell the pool daemon when sessions change state (idle, processing, etc.). They're project-local Claude Code hooks that live in the pool directory's `.claude/` folder.
+Hooks tell the pool daemon when sessions change state (idle, processing, etc.). Two-layer design: a global hook-runner installed once, and pool-local scripts deployed on every `init`.
 
-- `init` writes `.claude/hooks.json` + hook scripts into the pool directory
-- Sessions spawn with cwd inside the pool directory → Claude Code loads the hooks automatically
-- Hooks write to signal files in the pool directory (using `CLAUDE_POOL_HOME` env var)
-- No plugins, no global hook pollution — hooks only affect sessions in that pool
-- Self-contained: deleting the pool directory removes everything including hooks
+### Global install (`claude-pool install`)
+
+- Writes `~/.claude-pool/hook-runner.sh` — a thin entry point that delegates to pool-local scripts
+- Registers hook entries in `~/.claude/settings.json` for all relevant events (SessionStart, Stop, PreToolUse, PermissionRequest, PostToolUse, UserPromptSubmit)
+- Installs the Claude Code skill to `~/.claude/skills/claude-pool/SKILL.md`
+- Run once per machine. `claude-pool uninstall` reverses everything.
+
+### Pool-local scripts (`init`)
+
+- Each `init` deploys hook scripts (`common.sh`, `idle-signal.sh`, `session-pid-map.sh`) to `<pool-dir>/hooks/`
+- The global hook-runner checks `$CLAUDE_POOL_DIR` (set by the daemon on pool sessions) and delegates to the pool's scripts. Non-pool sessions exit silently.
+- Scripts write to signal files in the pool directory for idle detection and PID tracking
+
+### Why two layers
+
+Different pools (or different branches under test) can run different hook versions independently. The global `settings.json` entries point to the fixed hook-runner, which dispatches to whichever pool owns the session. No version conflicts, no race conditions between concurrent pools.
 
 ## What Claude Pool Does NOT Do
 

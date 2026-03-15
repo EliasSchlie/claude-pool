@@ -310,6 +310,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 | `all` | boolean | No | Show all pool sessions (default false = owned only) |
 | `tree` | boolean | No | Show descendants as nested tree (default false = flat list of direct children) |
 | `archived` | boolean | No | Include archived sessions (default false = hidden) |
+| `statuses` | string[] | No | Filter by status (e.g. `["idle", "processing"]`). Omit for no filtering. |
 
 **Response:** `{ type: "sessions", sessions }` — array of session info objects.
 

@@ -654,6 +654,17 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 	tree, _ := req["tree"].(bool)
 	showArchived, _ := req["archived"].(bool)
 
+	// Parse optional statuses filter
+	var statusFilter map[string]bool
+	if raw, ok := req["statuses"].([]any); ok && len(raw) > 0 {
+		statusFilter = make(map[string]bool, len(raw))
+		for _, v := range raw {
+			if s, ok := v.(string); ok {
+				statusFilter[s] = true
+			}
+		}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -664,6 +675,9 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 	results := make([]any, 0)
 	for _, s := range m.sessions {
 		if s.Status == StatusArchived && !showArchived {
+			continue
+		}
+		if statusFilter != nil && !statusFilter[s.Status] {
 			continue
 		}
 		if !all {
