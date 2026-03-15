@@ -34,6 +34,7 @@ func TestAttach(t *testing.T) {
 
 	var s1 string
 	var attachConn net.Conn
+	var attachSocketPath string
 	t.Cleanup(func() {
 		if attachConn != nil {
 			attachConn.Close()
@@ -56,15 +57,41 @@ func TestAttach(t *testing.T) {
 		assertNotError(t, resp)
 		assertType(t, resp, "attached")
 
-		socketPath := strVal(resp, "socketPath")
-		assertNonEmpty(t, "socketPath", socketPath)
+		attachSocketPath = strVal(resp, "socketPath")
+		assertNonEmpty(t, "socketPath", attachSocketPath)
 
 		var err error
-		attachConn, err = net.Dial("unix", socketPath)
+		attachConn, err = net.Dial("unix", attachSocketPath)
 		if err != nil {
 			t.Fatalf("connect to attach socket: %v", err)
 		}
 		drainAttach(attachConn)
+	})
+
+	t.Run("new client receives buffer replay", func(t *testing.T) {
+		// Wait for terminal output to fully settle — Claude Code emits
+		// cursor/prompt sequences for a bit after reaching idle.
+		time.Sleep(3 * time.Second)
+		drainAttach(attachConn)
+
+		// Now the session is truly quiet. A new client connecting should
+		// receive replayed buffer contents (startup banner, prompt, etc.)
+		// immediately. Without buffer replay, this times out.
+		secondConn, err := net.Dial("unix", attachSocketPath)
+		if err != nil {
+			t.Fatalf("connect second client: %v", err)
+		}
+		defer secondConn.Close()
+
+		buf := make([]byte, 65536)
+		secondConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, err := secondConn.Read(buf)
+		if err != nil {
+			t.Fatalf("expected buffer replay on connect, got error: %v", err)
+		}
+		if n == 0 {
+			t.Fatal("expected non-empty buffer replay on connect")
+		}
 	})
 
 	t.Run("keystrokes populate pendingInput", func(t *testing.T) {
