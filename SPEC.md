@@ -258,7 +258,7 @@ When a slot is needed and none are free:
 
 The pool proactively offloads idle sessions to maintain a target number of fresh slots, configured by `keepFresh` (default: 1). This ensures `start` is near-instant — a pre-warmed slot is usually already available.
 
-After any session becomes idle, the pool checks whether the number of fresh slots is below `keepFresh`. If so, it offloads the lowest-priority, longest-idle session to free a slot. The same eviction rules apply: pinned sessions are never evicted, processing sessions are never interrupted.
+After any session becomes idle, the pool checks whether the number of fresh slots is below `keepFresh`. If so, it tries to offload a session to free a slot. (see eviction rules)
 
 This is best-effort — if all loaded sessions are pinned or processing, the pool can't free anything and the fresh count stays below target until conditions change.
 

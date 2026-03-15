@@ -228,6 +228,7 @@ func setupPool(t *testing.T, size int) *pool {
 
 	result := p.run("init", "--size", fmt.Sprintf("%d", size),
 		"--dir", p.workDir,
+		"--keep-fresh", "0",
 		"--flags", "--dangerously-skip-permissions --model haiku")
 	if result.ExitCode != 0 {
 		t.Fatalf("init failed (exit %d): %s", result.ExitCode, result.Stderr)

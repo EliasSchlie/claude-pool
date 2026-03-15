@@ -39,6 +39,7 @@ func TestMultiPool(t *testing.T) {
 	t.Run("init alpha", func(t *testing.T) {
 		result := alpha.run("init", "--size", "1",
 			"--dir", alpha.workDir,
+			"--keep-fresh", "0",
 			"--flags", "--dangerously-skip-permissions --model haiku")
 		assertExitOK(t, result)
 		alpha.waitForIdleCount(1, 90*time.Second)
@@ -47,6 +48,7 @@ func TestMultiPool(t *testing.T) {
 	t.Run("init beta", func(t *testing.T) {
 		result := beta.run("init", "--size", "1",
 			"--dir", beta.workDir,
+			"--keep-fresh", "0",
 			"--flags", "--dangerously-skip-permissions --model haiku")
 		assertExitOK(t, result)
 		beta.waitForIdleCount(1, 90*time.Second)
