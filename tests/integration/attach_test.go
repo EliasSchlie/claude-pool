@@ -340,12 +340,8 @@ func TestAttach(t *testing.T) {
 		attachResp := sc.send(Msg{"type": "attach", "sessionId": s1})
 		assertNotError(t, attachResp)
 
-		if numVal(attachResp, "cols") != 120 {
-			t.Fatalf("expected cols=120 after resize, got %v", numVal(attachResp, "cols"))
-		}
-		if numVal(attachResp, "rows") != 40 {
-			t.Fatalf("expected rows=40 after resize, got %v", numVal(attachResp, "rows"))
-		}
+		assertNumVal(t, attachResp, "cols", 120)
+		assertNumVal(t, attachResp, "rows", 40)
 
 		// Resize to a different size to confirm it's not a cached value
 		resp2 := sc.send(Msg{"type": "pty-resize", "sessionId": s1, "cols": 200, "rows": 50})
@@ -354,12 +350,8 @@ func TestAttach(t *testing.T) {
 		attachResp2 := sc.send(Msg{"type": "attach", "sessionId": s1})
 		assertNotError(t, attachResp2)
 
-		if numVal(attachResp2, "cols") != 200 {
-			t.Fatalf("expected cols=200 after second resize, got %v", numVal(attachResp2, "cols"))
-		}
-		if numVal(attachResp2, "rows") != 50 {
-			t.Fatalf("expected rows=50 after second resize, got %v", numVal(attachResp2, "rows"))
-		}
+		assertNumVal(t, attachResp2, "cols", 200)
+		assertNumVal(t, attachResp2, "rows", 50)
 	})
 
 	t.Run("pty-resize on non-live session errors", func(t *testing.T) {
