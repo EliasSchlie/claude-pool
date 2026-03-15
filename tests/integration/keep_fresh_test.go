@@ -49,60 +49,69 @@ func TestKeepFresh(t *testing.T) {
 	})
 
 	t.Run("fresh slots maintained after sessions go idle", func(t *testing.T) {
-		// Start 3 sessions to fill the pool
+		// Start 3 sessions sequentially — order determines LRU.
+		// s0 finishes first → oldest idle → should be evicted by keepFresh.
 		var sessions []string
 		for i := 0; i < 3; i++ {
 			resp := pool.runJSON("start", "--prompt", fmt.Sprintf("respond with exactly: keep-fresh-%d", i))
-			sessions = append(sessions, strVal(resp, "sessionId"))
-		}
-
-		// Wait for all to complete
-		for _, sid := range sessions {
+			sid := strVal(resp, "sessionId")
+			sessions = append(sessions, sid)
 			pool.waitForIdle(sid, 300*time.Second)
 		}
 
-		// With keepFresh=1, the pool should proactively offload one idle session
-		// to maintain 1 fresh slot. Wait for this to happen.
+		// All 3 are idle. With keepFresh=1, the pool should proactively offload
+		// the LRU session (sessions[0]) to free a slot.
 		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
-			health := pool.getHealth()
-			counts, _ := health["counts"].(map[string]any)
-			freshCount := numVal(counts, "fresh")
-			if freshCount >= 1 {
-				// Verify exactly one session was offloaded
-				offloadedCount := numVal(counts, "offloaded")
-				if offloadedCount < 1 {
-					t.Fatalf("expected at least 1 offloaded session, got %v", offloadedCount)
-				}
-				return
+			info := pool.getSessionInfo(sessions[0])
+			if info.Status == "offloaded" {
+				break
 			}
 			time.Sleep(500 * time.Millisecond)
 		}
 
+		// Verify the LRU session (sessions[0]) was offloaded
+		info0 := pool.getSessionInfo(sessions[0])
+		assertStatus(t, info0, "offloaded")
+
+		// Verify the other two are still idle (not offloaded)
+		info1 := pool.getSessionInfo(sessions[1])
+		assertStatus(t, info1, "idle")
+		info2 := pool.getSessionInfo(sessions[2])
+		assertStatus(t, info2, "idle")
+
+		// Verify health shows 1 fresh slot
 		health := pool.getHealth()
 		counts, _ := health["counts"].(map[string]any)
-		t.Fatalf("expected at least 1 fresh slot after keepFresh maintenance, got %v (counts: %v)",
-			numVal(counts, "fresh"), counts)
+		if numVal(counts, "fresh") < 1 {
+			t.Fatalf("expected at least 1 fresh slot, got %v (counts: %v)",
+				numVal(counts, "fresh"), counts)
+		}
 	})
 
 	t.Run("keepFresh respects pins", func(t *testing.T) {
-		// Pin all remaining idle sessions — pool should not be able to free more slots
+		// State: 2 idle, 1 offloaded, 1 fresh. Pin both idle sessions.
 		sessions := pool.listSessions("--status", "idle")
+		idleBefore := len(sessions)
+		if idleBefore < 2 {
+			t.Fatalf("expected at least 2 idle sessions, got %d", idleBefore)
+		}
 		for _, s := range sessions {
 			pool.run("set", "--session", s.SessionID, "--pinned", "300")
 		}
 
-		// Set keepFresh higher to request more fresh slots
+		// Request keepFresh=2 — pool would need to offload an idle session,
+		// but all idle sessions are pinned, so it can't.
 		pool.run("config", "--set", "keepFresh=2")
 
-		// Wait briefly — proactive offloading should NOT happen on pinned sessions
+		// Wait — proactive offloading should NOT happen on pinned sessions
 		time.Sleep(5 * time.Second)
 
 		health := pool.getHealth()
 		counts, _ := health["counts"].(map[string]any)
-		idleCount := numVal(counts, "idle")
-		if idleCount == 0 {
-			t.Fatal("all idle sessions were offloaded despite being pinned")
+		idleAfter := numVal(counts, "idle")
+		if int(idleAfter) != idleBefore {
+			t.Fatalf("pinned idle sessions were offloaded: had %d, now have %v", idleBefore, idleAfter)
 		}
 
 		// Unpin all
