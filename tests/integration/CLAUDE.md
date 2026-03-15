@@ -69,11 +69,11 @@ test prompts must use relative subdirectories.
 | File | Pool size | What it covers |
 |------|-----------|----------------|
 | `pool_test.go` | 2 | Init, ping, config, resize, health, destroy, re-init with restore |
-| `session_test.go` | 3 | Start, wait, capture, followup, info, set (metadata), stop, --block, prefix resolution |
-| `slots_test.go` | 2 | Queue, set priority, set pinned, eviction order, LRU |
+| `session_test.go` | 3 | Start, wait, capture, followup, info, set (metadata), stop, --block, prefix resolution, --dir verification, wait-any, debug slots/logs |
+| `slots_test.go` | 2 | Queue, set priority, set pinned, eviction order, LRU, pendingInput LRU reset, debug input/capture |
 | `offload_test.go` | 2 | Eviction→offload, capture offloaded, followup restores, process death, archive/unarchive lifecycle |
 | `parent_child_test.go` | 3 | --parent flag, env auto-detection, --parent none, ls filtering, verbosity, recursive archive |
-| `attach_test.go` | 2 | Attach pipe, pendingInput, keystroke/submit, eviction closes pipe, re-attach |
+| `attach_test.go` | 2 | Attach pipe, pendingInput, keystroke/submit, eviction closes pipe, re-attach, multiple simultaneous clients |
 | `subscribe_test.go` | 2 | Event stream, filters, re-subscribe, updated events |
 
 Shared infrastructure:

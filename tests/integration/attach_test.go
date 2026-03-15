@@ -24,6 +24,7 @@ package integration
 //   8.  "eviction closes attach pipe"
 //   9.  "attach fails on offloaded session"
 //  10.  "restore and re-attach"
+//  11.  "multiple clients read simultaneously"
 
 import (
 	"errors"
@@ -217,6 +218,52 @@ func TestAttach(t *testing.T) {
 		}
 
 		newConn.Write([]byte("\x15"))
+	})
+
+	t.Run("multiple clients read simultaneously", func(t *testing.T) {
+		// s1 is restored and pinned from previous step — get its attach socket
+		attachResp := sc.send(Msg{"type": "attach", "sessionId": s1})
+		assertNotError(t, attachResp)
+		sockPath := strVal(attachResp, "socketPath")
+
+		conn1, err := net.Dial("unix", sockPath)
+		if err != nil {
+			t.Fatalf("connect client 1: %v", err)
+		}
+		defer conn1.Close()
+
+		conn2, err := net.Dial("unix", sockPath)
+		if err != nil {
+			t.Fatalf("connect client 2: %v", err)
+		}
+		defer conn2.Close()
+
+		drainAttach(conn1)
+		drainAttach(conn2)
+
+		// Send a followup — both clients should receive terminal output
+		sc.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: multi-client-test"})
+		p.waitForStatus(s1, "processing", 15*time.Second)
+
+		buf1 := make([]byte, 8192)
+		conn1.SetReadDeadline(time.Now().Add(30 * time.Second))
+		n1, err1 := conn1.Read(buf1)
+
+		buf2 := make([]byte, 8192)
+		conn2.SetReadDeadline(time.Now().Add(30 * time.Second))
+		n2, err2 := conn2.Read(buf2)
+
+		if err1 != nil {
+			t.Fatalf("client 1 read failed: %v", err1)
+		}
+		if err2 != nil {
+			t.Fatalf("client 2 read failed: %v", err2)
+		}
+		if n1 == 0 || n2 == 0 {
+			t.Fatalf("both clients should receive output: client1=%d bytes, client2=%d bytes", n1, n2)
+		}
+
+		p.waitForStatus(s1, "idle", 30*time.Second)
 	})
 }
 

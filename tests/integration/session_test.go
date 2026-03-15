@@ -36,7 +36,11 @@ package integration
 //  24.  "followup with block"
 //  25.  "start with block and output flags"
 //  26.  "stop on idle errors"
-//  27.  "human-readable output"
+//  27.  "spawnCwd matches --dir"
+//  28.  "wait without session or parent waits for any"
+//  29.  "human-readable output"
+//  30.  "debug slots shows slot info"
+//  31.  "debug logs returns log lines"
 
 import (
 	"encoding/json"
@@ -329,6 +333,22 @@ func TestSession(t *testing.T) {
 		assertExitError(t, result)
 	})
 
+	t.Run("spawnCwd matches --dir", func(t *testing.T) {
+		info := pool.getSessionInfo(s1)
+		assertContains(t, info.SpawnCwd, "workdir")
+	})
+
+	t.Run("wait without session or parent waits for any", func(t *testing.T) {
+		// Start a session and wait with no filters — should return when it completes
+		startResp := pool.runJSON("start", "--prompt", "respond with exactly: any-wait")
+		sid := strVal(startResp, "sessionId")
+
+		waitResp := pool.runJSON("wait", "--timeout", "120000")
+		assertNonEmpty(t, "wait-any content", strVal(waitResp, "content"))
+
+		pool.run("archive", "--session", sid)
+	})
+
 	t.Run("human-readable output", func(t *testing.T) {
 		result := pool.run("ping")
 		assertExitOK(t, result)
@@ -338,6 +358,25 @@ func TestSession(t *testing.T) {
 		assertExitOK(t, result)
 		if result.Stdout == "" {
 			t.Fatal("expected non-empty human-readable output from info")
+		}
+	})
+
+	t.Run("debug slots shows slot info", func(t *testing.T) {
+		resp := pool.runJSON("debug", "slots")
+		slots, ok := resp["slots"].([]any)
+		if !ok {
+			t.Fatalf("expected slots array, got %T", resp["slots"])
+		}
+		if len(slots) == 0 {
+			t.Fatal("expected at least one slot")
+		}
+	})
+
+	t.Run("debug logs returns log lines", func(t *testing.T) {
+		result := pool.run("debug", "logs", "--lines", "10")
+		assertExitOK(t, result)
+		if result.Stdout == "" {
+			t.Fatal("expected non-empty log output")
 		}
 	})
 }
