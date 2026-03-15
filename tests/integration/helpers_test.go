@@ -189,22 +189,27 @@ type cmdResult struct {
 // For tests that need to control init timing (e.g., TestPool).
 func newPool(t *testing.T) *pool {
 	t.Helper()
-
 	testDir := filepath.Join(runDir, t.Name())
 	cpHome := filepath.Join(testDir, ".claude-pool")
-	workDir := filepath.Join(testDir, "workdir")
-
 	if err := os.MkdirAll(cpHome, 0755); err != nil {
 		t.Fatalf("failed to create .claude-pool dir: %v", err)
 	}
+	return newNamedPool(t, "test", cpHome, filepath.Join(testDir, "workdir"))
+}
+
+// newNamedPool creates a pool with a specific name and shared homeDir.
+// For tests that run multiple pools in the same CLAUDE_POOL_HOME (e.g., TestMultiPool).
+func newNamedPool(t *testing.T, name, homeDir, workDir string) *pool {
+	t.Helper()
+
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		t.Fatalf("failed to create workdir: %v", err)
 	}
 
 	p := &pool{
 		t:       t,
-		name:    "test",
-		homeDir: cpHome,
+		name:    name,
+		homeDir: homeDir,
 		workDir: workDir,
 	}
 
