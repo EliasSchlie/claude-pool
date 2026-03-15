@@ -108,9 +108,9 @@ These flags are available on every command:
 ### Interaction
 
 **start** — Start a new session.
-  `--prompt <text>` (required) — The prompt to send.
+  `--prompt <text>` — The prompt to send. If omitted, the session is created in `idle` state — a fresh slot is claimed but no prompt is sent. Useful for interactive UIs that need a live session for direct TUI access (via `attach`).
   `--parent <string>` — Identifies who spawned this session. Any string. If omitted and the caller is a Claude Code instance, defaults to that session's Claude Code UUID. If omitted from a regular terminal, the session has no parent. Use `--parent none` to explicitly create a session with no parent (disables auto-detection).
-  `--block` — Wait for completion and print output. Accepts output flags: `--source`, `--turns`, `--detail` (see Output Capture).
+  `--block` — Wait for completion and print output. Requires `--prompt` (nothing to wait for without one). Accepts output flags: `--source`, `--turns`, `--detail` (see Output Capture).
   → `sessionId`: string — Pool-assigned session ID.
   → `status`: session state — Current state (see Session States).
   With `--block`, additionally:
@@ -175,6 +175,7 @@ These flags are available on every command:
   `--size <n>` — Slot count. Falls back to config if omitted.
   `--flags <string>` — Claude CLI flags for all sessions. Updates config if provided.
   `--dir <path>` — Pool home directory (default: `~`).
+  `--keep-fresh <n>` — Target number of fresh slots to maintain (see Fresh Slot Maintenance). Updates config if provided.
   `--no-restore` — Skip restoring previous sessions.
   → Pool state after initialization (same as `health`).
 
@@ -184,7 +185,7 @@ These flags are available on every command:
 **resize** — Change slot count immediately and update config.
   `--size <n>` (required) — New slot count (minimum 1).
 
-**config** — Read or update pool config. Default keys: `flags` (string, Claude CLI flags), `size` (integer, default slot count). Arbitrary key-value pairs can also be stored for session metadata.
+**config** — Read or update pool config. Default keys: `flags` (string, Claude CLI flags), `size` (integer, default slot count), `keepFresh` (integer, target number of fresh slots — see Fresh Slot Maintenance). Arbitrary key-value pairs can also be stored for session metadata.
   `--set <key>=<value>` — Update a config field. Omit to read.
   → `config`: object — Current config after any updates.
 
@@ -252,6 +253,16 @@ When a slot is needed and none are free:
 2. If no fresh slots, offload the lowest-priority idle session. Within the same priority, offload the session that has been idle the longest (LRU). Changes in `pendingInput` reset the LRU timestamp for that session (counts as recent use).
 3. Pinned sessions are never evicted. If all idle sessions are pinned, the request queues until a slot frees up naturally.
 4. Processing sessions are never interrupted for eviction — they finish naturally.
+
+### Fresh Slot Maintenance
+
+The pool proactively offloads idle sessions to maintain a target number of fresh slots, configured by `keepFresh` (default: 1). This ensures `start` is near-instant — a pre-warmed slot is usually already available.
+
+After any session becomes idle, the pool checks whether the number of fresh slots is below `keepFresh`. If so, it offloads the lowest-priority, longest-idle session to free a slot. The same eviction rules apply: pinned sessions are never evicted, processing sessions are never interrupted.
+
+This is best-effort — if all loaded sessions are pinned or processing, the pool can't free anything and the fresh count stays below target until conditions change.
+
+Setting `keepFresh` to 0 disables proactive offloading (only on-demand eviction). Setting it to `size` means every idle session is offloaded immediately (aggressive — useful for pools where sessions are always prompted programmatically and never left idle).
 
 ### Slot States
 
