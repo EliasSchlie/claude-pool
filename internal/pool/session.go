@@ -148,15 +148,18 @@ func (s *Session) ToMsg(verbosity string) map[string]any {
 
 // ToMsgWithChildren converts a session to a protocol message with recursive children.
 // Verbosity is applied recursively to all children.
+// SPEC: children field only included in nested and full verbosity.
 func (s *Session) ToMsgWithChildren(allSessions map[string]*Session, verbosity string) map[string]any {
 	m := s.ToMsg(verbosity)
-	children := make([]any, 0)
-	for _, other := range allSessions {
-		if other.ParentID == s.ID && other.Status != StatusArchived {
-			children = append(children, other.ToMsgWithChildren(allSessions, verbosity))
+	if verbosity == VerbosityNested || verbosity == VerbosityFull {
+		children := make([]any, 0)
+		for _, other := range allSessions {
+			if other.ParentID == s.ID && other.Status != StatusArchived {
+				children = append(children, other.ToMsgWithChildren(allSessions, verbosity))
+			}
 		}
+		m["children"] = children
 	}
-	m["children"] = children
 	return m
 }
 

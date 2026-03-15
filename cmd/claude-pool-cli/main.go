@@ -242,6 +242,7 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 	// Parse args for config updates and init message
 	var size int
 	var flags, workDir string
+	keepFresh := -1 // -1 = not set
 	noRestore := false
 
 	for i := 0; i < len(args); i++ {
@@ -260,6 +261,11 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 			i++
 			if i < len(args) {
 				workDir = args[i]
+			}
+		case "--keep-fresh":
+			i++
+			if i < len(args) {
+				keepFresh, _ = strconv.Atoi(args[i])
 			}
 		case "--no-restore":
 			noRestore = true
@@ -302,6 +308,9 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 	}
 	if workDir != "" {
 		cfg["dir"] = workDir
+	}
+	if keepFresh >= 0 {
+		cfg["keepFresh"] = keepFresh
 	}
 	cfgData, _ := json.MarshalIndent(cfg, "", "  ")
 	if err := os.WriteFile(configPath, append(cfgData, '\n'), 0644); err != nil {
@@ -450,6 +459,13 @@ func doStart(c *conn, args []string, jsonMode bool) error {
 	if _, hasParent := msg["parent"]; !hasParent {
 		if envParent := os.Getenv("CLAUDE_POOL_SESSION_ID"); envParent != "" {
 			msg["parent"] = envParent
+		}
+	}
+
+	// SPEC: --block requires --prompt (nothing to wait for without one)
+	if block {
+		if _, hasPrompt := msg["prompt"]; !hasPrompt {
+			return fmt.Errorf("--block requires --prompt")
 		}
 	}
 

@@ -152,6 +152,8 @@ func (m *Manager) Handle(conn net.Conn, req api.Msg) api.Msg {
 		return m.handleDebugLogs(id, req)
 	case "attach":
 		return m.handleAttach(id, req)
+	case "pty-resize":
+		return m.handlePtyResize(id, req)
 	case "subscribe":
 		m.handleSubscribe(conn, req)
 		return nil
@@ -192,7 +194,8 @@ func (m *Manager) broadcastEvent(event api.Msg) {
 
 func configToMsg(cfg Config) api.Msg {
 	m := api.Msg{
-		"size": float64(cfg.Size),
+		"size":      float64(cfg.Size),
+		"keepFresh": float64(cfg.KeepFreshVal()),
 	}
 	if cfg.Flags != "" {
 		m["flags"] = cfg.Flags
