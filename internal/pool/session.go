@@ -113,7 +113,12 @@ func (s *Session) ToMsg() map[string]any {
 		meta["description"] = s.Metadata.Description
 	}
 	if len(s.Metadata.Tags) > 0 {
-		meta["tags"] = s.Metadata.Tags
+		// Shallow copy to prevent callers from mutating session state
+		tags := make(map[string]string, len(s.Metadata.Tags))
+		for k, v := range s.Metadata.Tags {
+			tags[k] = v
+		}
+		meta["tags"] = tags
 	}
 	m["metadata"] = meta
 	return m

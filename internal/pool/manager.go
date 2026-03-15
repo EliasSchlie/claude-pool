@@ -227,11 +227,6 @@ func metadataFromMap(m map[string]any) SessionMetadata {
 	return md
 }
 
-// metadataFromRequest extracts SessionMetadata from an API request's "metadata" field.
-func metadataFromRequest(req map[string]any) SessionMetadata {
-	return metadataFromMap(req)
-}
-
 func isPidAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }

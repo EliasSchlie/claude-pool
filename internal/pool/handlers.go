@@ -191,7 +191,7 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 	s := m.newSession(parentID)
 	s.PendingPrompt = prompt
 	if _, hasMetadata := req["metadata"]; hasMetadata {
-		s.Metadata = metadataFromRequest(req)
+		s.Metadata = metadataFromMap(req)
 	}
 	m.sessions[s.ID] = s
 	log.Printf("[start] created session %s (parent=%s, prompt=%d chars, name=%q)", s.ID, parentID, len(prompt), s.Metadata.Name)
@@ -809,7 +809,7 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 	if sessionID == "" {
 		s := m.newSession(parentID)
 		if _, hasMetadata := req["metadata"]; hasMetadata {
-			s.Metadata = metadataFromRequest(req)
+			s.Metadata = metadataFromMap(req)
 		}
 		m.sessions[s.ID] = s
 		log.Printf("[pin] creating new pinned session %s (parent=%s duration=%.0fs)", s.ID, parentID, duration)
@@ -962,12 +962,14 @@ func (m *Manager) handleSetMetadata(id any, req api.Msg) api.Msg {
 	changes := map[string]any{}
 
 	// Merge semantics: only update fields that are present in the request.
-	// Explicit null clears the field.
+	// Explicit null clears the field. Wrong types are rejected.
 	if v, ok := metaRaw["name"]; ok {
 		if v == nil {
 			s.Metadata.Name = ""
 		} else if sv, ok := v.(string); ok {
 			s.Metadata.Name = sv
+		} else {
+			return api.ErrorResponse(id, "metadata.name must be a string or null")
 		}
 		changes["name"] = s.Metadata.Name
 	}
@@ -976,6 +978,8 @@ func (m *Manager) handleSetMetadata(id any, req api.Msg) api.Msg {
 			s.Metadata.Description = ""
 		} else if sv, ok := v.(string); ok {
 			s.Metadata.Description = sv
+		} else {
+			return api.ErrorResponse(id, "metadata.description must be a string or null")
 		}
 		changes["description"] = s.Metadata.Description
 	}
@@ -991,15 +995,23 @@ func (m *Manager) handleSetMetadata(id any, req api.Msg) api.Msg {
 					delete(s.Metadata.Tags, tk)
 				} else if sv, ok := tv.(string); ok {
 					s.Metadata.Tags[tk] = sv
+				} else {
+					return api.ErrorResponse(id, "metadata.tags values must be strings or null")
 				}
 			}
 			if len(s.Metadata.Tags) == 0 {
 				s.Metadata.Tags = nil
 			}
+		} else {
+			return api.ErrorResponse(id, "metadata.tags must be an object or null")
 		}
-		// Report current tags state in changes
+		// Report current tags state in changes (copy to avoid aliasing)
 		if len(s.Metadata.Tags) > 0 {
-			changes["tags"] = s.Metadata.Tags
+			tagsCopy := make(map[string]string, len(s.Metadata.Tags))
+			for k, v := range s.Metadata.Tags {
+				tagsCopy[k] = v
+			}
+			changes["tags"] = tagsCopy
 		} else {
 			changes["tags"] = nil
 		}
