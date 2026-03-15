@@ -238,6 +238,7 @@ func (p *pool) cliEnv() []string {
 	return append(os.Environ(),
 		"CLAUDE_POOL_HOME="+p.homeDir,
 		"CLAUDE_POOL_DAEMON="+daemonBinPath,
+		"CLAUDE_POOL_TEST=1",
 	)
 }
 
