@@ -16,13 +16,17 @@ import (
 
 func (m *Manager) newSession(parentID string) *Session {
 	now := time.Now()
+	cwd := m.paths.Root
+	if cfg, err := m.config.Load(); err == nil && cfg.Dir != "" {
+		cwd = cfg.Dir
+	}
 	return &Session{
 		ID:         generateSessionID(),
 		ParentID:   parentID,
 		CreatedAt:  now,
 		LastUsedAt: now,
-		SpawnCwd:   m.paths.Root,
-		Cwd:        m.paths.Root,
+		SpawnCwd:   cwd,
+		Cwd:        cwd,
 	}
 }
 
