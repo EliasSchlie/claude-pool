@@ -97,8 +97,8 @@ If the session is still processing or was stopped early, there might not be any 
 
 ---
 
-## CLI
-
+## CLI (claude-pool)
+ A
 The CLI must be a thin wrapper over the socket API to make it easy to create other types of clients that interact with pools (e.g. python package,...) later.
 
 These flags are available on every command:
