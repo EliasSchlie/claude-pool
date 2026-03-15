@@ -10,18 +10,44 @@ import (
 
 const promptChar = "❯"
 
+// containsBoxDrawing checks if s contains Unicode box-drawing or block element
+// characters (U+2500–U+259F). These appear in Claude Code's TUI status bar
+// and cause false positive pendingInput detections.
+func containsBoxDrawing(s string) bool {
+	for _, r := range s {
+		if r >= 0x2500 && r <= 0x259F {
+			return true
+		}
+	}
+	return false
+}
+
 // parseBufferInput extracts text typed after the ❯ prompt character in
 // terminal output. Searches backwards from the end of the buffer to find
 // the most recent prompt line. Callers should pass only the buffer tail
 // (e.g. 8KB) to avoid processing the full ring buffer.
+//
+// Split on both \n and \r — Claude Code's TUI uses \r for status bar
+// redraws, and without splitting on \r the status bar text gets
+// concatenated with the prompt line causing false positives.
 func parseBufferInput(buf []byte) string {
 	stripped := stripANSI(string(buf))
-	lines := strings.Split(stripped, "\n")
+
+	// Split on any line boundary (\n, \r, or \r\n)
+	lines := strings.FieldsFunc(stripped, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	})
 
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := lines[i]
 		if idx := strings.LastIndex(line, promptChar); idx >= 0 {
-			return strings.TrimSpace(line[idx+len(promptChar):])
+			input := strings.TrimSpace(line[idx+len(promptChar):])
+			// Reject false positives: TUI artifacts contain box-drawing
+			// chars, status bar text, etc. Real user input is plain text.
+			if containsBoxDrawing(input) {
+				continue
+			}
+			return input
 		}
 	}
 	return ""

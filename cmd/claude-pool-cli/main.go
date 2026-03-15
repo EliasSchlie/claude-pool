@@ -1,7 +1,8 @@
 // claude-pool-cli — Thin CLI router for claude-pool daemons.
 //
-// Resolves pool names from the registry (pools.json) to socket connections,
-// translates CLI commands to socket API calls, and formats output.
+// Pool state lives under CLAUDE_POOL_HOME (default: ~/.claude-pool/).
+// Each pool gets its own directory: CLAUDE_POOL_HOME/<pool-name>/.
+// The `init` command starts the daemon; all other commands talk to it via socket.
 package main
 
 import (
@@ -10,8 +11,11 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // conn is a persistent socket connection used for the entire CLI invocation.
@@ -58,6 +62,61 @@ func (c *conn) send(msg map[string]any) (map[string]any, error) {
 
 func (c *conn) close() { c.c.Close() }
 
+// --- Path helpers ---
+
+// poolHome returns the base directory for all pool state.
+// Respects CLAUDE_POOL_HOME env var, defaults to ~/.claude-pool/.
+func poolHome() (string, error) {
+	if v := os.Getenv("CLAUDE_POOL_HOME"); v != "" {
+		return v, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home: %w", err)
+	}
+	return filepath.Join(home, ".claude-pool"), nil
+}
+
+// poolDir returns the directory for a named pool.
+func poolDir(name string) (string, error) {
+	home, err := poolHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, name), nil
+}
+
+// socketPath returns the socket path for a named pool.
+func socketPath(name string) (string, error) {
+	dir, err := poolDir(name)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "api.sock"), nil
+}
+
+// registryPath returns the path to pools.json.
+func registryPath() (string, error) {
+	home, err := poolHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "pools.json"), nil
+}
+
+// daemonBin returns the daemon binary path.
+// Respects CLAUDE_POOL_DAEMON env var, defaults to "claude-pool" in PATH.
+func daemonBin() (string, error) {
+	if v := os.Getenv("CLAUDE_POOL_DAEMON"); v != "" {
+		return v, nil
+	}
+	path, err := exec.LookPath("claude-pool")
+	if err != nil {
+		return "", fmt.Errorf("daemon binary not found (set CLAUDE_POOL_DAEMON or add claude-pool to PATH)")
+	}
+	return path, nil
+}
+
 func main() {
 	args := os.Args[1:]
 
@@ -87,22 +146,31 @@ func main() {
 	cmd := remaining[0]
 	cmdArgs := remaining[1:]
 
-	// pools is registry-only — no socket needed
+	// pools is filesystem-only — no socket needed
 	if cmd == "pools" {
-		if err := doPools(pool, jsonMode); err != nil {
+		if err := doPools(jsonMode); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	socketPath, err := resolvePool(pool)
+	// init is special — starts the daemon, then sends init command
+	if cmd == "init" {
+		if err := doInit(pool, cmdArgs, jsonMode); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	sock, err := socketPath(pool)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
-	c, err := dial(socketPath)
+	c, err := dial(sock)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -115,47 +183,12 @@ func main() {
 	}
 }
 
-func resolvePool(name string) (string, error) {
-	registryPath := os.Getenv("CLAUDE_POOL_REGISTRY")
-	if registryPath == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("cannot determine home: %w", err)
-		}
-		registryPath = home + "/.claude-pool/pools.json"
-	}
-
-	data, err := os.ReadFile(registryPath)
-	if err != nil {
-		return "", fmt.Errorf("cannot read registry %s: %w", registryPath, err)
-	}
-
-	var registry map[string]map[string]any
-	if err := json.Unmarshal(data, &registry); err != nil {
-		return "", fmt.Errorf("cannot parse registry: %w", err)
-	}
-
-	entry, ok := registry[name]
-	if !ok {
-		return "", fmt.Errorf("pool %q not found in registry", name)
-	}
-
-	socket, ok := entry["socket"].(string)
-	if !ok {
-		return "", fmt.Errorf("pool %q has no socket path", name)
-	}
-
-	return socket, nil
-}
-
 func dispatch(c *conn, cmd string, args []string, jsonMode bool) error {
 	switch cmd {
 	case "ping":
 		return doSimple(c, map[string]any{"type": "ping"}, jsonMode)
 	case "health":
 		return doSimple(c, map[string]any{"type": "health"}, jsonMode)
-	case "init":
-		return doInit(c, args, jsonMode)
 	case "start":
 		return doStart(c, args, jsonMode)
 	case "followup":
@@ -191,32 +224,174 @@ func dispatch(c *conn, cmd string, args []string, jsonMode bool) error {
 
 // --- Command implementations ---
 
-func doInit(c *conn, args []string, jsonMode bool) error {
-	msg := map[string]any{"type": "init"}
+// doInit starts the daemon (if needed), writes config, sends init, and registers the pool.
+func doInit(poolName string, args []string, jsonMode bool) error {
+	dir, err := poolDir(poolName)
+	if err != nil {
+		return err
+	}
+
+	sock := filepath.Join(dir, "api.sock")
+
+	// Check if already running
+	if c, err := net.DialTimeout("unix", sock, time.Second); err == nil {
+		c.Close()
+		return fmt.Errorf("pool %q is already running", poolName)
+	}
+
+	// Parse args for config updates and init message
+	var size int
+	var flags, workDir string
+	noRestore := false
+
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--size":
 			i++
 			if i < len(args) {
-				if v, err := strconv.Atoi(args[i]); err == nil {
-					msg["size"] = v
-				}
+				size, _ = strconv.Atoi(args[i])
 			}
 		case "--flags":
 			i++
 			if i < len(args) {
-				msg["flags"] = args[i]
+				flags = args[i]
 			}
 		case "--dir":
 			i++
 			if i < len(args) {
-				msg["dir"] = args[i]
+				workDir = args[i]
 			}
 		case "--no-restore":
-			msg["noRestore"] = true
+			noRestore = true
 		}
 	}
-	return doSimple(c, msg, jsonMode)
+
+	// Create pool directory
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("cannot create pool directory: %w", err)
+	}
+
+	// Ensure hooks are installed (idempotent — re-registers if missing)
+	bin, err := daemonBin()
+	if err != nil {
+		return err
+	}
+	installCmd := exec.Command(bin, "install")
+	installCmd.Stdout = os.Stderr
+	installCmd.Stderr = os.Stderr
+	if err := installCmd.Run(); err != nil {
+		return fmt.Errorf("hook installation failed: %w", err)
+	}
+
+	// Load existing config, apply overrides, save
+	configPath := filepath.Join(dir, "config.json")
+	var cfg map[string]any
+	if data, err := os.ReadFile(configPath); err == nil {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: corrupt config.json, starting fresh: %v\n", err)
+		}
+	}
+	if cfg == nil {
+		cfg = map[string]any{}
+	}
+	if size > 0 {
+		cfg["size"] = size
+	}
+	if flags != "" {
+		cfg["flags"] = flags
+	}
+	if workDir != "" {
+		cfg["dir"] = workDir
+	}
+	cfgData, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(configPath, append(cfgData, '\n'), 0644); err != nil {
+		return fmt.Errorf("cannot write config: %w", err)
+	}
+
+	// Start daemon (detached — must not inherit CLI's stdio pipes).
+	// Daemon handles its own logging to daemon.log. Don't pipe its
+	// stdout/stderr anywhere — the CLI must not hold open file descriptors
+	// to the daemon (otherwise cmd.Run() in tests blocks until daemon exits).
+	daemon := exec.Command(bin, "--pool-dir", dir)
+	daemon.Stdout = nil
+	daemon.Stderr = nil
+	daemon.Stdin = nil
+	if err := daemon.Start(); err != nil {
+		return fmt.Errorf("cannot start daemon: %w", err)
+	}
+
+	// Kill daemon on any subsequent failure — cleared on success.
+	killDaemon := true
+	defer func() {
+		if killDaemon {
+			daemon.Process.Kill()
+		}
+	}()
+
+	// Wait for socket to appear
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if _, err := os.Stat(sock); err != nil {
+		return fmt.Errorf("daemon socket never appeared at %s", sock)
+	}
+
+	// Connect and send init
+	c, err := dial(sock)
+	if err != nil {
+		return fmt.Errorf("cannot connect to daemon: %w", err)
+	}
+	defer c.close()
+
+	initMsg := map[string]any{"type": "init"}
+	if size > 0 {
+		initMsg["size"] = size
+	}
+	if noRestore {
+		initMsg["noRestore"] = true
+	}
+
+	resp, err := c.send(initMsg)
+	if err != nil {
+		return err
+	}
+	if err := checkError(resp); err != nil {
+		return err
+	}
+
+	killDaemon = false // success — don't kill on exit
+
+	// Register pool
+	if err := registerPool(poolName, sock); err != nil {
+		// Non-fatal — pool is running, just not in registry
+		fmt.Fprintf(os.Stderr, "warning: failed to register pool: %v\n", err)
+	}
+
+	return printResp(resp, jsonMode)
+}
+
+// registerPool adds or updates a pool entry in pools.json.
+func registerPool(name, sock string) error {
+	regPath, err := registryPath()
+	if err != nil {
+		return err
+	}
+
+	var registry map[string]map[string]any
+	if data, err := os.ReadFile(regPath); err == nil {
+		json.Unmarshal(data, &registry)
+	}
+	if registry == nil {
+		registry = map[string]map[string]any{}
+	}
+
+	registry[name] = map[string]any{"socket": sock}
+	data, _ := json.MarshalIndent(registry, "", "  ")
+	return os.WriteFile(regPath, append(data, '\n'), 0644)
 }
 
 func doStart(c *conn, args []string, jsonMode bool) error {
@@ -293,7 +468,6 @@ func doStart(c *conn, args []string, jsonMode bool) error {
 			"sessionId": sessionID,
 			"timeout":   300000,
 		}
-		// Merge output flags into wait message
 		for k, v := range outputFlags {
 			waitMsg[k] = v
 		}
@@ -390,7 +564,6 @@ func doFollowup(c *conn, args []string, jsonMode bool) error {
 func doWait(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "wait"}
 
-	// Auto-detect parent from CLAUDE_POOL_SESSION_ID
 	hasSession := false
 	hasParent := false
 
@@ -439,7 +612,6 @@ func doWait(c *conn, args []string, jsonMode bool) error {
 		}
 	}
 
-	// Auto-detect parent if no --session or --parent given
 	if !hasSession && !hasParent {
 		if envParent := os.Getenv("CLAUDE_POOL_SESSION_ID"); envParent != "" {
 			msg["parent"] = envParent
@@ -502,7 +674,6 @@ func doInfo(c *conn, args []string, jsonMode bool) error {
 func doLs(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "ls"}
 
-	// Auto-detect caller session
 	if envSession := os.Getenv("CLAUDE_POOL_SESSION_ID"); envSession != "" {
 		msg["callerId"] = envSession
 	}
@@ -513,7 +684,6 @@ func doLs(c *conn, args []string, jsonMode bool) error {
 			i++
 			if i < len(args) {
 				if args[i] == "none" {
-					// Override auto-detection — show all sessions
 					delete(msg, "callerId")
 					msg["all"] = true
 				} else {
@@ -633,7 +803,6 @@ func doConfig(c *conn, args []string, jsonMode bool) error {
 						msg["set"] = map[string]any{}
 					}
 					set := msg["set"].(map[string]any)
-					// Try to parse as number
 					if v, err := strconv.Atoi(parts[1]); err == nil {
 						set[parts[0]] = v
 					} else {
@@ -745,24 +914,19 @@ func doSessionCmd(c *conn, cmdType string, args []string, jsonMode bool) error {
 	return doSimple(c, msg, jsonMode)
 }
 
-func doPools(currentPool string, jsonMode bool) error {
-	registryPath := os.Getenv("CLAUDE_POOL_REGISTRY")
-	if registryPath == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("cannot determine home: %w", err)
-		}
-		registryPath = home + "/.claude-pool/pools.json"
-	}
-
-	data, err := os.ReadFile(registryPath)
+func doPools(jsonMode bool) error {
+	regPath, err := registryPath()
 	if err != nil {
-		return fmt.Errorf("cannot read registry: %w", err)
+		return err
 	}
 
 	var registry map[string]map[string]any
-	if err := json.Unmarshal(data, &registry); err != nil {
-		return fmt.Errorf("cannot parse registry: %w", err)
+	if data, err := os.ReadFile(regPath); err == nil {
+		json.Unmarshal(data, &registry)
+	}
+	// Missing file → empty registry (not an error)
+	if registry == nil {
+		registry = map[string]map[string]any{}
 	}
 
 	type poolInfo struct {
@@ -776,7 +940,6 @@ func doPools(currentPool string, jsonMode bool) error {
 		socket, _ := entry["socket"].(string)
 		status := "stopped"
 		if socket != "" {
-			// Try connecting to check if running
 			if conn, err := net.Dial("unix", socket); err == nil {
 				conn.Close()
 				status = "running"
@@ -790,8 +953,12 @@ func doPools(currentPool string, jsonMode bool) error {
 		out, _ := json.Marshal(resp)
 		fmt.Println(string(out))
 	} else {
-		for _, p := range pools {
-			fmt.Printf("%s (%s)\n", p.Name, p.Status)
+		if len(pools) == 0 {
+			fmt.Println("No pools registered.")
+		} else {
+			for _, p := range pools {
+				fmt.Printf("%s (%s)\n", p.Name, p.Status)
+			}
 		}
 	}
 	return nil

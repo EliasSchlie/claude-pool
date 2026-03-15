@@ -54,7 +54,7 @@ func SetupRunDir(repoRoot, prefix string) string {
 		fmt.Fprintf(os.Stderr, "failed to get home dir: %v\n", err)
 		os.Exit(1)
 	}
-	baseDir := filepath.Join(home, ".cache", "claude-pool-tests")
+	baseDir := filepath.Join(home, ".cache", "cpt")
 	pruneOldRuns(baseDir, time.Hour)
 
 	stamp := time.Now().Format(stampFormat)
