@@ -127,6 +127,7 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 
 	log.Printf("[init] pool initialized: %d sessions total", len(sessions))
 	m.savePoolState()
+	m.startTypingPoller()
 
 	return api.Response(id, "pool", api.Msg{
 		"pool": api.Msg{
