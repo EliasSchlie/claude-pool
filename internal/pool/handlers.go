@@ -456,17 +456,15 @@ func (m *Manager) handleWait(id any, req api.Msg) api.Msg {
 	}
 
 	sid := s.ID
+	ch := m.statusNotify
 	m.mu.Unlock()
 
 	deadline := time.After(timeout)
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
 	for {
 		select {
 		case <-deadline:
 			return api.ErrorResponse(id, "timeout")
-		case <-ticker.C:
+		case <-ch:
 			m.mu.Lock()
 			s := m.sessions[sid]
 			if s == nil {
@@ -488,6 +486,7 @@ func (m *Manager) handleWait(id any, req api.Msg) api.Msg {
 				m.mu.Unlock()
 				return api.ErrorResponse(id, "session error")
 			}
+			ch = m.statusNotify
 			m.mu.Unlock()
 		}
 	}

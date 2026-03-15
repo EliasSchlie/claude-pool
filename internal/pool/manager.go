@@ -44,7 +44,8 @@ type Manager struct {
 	queue          []*Session
 	killTokens     int
 	done           chan struct{}
-	transcriptDirs []string // override transcript search dirs (for testing; empty = default ~/.claude/projects)
+	statusNotify   chan struct{} // closed on every broadcastStatus; waiters select on it for zero-latency status detection
+	transcriptDirs []string      // override transcript search dirs (for testing; empty = default ~/.claude/projects)
 }
 
 func NewManager(p *paths.Pool, cfg *ConfigManager) *Manager {
@@ -59,6 +60,7 @@ func NewManager(p *paths.Pool, cfg *ConfigManager) *Manager {
 		attachTyping: make(map[string][]byte),
 		delivering:   make(map[string]chan struct{}),
 		done:         make(chan struct{}),
+		statusNotify: make(chan struct{}),
 	}
 }
 
@@ -161,8 +163,13 @@ func (m *Manager) Handle(conn net.Conn, req api.Msg) api.Msg {
 // --- Broadcasting ---
 
 func (m *Manager) broadcastStatus(s *Session, prevStatus string) {
+	// Wake internal waiters (handleWait, waitForSessionReady) on every
+	// status change — even suppressed ones (e.g. fresh).
+	close(m.statusNotify)
+	m.statusNotify = make(chan struct{})
+
 	if s.Status == StatusFresh {
-		return // Don't broadcast internal fresh state
+		return // Don't broadcast internal fresh state to external subscribers
 	}
 	// Don't expose "fresh" as a prevStatus to external consumers
 	if prevStatus == StatusFresh {
