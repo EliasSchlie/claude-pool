@@ -175,22 +175,12 @@ func TestPool(t *testing.T) {
 		pool.send(Msg{"type": "resize", "size": 2})
 		pool.awaitIdleCount(2, 60*time.Second)
 
-		// Find the two live sessions (ls includes offloaded from earlier steps)
-		lsResp := pool.send(Msg{"type": "ls", "all": true})
-		var sa, sb string
-		for _, s := range parseSessions(t, lsResp) {
-			if s.Status == "idle" || s.Status == "processing" {
-				if sa == "" {
-					sa = s.SessionID
-				} else {
-					sb = s.SessionID
-					break
-				}
-			}
+		lsResp := pool.send(Msg{"type": "ls", "all": true, "statuses": []string{"idle", "fresh"}})
+		sessions := parseSessions(t, lsResp)
+		if len(sessions) < 2 {
+			t.Fatalf("expected 2 idle sessions, got %d", len(sessions))
 		}
-		if sb == "" {
-			t.Fatal("expected 2 live sessions")
-		}
+		sa, sb := sessions[0].SessionID, sessions[1].SessionID
 
 		// Make both processing so kill tokens can't be consumed
 		pool.send(Msg{"type": "followup", "sessionId": sa, "prompt": "run the bash command: sleep 60"})
@@ -222,21 +212,12 @@ func TestPool(t *testing.T) {
 
 	t.Run("deferred eviction of processing sessions", func(t *testing.T) {
 		// State: poolSize=2, 2 idle sessions from previous step
-		lsResp := pool.send(Msg{"type": "ls", "all": true})
-		var sa, sb string
-		for _, s := range parseSessions(t, lsResp) {
-			if s.Status == "idle" || s.Status == "processing" {
-				if sa == "" {
-					sa = s.SessionID
-				} else {
-					sb = s.SessionID
-					break
-				}
-			}
+		lsResp := pool.send(Msg{"type": "ls", "all": true, "statuses": []string{"idle", "fresh"}})
+		sessions := parseSessions(t, lsResp)
+		if len(sessions) < 2 {
+			t.Fatalf("expected 2 idle sessions, got %d", len(sessions))
 		}
-		if sb == "" {
-			t.Fatal("expected 2 live sessions")
-		}
+		sa, sb := sessions[0].SessionID, sessions[1].SessionID
 
 		// Make both processing
 		pool.send(Msg{"type": "followup", "sessionId": sa, "prompt": "run the bash command: sleep 60"})
@@ -258,11 +239,10 @@ func TestPool(t *testing.T) {
 		pool.send(Msg{"type": "resize", "size": 2})
 		pool.awaitIdleCount(2, 60*time.Second)
 
-		// Identify current sessions
-		lsResp := pool.send(Msg{"type": "ls", "all": true})
+		lsResp := pool.send(Msg{"type": "ls", "all": true, "statuses": []string{"idle", "fresh"}})
 		sessions := parseSessions(t, lsResp)
 		if len(sessions) < 2 {
-			t.Fatalf("expected at least 2 sessions, got %d", len(sessions))
+			t.Fatalf("expected 2 idle sessions, got %d", len(sessions))
 		}
 
 		pinned := sessions[0].SessionID
