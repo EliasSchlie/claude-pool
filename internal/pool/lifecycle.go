@@ -594,16 +594,12 @@ func (m *Manager) tryDequeue() {
 		return
 	}
 
-	// First pass: consume kill tokens by shrinking poolSize
+	// First pass: try to evict sessions for any outstanding kill tokens.
+	// The resize handler already set poolSize to the target — we must NOT
+	// shrink poolSize here. Instead, evict now-available sessions (e.g. a
+	// session that was processing during resize but has since become idle).
 	if m.killTokens > 0 {
-		consumed := m.killTokens
-		m.poolSize -= consumed
-		if m.poolSize < 0 {
-			consumed += m.poolSize // adjust: don't go below 0
-			m.poolSize = 0
-		}
-		m.killTokens = 0
-		log.Printf("[dequeue] consumed %d kill tokens, poolSize now %d", consumed, m.poolSize)
+		m.tryKillTokens()
 	}
 
 	// Second pass: fill available slots from queue
@@ -723,13 +719,14 @@ func (m *Manager) findFreshSlot() *Session {
 	return freshCandidate
 }
 
-// findEvictableSession returns the lowest-priority idle unpinned session,
-// or nil if none qualifies. Among equal-priority sessions, pre-warmed sessions
-// are evicted first, then empty pendingInput, then oldest LRU.
+// findEvictableSession returns the best session to evict, or nil if none
+// qualifies. Fresh and idle unpinned sessions are candidates. Fresh sessions
+// (still pre-warming) are evicted before idle ones since they haven't served
+// any user work yet.
 func (m *Manager) findEvictableSession() *Session {
 	var best *Session
 	for _, s := range m.sessions {
-		if s.Status != StatusIdle || s.Pinned {
+		if (s.Status != StatusIdle && s.Status != StatusFresh) || s.Pinned {
 			continue
 		}
 		if best == nil || evictsBefore(s, best) {
@@ -740,14 +737,26 @@ func (m *Manager) findEvictableSession() *Session {
 }
 
 // evictsBefore returns true if a should be evicted before b.
-// Order: lower priority → pre-warmed → empty pendingInput → oldest LRU.
+// Order: fresh pre-warmed first → lower priority → pre-warmed → fresh → empty pendingInput → oldest LRU.
 func evictsBefore(a, b *Session) bool {
+	// Fresh pre-warmed sessions evicted first — no user work, no user intent
+	aFreshPW := a.Status == StatusFresh && a.PreWarmed
+	bFreshPW := b.Status == StatusFresh && b.PreWarmed
+	if aFreshPW != bFreshPW {
+		return aFreshPW
+	}
 	if a.Priority != b.Priority {
 		return a.Priority < b.Priority
 	}
 	// Pre-warmed sessions evicted before user sessions
 	if a.PreWarmed != b.PreWarmed {
 		return a.PreWarmed
+	}
+	// Fresh user sessions evicted before idle (haven't done work yet)
+	aFresh := a.Status == StatusFresh
+	bFresh := b.Status == StatusFresh
+	if aFresh != bFresh {
+		return aFresh
 	}
 	// Sessions with empty pendingInput evicted before those with pending text
 	aHasInput := a.PendingInput != ""
