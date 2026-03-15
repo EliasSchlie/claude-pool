@@ -143,10 +143,7 @@ func (m *Manager) handleHealth(id any) api.Msg {
 		if s.Status == StatusArchived {
 			continue
 		}
-		status := s.Status
-		if status == StatusFresh {
-			status = StatusIdle
-		}
+		status := s.ExternalStatus()
 		counts[status]++
 
 		hs := api.Msg{
