@@ -24,11 +24,13 @@ package integration
 //   8.  "eviction closes attach pipe"
 //   9.  "attach fails on offloaded session"
 //  10.  "restore and re-attach"
+//  11.  "multiple clients read simultaneously"
 
 import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -217,6 +219,73 @@ func TestAttach(t *testing.T) {
 		}
 
 		newConn.Write([]byte("\x15"))
+	})
+
+	t.Run("multiple clients read simultaneously", func(t *testing.T) {
+		// s1 is restored and pinned from previous step — get its attach socket
+		attachResp := sc.send(Msg{"type": "attach", "sessionId": s1})
+		assertNotError(t, attachResp)
+		sockPath := strVal(attachResp, "socketPath")
+
+		conn1, err := net.Dial("unix", sockPath)
+		if err != nil {
+			t.Fatalf("connect client 1: %v", err)
+		}
+		defer conn1.Close()
+
+		conn2, err := net.Dial("unix", sockPath)
+		if err != nil {
+			t.Fatalf("connect client 2: %v", err)
+		}
+		defer conn2.Close()
+
+		drainAttach(conn1)
+		drainAttach(conn2)
+
+		// Send a followup — both clients should receive terminal output
+		followupResp := sc.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: multi-client-test"})
+		assertNotError(t, followupResp)
+		p.waitForStatus(s1, "processing", 15*time.Second)
+
+		// Read from both clients concurrently
+		type readResult struct {
+			n   int
+			err error
+		}
+		var wg sync.WaitGroup
+		r1, r2 := make(chan readResult, 1), make(chan readResult, 1)
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 8192)
+			conn1.SetReadDeadline(time.Now().Add(30 * time.Second))
+			n, err := conn1.Read(buf)
+			r1 <- readResult{n, err}
+		}()
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 8192)
+			conn2.SetReadDeadline(time.Now().Add(30 * time.Second))
+			n, err := conn2.Read(buf)
+			r2 <- readResult{n, err}
+		}()
+
+		res1 := <-r1
+		res2 := <-r2
+		wg.Wait()
+
+		if res1.err != nil {
+			t.Fatalf("client 1 read failed: %v", res1.err)
+		}
+		if res2.err != nil {
+			t.Fatalf("client 2 read failed: %v", res2.err)
+		}
+		if res1.n == 0 || res2.n == 0 {
+			t.Fatalf("both clients should receive output: client1=%d bytes, client2=%d bytes", res1.n, res2.n)
+		}
+
+		p.waitForStatus(s1, "idle", 30*time.Second)
 	})
 }
 
