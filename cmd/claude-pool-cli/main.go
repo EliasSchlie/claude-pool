@@ -271,6 +271,18 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 		return fmt.Errorf("cannot create pool directory: %w", err)
 	}
 
+	// Ensure hooks are installed (idempotent — re-registers if missing)
+	bin, err := daemonBin()
+	if err != nil {
+		return err
+	}
+	installCmd := exec.Command(bin, "install")
+	installCmd.Stdout = os.Stderr
+	installCmd.Stderr = os.Stderr
+	if err := installCmd.Run(); err != nil {
+		return fmt.Errorf("hook installation failed: %w", err)
+	}
+
 	// Load existing config, apply overrides, save
 	configPath := filepath.Join(dir, "config.json")
 	var cfg map[string]any
@@ -294,12 +306,7 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 		return fmt.Errorf("cannot write config: %w", err)
 	}
 
-	// Start daemon (detached — must not inherit CLI's stdio pipes)
-	bin, err := daemonBin()
-	if err != nil {
-		return err
-	}
-
+	// Start daemon (detached — must not inherit CLI's stdio pipes).
 	// Daemon handles its own logging to daemon.log. Don't pipe its
 	// stdout/stderr anywhere — the CLI must not hold open file descriptors
 	// to the daemon (otherwise cmd.Run() in tests blocks until daemon exits).
