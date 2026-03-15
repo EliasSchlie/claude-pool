@@ -154,7 +154,7 @@ These flags are available on every command:
 
 ### Lifecycle
 
-**archive** — Mark session as done. Errors if session has unarchived children (use `--recursive`).
+**archive** — Mark session as done. If the session is processing, it is stopped and offloaded first. If the session is loaded (idle), it is offloaded first. Errors if session has unarchived children (use `--recursive`). Idempotent on already-archived sessions.
   `--session <id>` (required) — Target session.
   `--recursive` — Archive all descendants too.
 
@@ -238,6 +238,11 @@ The main skill should not mention `set` or debug commands.
 These are API-only — not exposed in the CLI. Needed by user interfaces (e.g. Open Cockpit) that render live terminal output.
 
 **attach** — Get a temporary Unix socket for raw PTY I/O. Connect to it for live terminal streaming: bytes written = keystrokes, bytes read = terminal output. Multiple clients can attach simultaneously. The pipe closes when the session is offloaded or dies. Only works on live sessions (idle, processing). All other API commands continue to work normally on attached sessions.
+  Response includes current PTY dimensions (`cols`, `rows`) so the client can create its viewport at matching size before writing the replay buffer (prevents reflow garbling in TUI terminals).
+
+**pty-resize** — Set a session's PTY dimensions. Triggers SIGWINCH on the underlying process.
+  `sessionId` (required), `cols` (required), `rows` (required).
+  Only works on live sessions (idle, processing). Errors on offloaded/queued/archived.
 
 **subscribe** — Open a persistent event stream on the socket connection. Filterable by session, event type, status transition, or property change (including `pendingInput`). Re-subscribing on the same connection replaces filters.
 
