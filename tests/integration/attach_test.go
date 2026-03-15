@@ -25,6 +25,8 @@ package integration
 //   9.  "attach fails on offloaded session"
 //  10.  "restore and re-attach"
 //  11.  "multiple clients read simultaneously"
+//  12.  "buffer-based pendingInput detection without attach"
+//  13.  "buffer-based pendingInput clears on Ctrl-U"
 
 import (
 	"errors"
@@ -286,6 +288,27 @@ func TestAttach(t *testing.T) {
 		}
 
 		p.waitForStatus(s1, "idle", 30*time.Second)
+	})
+
+	t.Run("buffer-based pendingInput detection without attach", func(t *testing.T) {
+		// s1 is idle and pinned. The multi-client connections from step 11 are
+		// closed (defer). Wait briefly for the server to clean up the pipe.
+		time.Sleep(500 * time.Millisecond)
+
+		// Write chars via `input` (raw PTY write, not attach pipe). The buffer
+		// poller must detect them and populate pendingInput.
+		resp := sc.send(Msg{"type": "input", "sessionId": s1, "data": "buffer_typing_test"})
+		assertNotError(t, resp)
+
+		val := p.waitForPendingInput(s1, func(v string) bool { return v != "" }, 10*time.Second)
+		assertContains(t, val, "buffer_typing_test")
+	})
+
+	t.Run("buffer-based pendingInput clears on Ctrl-U", func(t *testing.T) {
+		resp := sc.send(Msg{"type": "input", "sessionId": s1, "data": "\x15"})
+		assertNotError(t, resp)
+
+		p.waitForPendingInput(s1, func(v string) bool { return v == "" }, 10*time.Second)
 	})
 }
 
