@@ -186,7 +186,7 @@
         },
         "size": {
           "type": "integer",
-          "minimum": 0,
+          "minimum": 1,
           "description": "Default pool size"
         }
       }
@@ -252,7 +252,7 @@
         "properties": {
           "type": { "const": "resize" },
           "id": { "type": "integer" },
-          "size": { "type": "integer", "minimum": 0 }
+          "size": { "type": "integer", "minimum": 1 }
         },
         "required": ["type", "size"]
       },
