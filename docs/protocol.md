@@ -146,7 +146,7 @@ If no previous state exists (first-time init), all slots get fresh pre-warmed se
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `size` | integer ≥ 0 | Yes | New slot count |
+| `size` | integer ≥ 1 | Yes | New slot count |
 
 **Response:** `{ type: "pool", pool }`
 

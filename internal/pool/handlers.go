@@ -949,8 +949,15 @@ func (m *Manager) handleResize(id any, req api.Msg) api.Msg {
 	}
 
 	target := int(newSize)
-	if target < 0 {
-		return api.ErrorResponse(id, "size must be >= 0")
+	if target < 1 {
+		return api.ErrorResponse(id, "size must be >= 1")
+	}
+
+	// Reset kill tokens — resize is absolute ("to size N"), so any pending
+	// evictions from a prior shrink are superseded by the new target.
+	if m.killTokens > 0 {
+		log.Printf("[resize] clearing %d kill tokens from prior shrink", m.killTokens)
+		m.killTokens = 0
 	}
 
 	oldSize := m.poolSize
@@ -968,7 +975,7 @@ func (m *Manager) handleResize(id any, req api.Msg) api.Msg {
 		}
 	} else if target < oldSize {
 		log.Printf("[resize] shrinking: adding %d kill tokens", oldSize-target)
-		m.killTokens += oldSize - target
+		m.killTokens = oldSize - target
 		m.tryKillTokens()
 	}
 
