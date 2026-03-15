@@ -17,7 +17,9 @@ import (
 func (m *Manager) newSession(parentID string) *Session {
 	now := time.Now()
 	cwd := m.paths.Root
-	if cfg, err := m.config.Load(); err == nil && cfg.Dir != "" {
+	if cfg, err := m.config.Load(); err != nil {
+		log.Printf("[session] config load error (using defaults): %v", err)
+	} else if cfg.Dir != "" {
 		cwd = cfg.Dir
 	}
 	return &Session{
@@ -49,7 +51,10 @@ func (m *Manager) resolveSession(sessionID string) *Session {
 // --- Spawn ---
 
 func (m *Manager) spawnSession(s *Session, resume bool) {
-	cfg, _ := m.config.Load()
+	cfg, err := m.config.Load()
+	if err != nil {
+		log.Printf("[spawn] session %s: config load error (using defaults): %v", s.ID, err)
+	}
 	flags := cfg.Flags
 	cwd := cfg.Dir
 	if cwd == "" {
@@ -73,10 +78,20 @@ func (m *Manager) spawnSession(s *Session, resume bool) {
 
 	proc, err := ptyPkg.Spawn(opts)
 	if err != nil {
-		log.Printf("spawn error for session %s: %v", s.ID, err)
-		s.Status = StatusError
+		log.Printf("[spawn] error for session %s: %v", s.ID, err)
+		s.SpawnAttempts++
+		if s.SpawnAttempts >= maxSpawnAttempts {
+			log.Printf("[spawn] session %s: %d consecutive failures, marking error", s.ID, s.SpawnAttempts)
+			s.Status = StatusError
+			m.broadcastStatus(s, StatusFresh)
+		} else {
+			log.Printf("[spawn] session %s: attempt %d/%d failed, will retry on next dequeue", s.ID, s.SpawnAttempts, maxSpawnAttempts)
+			s.Status = StatusQueued
+			m.queue = append(m.queue, s)
+		}
 		return
 	}
+	s.SpawnAttempts = 0 // reset on success
 
 	s.PID = proc.PID()
 	s.Flags = flags
@@ -768,6 +783,7 @@ func (m *Manager) tryReplaceDeadSessions() {
 		m.spawnSession(s, false)
 		liveCount++
 	}
+	m.savePoolState()
 }
 
 func (m *Manager) tryKillTokens() {
@@ -841,4 +857,57 @@ func (m *Manager) countFreshSlots() int {
 		}
 	}
 	return count
+}
+
+// startMaintenanceLoop launches a goroutine that periodically expires pins
+// and cleans up old archived sessions. SPEC: "Pin is time-limited" and
+// "Archived: Auto-cleaned after 30 days."
+func (m *Manager) startMaintenanceLoop() {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-m.done:
+				return
+			case <-ticker.C:
+				m.expirePins()
+				m.cleanupArchivedSessions()
+			}
+		}
+	}()
+}
+
+// expirePins unpins sessions whose PinExpiry has passed.
+func (m *Manager) expirePins() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	for _, s := range m.sessions {
+		if s.Pinned && !s.PinExpiry.IsZero() && now.After(s.PinExpiry) {
+			log.Printf("[pin-expiry] session %s: pin expired", s.ID)
+			s.Pinned = false
+			m.broadcastEvent(api.Msg{
+				"type": "event", "event": "updated",
+				"sessionId": s.ID, "changes": api.Msg{"pinned": false},
+			})
+		}
+	}
+}
+
+const archiveRetention = 30 * 24 * time.Hour
+
+// cleanupArchivedSessions removes archived sessions older than 30 days.
+func (m *Manager) cleanupArchivedSessions() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cutoff := time.Now().Add(-archiveRetention)
+	for id, s := range m.sessions {
+		if s.Status == StatusArchived && s.CreatedAt.Before(cutoff) {
+			log.Printf("[archive-cleanup] removing session %s (created %s)", id, s.CreatedAt.Format(time.RFC3339))
+			delete(m.sessions, id)
+		}
+	}
 }

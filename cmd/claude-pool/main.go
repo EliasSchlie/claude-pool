@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,6 +16,38 @@ import (
 	"github.com/EliasSchlie/claude-pool/internal/paths"
 	"github.com/EliasSchlie/claude-pool/internal/pool"
 )
+
+// trimLogFile removes log entries older than maxAge from the log file.
+// Go's log package prefixes each line with "2006/01/02 15:04:05", which
+// we parse to determine age. Lines that fail to parse are kept.
+func trimLogFile(path string, maxAge time.Duration) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return // no log file yet
+	}
+
+	cutoff := time.Now().Add(-maxAge)
+	lines := strings.Split(string(data), "\n")
+	start := 0
+	for i, line := range lines {
+		if len(line) < 19 {
+			continue
+		}
+		// Parse Go log timestamp prefix: "2006/01/02 15:04:05"
+		t, err := time.Parse("2006/01/02 15:04:05", line[:19])
+		if err != nil {
+			continue
+		}
+		if t.After(cutoff) {
+			start = i
+			break
+		}
+	}
+	if start > 0 {
+		trimmed := strings.Join(lines[start:], "\n")
+		os.WriteFile(path, []byte(trimmed), 0644)
+	}
+}
 
 func main() {
 	// Handle install/uninstall subcommands before flag parsing —
@@ -48,6 +81,9 @@ func main() {
 	if err := p.EnsureDirs(); err != nil {
 		log.Fatalf("failed to create pool directories: %v", err)
 	}
+
+	// SPEC: "Entries older than 30 days are discarded."
+	trimLogFile(p.DaemonLog(), 30*24*time.Hour)
 
 	// Set up file logging per design principle #3: each pool has its own logs.
 	// Writes to both stderr (for attached terminals) and daemon.log (for debugging).

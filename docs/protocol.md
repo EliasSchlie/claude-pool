@@ -127,11 +127,11 @@ API-only — not exposed in the CLI. For user interfaces (e.g. Open Cockpit).
 
 ### `attach`
 
-Creates a temporary Unix socket for raw PTY I/O. Response includes current PTY dimensions (`cols`, `rows`) so clients can create viewports at matching size before writing replay buffer. Multiple clients can attach simultaneously (broadcast). Pipe closes on offload/death/shutdown. Only works for live sessions. Attaching does not affect other operations.
+Creates a temporary Unix socket for raw PTY I/O. Response: `{ type: "attached", socketPath, cols, rows }`. Dimensions let clients create viewports at matching size before writing replay buffer. Multiple clients can attach simultaneously (broadcast). Pipe closes on offload/death/shutdown. Only works for live sessions. Attaching does not affect other operations.
 
 ### `pty-resize`
 
-Sets a session's PTY dimensions (`cols`, `rows`). Triggers SIGWINCH on the underlying process. Only works on live sessions (idle, processing).
+`{ type: "pty-resize", sessionId, cols, rows }` — Sets a session's PTY dimensions. Triggers SIGWINCH on the underlying process. Only works on live sessions (idle, processing). Response: `ok`.
 
 ### `subscribe`
 

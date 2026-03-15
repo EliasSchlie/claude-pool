@@ -16,28 +16,35 @@ Use `claude-pool-cli` to manage pools of Claude Code sessions. Pools handle spaw
 
 ```bash
 # Pool lifecycle
-claude-pool-cli init --size 4                   # Initialize pool with 4 slots
-claude-pool-cli health                          # Pool health report
-claude-pool-cli resize --size 8                 # Grow/shrink pool
-claude-pool-cli destroy --confirm               # Tear down pool
+claude-pool-cli init --size 4                     # Initialize pool with 4 slots
+claude-pool-cli init --size 4 --keep-fresh 1      # With fresh slot target
+claude-pool-cli health                            # Pool health report
+claude-pool-cli resize --size 8                   # Grow/shrink pool
+claude-pool-cli config                            # Read pool config
+claude-pool-cli config --set keepFresh=2          # Update config
+claude-pool-cli destroy --confirm                 # Tear down pool
+claude-pool-cli pools                             # List known pools
+claude-pool-cli ping                              # Health check
 
 # Start sessions
-claude-pool-cli start --prompt "your prompt"    # Start new session (may queue if full)
-claude-pool-cli start --prompt "prompt" --block # Start + wait for result
+claude-pool-cli start --prompt "your prompt"      # Start new session (may queue if full)
+claude-pool-cli start --prompt "prompt" --block   # Start + wait for result
+claude-pool-cli start                             # Start without prompt (idle slot for attach)
 
 # Monitor and interact
-claude-pool-cli wait --session <id>             # Wait for session to become idle
-claude-pool-cli wait                            # Wait for any owned session
-claude-pool-cli capture --session <id>          # Get output immediately
-claude-pool-cli ls                              # List your sessions
-claude-pool-cli ls --verbosity nested           # Show parent-child hierarchy
-claude-pool-cli info --session <id>             # Full session details
+claude-pool-cli wait --session <id>               # Wait for session to become idle
+claude-pool-cli wait                              # Wait for any owned session
+claude-pool-cli capture --session <id>            # Get output immediately
+claude-pool-cli ls                                # List your sessions
+claude-pool-cli ls --verbosity nested             # Show parent-child hierarchy
+claude-pool-cli info --session <id>               # Full session details
 
 # Follow-up and control
 claude-pool-cli followup --session <id> --prompt "prompt"  # Send to idle session
-claude-pool-cli stop --session <id>             # Interrupt processing session
-claude-pool-cli archive --session <id>          # Mark as done
+claude-pool-cli stop --session <id>               # Interrupt processing session
+claude-pool-cli archive --session <id>            # Mark as done
 claude-pool-cli archive --session <id> --recursive  # Archive with descendants
+claude-pool-cli unarchive --session <id>          # Restore archived session
 ```
 
 ## Workflow Example

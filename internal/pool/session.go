@@ -17,6 +17,11 @@ const (
 	StatusArchived   = "archived"
 )
 
+// maxSpawnAttempts is the number of consecutive spawn failures before a session
+// is marked as error. SPEC: "After repeated failures (implementation decides
+// the threshold), the session is marked error."
+const maxSpawnAttempts = 3
+
 // SessionMetadata holds user-defined session labels.
 type SessionMetadata struct {
 	Name        string            `json:"name,omitempty"`
@@ -32,7 +37,7 @@ type Session struct {
 	ParentID     string
 	Priority     float64
 	Pinned       bool
-	PinExpiry    time.Time // TODO: not yet enforced — no goroutine checks for expiration
+	PinExpiry    time.Time
 	SpawnCwd     string
 	Cwd          string
 	CreatedAt    time.Time
@@ -47,6 +52,9 @@ type Session struct {
 	// Internal: pending prompt for queued sessions
 	PendingPrompt string
 	PendingForce  bool
+
+	// Internal: spawn retry tracking
+	SpawnAttempts int // consecutive spawn failures (reset on success)
 
 	// Internal: for offloaded/archived metadata persistence
 	Flags string // flags used to spawn this session

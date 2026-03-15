@@ -138,6 +138,7 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 	log.Printf("[init] pool initialized: %d sessions total", restored+fresh)
 	m.savePoolState()
 	m.startTypingPoller()
+	m.startMaintenanceLoop()
 
 	// SPEC: "Pool state after initialization (same as health)."
 	return m.buildHealthResponse(id)
@@ -204,9 +205,9 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 	parentID := parentFromReq(req)
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	if !m.initialized {
+		m.mu.Unlock()
 		return api.ErrorResponse(id, "pool not initialized")
 	}
 
@@ -222,12 +223,8 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 	// If the slot is still starting (fresh), block until ready so the
 	// caller gets an idle session with a discovered ClaudeUUID.
 	if prompt == "" {
-		// Release the deferred lock — handleStartPromptless manages its own.
 		m.mu.Unlock()
-		resp := m.handleStartPromptless(id, s)
-		// Re-acquire so defer m.mu.Unlock() doesn't panic.
-		m.mu.Lock()
-		return resp
+		return m.handleStartPromptless(id, s)
 	}
 
 	// Try to claim a fresh/idle slot
@@ -258,6 +255,7 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 			"sessionId": s.ID, "status": StatusProcessing, "parent": s.ParentID,
 		})
 		m.savePoolState()
+		m.mu.Unlock()
 		return api.Response(id, "started", api.Msg{
 			"sessionId": s.ID,
 			"status":    StatusProcessing,
@@ -277,10 +275,12 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 	m.tryDequeueWithEviction(s, "")
 	m.savePoolState()
 
-	return api.Response(id, "started", api.Msg{
+	resp := api.Response(id, "started", api.Msg{
 		"sessionId": s.ID,
 		"status":    s.ExternalStatus(),
 	})
+	m.mu.Unlock()
+	return resp
 }
 
 // handleStartPromptless creates a session without a prompt — claims a slot and

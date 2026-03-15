@@ -115,7 +115,7 @@ Different pools (or different branches under test) can run different hook versio
 
 ```
 ~/.claude-pool/<name>/
-  config.json            # Pool configuration (flags, size, keepFresh)
+  config.json            # Pool configuration (flags, size, dir, keepFresh)
   pool.json              # Pool state (sessions, queue, mappings)
   api.sock               # Daemon socket
   daemon.pid             # Daemon PID
