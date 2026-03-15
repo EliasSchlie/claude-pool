@@ -215,6 +215,29 @@ func newPool(t *testing.T) *pool {
 	return p
 }
 
+// newNamedPool creates a pool with a specific name and shared homeDir.
+// For tests that run multiple pools in the same CLAUDE_POOL_HOME (e.g., TestMultiPool).
+func newNamedPool(t *testing.T, name, homeDir, workDir string) *pool {
+	t.Helper()
+
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatalf("failed to create workdir: %v", err)
+	}
+
+	p := &pool{
+		t:       t,
+		name:    name,
+		homeDir: homeDir,
+		workDir: workDir,
+	}
+
+	t.Cleanup(func() {
+		p.run("destroy", "--confirm")
+	})
+
+	return p
+}
+
 // setupPool creates a pool via CLI init and waits for all slots to become idle.
 func setupPool(t *testing.T, size int) *pool {
 	t.Helper()

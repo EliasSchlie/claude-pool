@@ -75,6 +75,7 @@ test prompts must use relative subdirectories.
 | `parent_child_test.go` | 3 | --parent flag, env auto-detection, --parent none, ls filtering, verbosity, recursive archive |
 | `attach_test.go` | 2 | Attach pipe, pendingInput, keystroke/submit, eviction closes pipe, re-attach, multiple simultaneous clients |
 | `subscribe_test.go` | 2 | Event stream, filters, re-subscribe, updated events |
+| `multi_pool_test.go` | 1+1 | Two pools in shared registry, session isolation, concurrent ops, destroy isolation (invariant #1) |
 
 Shared infrastructure:
 
