@@ -694,9 +694,10 @@ func (m *Manager) startWatchers(s *Session, proc *ptyPkg.Process) {
 
 // clearIdleSignals removes stale idle signal files for a PID. Called before
 // starting watchers for a transferred process to prevent immediate false triggers.
+// Does NOT remove .pending files — those are coordination files for the Stop
+// hook's background verification process (see idle-signal.sh).
 func (m *Manager) clearIdleSignals(pid int) {
 	os.Remove(m.paths.IdleSignal(pid))
-	os.Remove(m.paths.IdleSignal(pid) + ".pending")
 }
 
 // --- Slot management ---
