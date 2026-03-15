@@ -11,6 +11,7 @@ import (
 type Config struct {
 	Flags string `json:"flags,omitempty"`
 	Size  int    `json:"size,omitempty"`
+	Dir   string `json:"dir,omitempty"` // Session spawn directory (defaults to pool dir)
 }
 
 // ConfigManager handles reading/writing config.json with a mutex.
@@ -88,6 +89,9 @@ func (cm *ConfigManager) Update(update map[string]any) (Config, error) {
 	}
 	if v, ok := update["flags"].(string); ok {
 		cfg.Flags = v
+	}
+	if v, ok := update["dir"].(string); ok {
+		cfg.Dir = v
 	}
 
 	if err := cm.saveLocked(cfg); err != nil {

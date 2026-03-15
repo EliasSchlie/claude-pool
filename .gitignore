@@ -3,3 +3,4 @@ node_modules/
 .run/
 *.sock
 /claude-pool
+/claude-pool-cli

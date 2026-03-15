@@ -1229,6 +1229,9 @@ func (m *Manager) handleInput(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "write error: "+err.Error())
 	}
 
+	// Track pendingInput the same way attach does
+	m.trackInput(s, []byte(data))
+
 	log.Printf("[input] session %s: wrote %d bytes", s.ID, len(data))
 	return api.OkResponse(id)
 }
@@ -1284,16 +1287,63 @@ func (m *Manager) handleAttach(id any, req api.Msg) api.Msg {
 	})
 }
 
-// handleAttachInput processes raw input from attach pipe clients for typing
-// detection and prompt delivery.
-//
-// When Enter is detected, the accumulated text is delivered via deliverPrompt
-// (Escape → Ctrl-U → text → Enter with proper timing) to ensure Claude Code's
-// TUI processes the prompt reliably. Raw PTY writes without this ceremony can
-// be lost when text + Enter arrive in a single chunk.
+// inputClass holds classified raw input bytes.
+type inputClass struct {
+	hasCtrlU  bool
+	hasEnter  bool
+	printable []byte
+}
+
+// classifyInput categorizes raw bytes into control signals and printable text.
+func classifyInput(data []byte) inputClass {
+	var ic inputClass
+	for _, b := range data {
+		switch {
+		case b == 0x15: // Ctrl-U
+			ic.hasCtrlU = true
+		case b == '\r' || b == '\n': // Enter
+			ic.hasEnter = true
+		case b >= 0x20 && b != 0x7f: // printable (not DEL)
+			ic.printable = append(ic.printable, b)
+		}
+	}
+	return ic
+}
+
+// trackInput updates pendingInput based on raw bytes written to a session's PTY.
+// Caller must hold m.mu. Used by handleInput (debug input) and handleAttachInput.
+func (m *Manager) trackInput(s *Session, data []byte) {
+	ic := classifyInput(data)
+
+	switch {
+	case ic.hasCtrlU:
+		if s.PendingInput != "" {
+			s.PendingInput = ""
+			s.LastUsedAt = time.Now()
+			delete(m.attachTyping, s.ID)
+			m.broadcastEvent(api.Msg{
+				"type": "event", "event": "updated",
+				"sessionId": s.ID, "changes": api.Msg{"pendingInput": ""},
+			})
+		}
+	case len(ic.printable) > 0 && (s.Status == StatusIdle || s.Status == StatusFresh):
+		m.attachTyping[s.ID] = append(m.attachTyping[s.ID], ic.printable...)
+		s.PendingInput = string(m.attachTyping[s.ID])
+		s.LastUsedAt = time.Now()
+		m.broadcastEvent(api.Msg{
+			"type": "event", "event": "updated",
+			"sessionId": s.ID, "changes": api.Msg{"pendingInput": s.PendingInput},
+		})
+	}
+}
+
 // handleAttachInput classifies raw bytes from an attach client and manages
 // pendingInput property and state transitions. Raw bytes always pass through
 // to the PTY (the attach pipe writes them directly).
+//
+// When Enter is detected, the accumulated text is delivered via deliverPrompt
+// (Escape → Ctrl-U → text → Enter with proper timing) to ensure Claude Code's
+// TUI processes the prompt reliably.
 func (m *Manager) handleAttachInput(sessionID string, data []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1303,24 +1353,10 @@ func (m *Manager) handleAttachInput(sessionID string, data []byte) {
 		return
 	}
 
-	// Classify input and extract printable text
-	hasCtrlU := false
-	hasEnter := false
-	var printable []byte
-	for _, b := range data {
-		switch {
-		case b == 0x15: // Ctrl-U
-			hasCtrlU = true
-		case b == '\r' || b == '\n': // Enter
-			hasEnter = true
-		case b >= 0x20 && b != 0x7f: // printable (not DEL)
-			printable = append(printable, b)
-		}
-	}
+	ic := classifyInput(data)
 
 	switch {
-	case hasCtrlU && s.PendingInput != "":
-		// Clear pending input
+	case ic.hasCtrlU && s.PendingInput != "":
 		s.PendingInput = ""
 		s.LastUsedAt = time.Now()
 		delete(m.attachTyping, sessionID)
@@ -1329,10 +1365,10 @@ func (m *Manager) handleAttachInput(sessionID string, data []byte) {
 			"sessionId": s.ID, "changes": api.Msg{"pendingInput": ""},
 		})
 
-	case hasEnter && (s.PendingInput != "" || ((s.Status == StatusIdle || s.Status == StatusFresh) && len(printable) > 0)):
+	case ic.hasEnter && (s.PendingInput != "" || ((s.Status == StatusIdle || s.Status == StatusFresh) && len(ic.printable) > 0)):
 		// Submit prompt
 		buf := m.attachTyping[sessionID]
-		buf = append(buf, printable...)
+		buf = append(buf, ic.printable...)
 		prompt := string(buf)
 		delete(m.attachTyping, sessionID)
 
@@ -1354,9 +1390,8 @@ func (m *Manager) handleAttachInput(sessionID string, data []byte) {
 		// raw input without the Escape/Ctrl-U reset sequence.
 		go m.deliverPromptAsync(sessionID, prompt)
 
-	case len(printable) > 0 && (s.Status == StatusIdle || s.Status == StatusFresh):
-		// Accumulate typed text as pendingInput
-		m.attachTyping[sessionID] = append(m.attachTyping[sessionID], printable...)
+	case len(ic.printable) > 0 && (s.Status == StatusIdle || s.Status == StatusFresh):
+		m.attachTyping[sessionID] = append(m.attachTyping[sessionID], ic.printable...)
 		s.PendingInput = string(m.attachTyping[sessionID])
 		s.LastUsedAt = time.Now()
 		m.broadcastEvent(api.Msg{

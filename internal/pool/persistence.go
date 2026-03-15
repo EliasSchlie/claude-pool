@@ -158,7 +158,11 @@ func (m *Manager) sessionFromMap(sm map[string]any) *Session {
 		s.CreatedAt = time.Now()
 	}
 	if s.SpawnCwd == "" {
-		s.SpawnCwd = m.paths.Root
+		if cfg, err := m.config.Load(); err == nil && cfg.Dir != "" {
+			s.SpawnCwd = cfg.Dir
+		} else {
+			s.SpawnCwd = m.paths.Root
+		}
 	}
 	if s.Cwd == "" {
 		s.Cwd = s.SpawnCwd
