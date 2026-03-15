@@ -41,7 +41,7 @@ Design decisions and implementation details. Invariants and API surface live in 
 
 ## Slot States (internal)
 
-See [SPEC.md](../SPEC.md) for the slot state table. Slots are internal — consumers never see them (invariant #7). Slot errors are recycled automatically (kill, replace with fresh).
+See [SPEC.md](../SPEC.md) for the slot state table. Slots are internal — consumers never see them (invariant #5). Slot errors are recycled automatically (kill, replace with fresh).
 
 ---
 

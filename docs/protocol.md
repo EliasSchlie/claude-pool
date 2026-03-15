@@ -307,18 +307,18 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `all` | boolean | No | Show all pool sessions (default false = owned only) |
-| `tree` | boolean | No | Show descendants as nested tree (default false = flat list of direct children) |
-| `archived` | boolean | No | Include archived sessions (default false = hidden) |
+| `parent` | string | No | Filter top-level sessions by parent. Auto-detected from `CLAUDE_POOL_SESSION_ID` if omitted. Use `"none"` to show all sessions (bypasses auto-detection). Without parent and without auto-detection (non-Claude caller), shows all sessions. |
 | `statuses` | string[] | No | Filter by status (e.g. `["idle", "processing"]`). Omit for no filtering. |
+| `archived` | boolean | No | Include archived sessions (default false = hidden) |
+| `verbosity` | string | No | `"flat"` (default), `"nested"`, or `"full"`. Controls which fields are included in session objects (see Session Object in SPEC.md). `"nested"` and `"full"` populate the `children` array recursively. |
 
-**Response:** `{ type: "sessions", sessions }` — array of session info objects.
+**Response:** `{ type: "sessions", sessions }` — array of session objects at the requested verbosity.
 
-**Behavior:** Lists sessions. Each session includes: `sessionId`, `claudeUUID` (null if not yet discovered), `status`, `parentId`, `priority`, `cwd`, `spawnCwd`, `createdAt`, `pid`, `pinned`, `metadata`, `children` (array of child sessions, populated when `tree: true`).
-- Default: returns direct children of the caller (excludes archived).
-- `tree: true`: returns children with their descendants nested recursively (each child has its own `children` array populated).
-- `all: true`: returns every session in the pool (flat list).
-- `all: true` + `tree: true`: returns every session in the pool as a nested tree rooted at top-level sessions.
+**Behavior:** Only filters the top level — if a session appears as a child of another session, it's not repeated as a separate entry.
+- Default (`flat`): returns direct children of the caller (excludes archived). Each session has minimal fields.
+- `verbosity: "nested"`: same filtering, but each session includes its `children` array populated recursively. Same verbosity applied to children.
+- `verbosity: "full"`: all fields including `parent`, `cwd`, `claudeUUID`, `createdAt`, etc. Children populated recursively.
+- `parent: "none"`: shows all sessions regardless of ownership.
 - `archived: true`: includes archived sessions in the results.
 - Includes all non-archived states by default: queued, idle, processing, offloaded, error.
 
@@ -329,6 +329,7 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `sessionId` | sessionId | Yes | Target session |
+| `verbosity` | string | No | `"flat"`, `"nested"`, or `"full"` (default). See Session Object in SPEC.md. |
 
 **Response:** `{ type: "session", session }` — a session object (see below).
 

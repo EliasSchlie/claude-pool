@@ -29,37 +29,27 @@ Claude Pool runs a persistent daemon that manages a pool of pre-started Claude C
 
 See [docs/architecture.md](docs/architecture.md) for full details.
 
-## Planned Usage
+## Usage
 
 ```bash
-# Start the daemon
-claude-pool daemon start
-
-# Initialize a pool with 5 sessions
-claude-pool init 5
+# Initialize a pool with 5 slots (starts daemon, registers pool)
+claude-pool-cli init --size 5
 
 # Send a prompt, get a response
-claude-pool start "fix the login bug" --block
+claude-pool-cli start --prompt "fix the login bug" --block
 
 # Named pools (each fully independent)
-claude-pool --pool=work init 3
-claude-pool --pool=work start "review the PR"
-
-# Pin a fresh session for interactive use
-claude-pool pin
+claude-pool-cli --pool work init --size 3
+claude-pool-cli --pool work start --prompt "review the PR"
 
 # Observe sessions
-claude-pool ls
-claude-pool screen abc123
-claude-pool watch abc123
+claude-pool-cli ls
+claude-pool-cli info --session abc123
 
 # Interact
-claude-pool followup abc123 "add tests"
-claude-pool wait abc123
-claude-pool result abc123
-
-# Attach to live terminal
-claude-pool attach abc123
+claude-pool-cli followup --session abc123 --prompt "add tests"
+claude-pool-cli wait --session abc123
+claude-pool-cli capture --session abc123
 ```
 
 ## Protocol

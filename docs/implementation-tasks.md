@@ -91,7 +91,7 @@ Filters: sessions, events, statuses, fields.
 
 ### 16. `internal/pool/manager.go` — parent-child ownership
 `parentId` on start/pin. `ls` ownership filtering (default: caller's children).
-`ls tree`: nested descendants. `info` recursive children.
+`ls` with `verbosity: nested`: nested descendants. `info` recursive children.
 `archive` with children checks. Recursive archive.
 **Milestone: `TestParentChild` passes**.
 
