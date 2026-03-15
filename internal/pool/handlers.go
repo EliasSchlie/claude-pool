@@ -18,6 +18,13 @@ func parentFromReq(req api.Msg) string {
 	return v
 }
 
+func verbosityFromReq(req api.Msg, fallback string) string {
+	if v, _ := req["verbosity"].(string); v != "" {
+		return v
+	}
+	return fallback
+}
+
 // --- Config ---
 
 func (m *Manager) handleConfig(id any, req api.Msg) api.Msg {
@@ -75,8 +82,6 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 		liveSessions, offloadedSessions = m.loadPoolState()
 	}
 
-	sessions := make([]any, 0)
-
 	// Restore live sessions into slots first
 	restored := 0
 	log.Printf("[init] restoring state: %d live, %d offloaded sessions from pool.json", len(liveSessions), len(offloadedSessions))
@@ -91,7 +96,6 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 		s.Status = StatusFresh
 		log.Printf("[init] restoring live session %s (claude=%s resume=%v)", s.ID, s.ClaudeUUID, s.ClaudeUUID != "")
 		m.spawnSession(s, s.ClaudeUUID != "")
-		sessions = append(sessions, s.ToMsg())
 		restored++
 	}
 
@@ -107,7 +111,6 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 		s.Status = StatusFresh
 		log.Printf("[init] restoring offloaded session %s (claude=%s resume=%v)", s.ID, s.ClaudeUUID, s.ClaudeUUID != "")
 		m.spawnSession(s, s.ClaudeUUID != "")
-		sessions = append(sessions, s.ToMsg())
 		restored++
 	}
 
@@ -122,19 +125,14 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 		s.PreWarmed = true
 		m.sessions[s.ID] = s
 		m.spawnSession(s, false)
-		sessions = append(sessions, s.ToMsg())
 	}
 
-	log.Printf("[init] pool initialized: %d sessions total", len(sessions))
+	log.Printf("[init] pool initialized: %d sessions total", restored+fresh)
 	m.savePoolState()
 	m.startTypingPoller()
 
-	return api.Response(id, "pool", api.Msg{
-		"pool": api.Msg{
-			"size":     float64(size),
-			"sessions": sessions,
-		},
-	})
+	// SPEC: "Pool state after initialization (same as health)."
+	return m.buildHealthResponse(id)
 }
 
 // --- Health ---
@@ -147,6 +145,11 @@ func (m *Manager) handleHealth(id any) api.Msg {
 		return api.ErrorResponse(id, "pool not initialized")
 	}
 
+	return m.buildHealthResponse(id)
+}
+
+// buildHealthResponse builds the health response. Caller must hold m.mu.
+func (m *Manager) buildHealthResponse(id any) api.Msg {
 	counts := map[string]float64{}
 	healthSessions := make([]any, 0)
 
@@ -658,7 +661,7 @@ func (m *Manager) handleInfo(id any, req api.Msg) api.Msg {
 		}
 	}
 
-	msg := s.ToMsgWithChildren(m.sessions)
+	msg := s.ToMsgWithChildren(m.sessions, verbosityFromReq(req, VerbosityFull))
 	return api.Response(id, "session", api.Msg{"session": msg})
 }
 
@@ -669,6 +672,8 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 	tree, _ := req["tree"].(bool)
 	showArchived, _ := req["archived"].(bool)
 	callerId, _ := req["callerId"].(string)
+
+	verbosity := verbosityFromReq(req, VerbosityFlat)
 
 	// Parse optional statuses filter
 	var statusFilter map[string]bool
@@ -714,9 +719,9 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 					}
 				}
 			}
-			results = append(results, s.ToMsgWithChildren(m.sessions))
+			results = append(results, s.ToMsgWithChildren(m.sessions, verbosity))
 		} else {
-			results = append(results, s.ToMsg())
+			results = append(results, s.ToMsg(verbosity))
 		}
 	}
 

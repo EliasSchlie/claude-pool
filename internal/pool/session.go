@@ -79,56 +79,81 @@ func (s *Session) ExternalStatus() string {
 }
 
 // ToMsg converts a session to a protocol message.
-func (s *Session) ToMsg() map[string]any {
+// Verbosity levels for session serialization (SPEC: Session Object table).
+const (
+	VerbosityFlat   = "flat"
+	VerbosityNested = "nested"
+	VerbosityFull   = "full"
+)
+
+// ToMsg converts a session to a protocol message at the given verbosity level.
+//
+// Verbosity controls which fields are included (SPEC lines 29-47):
+//   - flat:   sessionId, status, + priority/pinned/pendingInput only if non-default
+//   - nested: same as flat + children
+//   - full:   all fields always
+func (s *Session) ToMsg(verbosity string) map[string]any {
 	m := map[string]any{
 		"sessionId": s.ID,
 		"status":    s.ExternalStatus(),
-		"priority":  s.Priority,
-		"pinned":    s.Pinned,
-		"createdAt": s.CreatedAt.UTC().Format(time.RFC3339),
 	}
-	if s.ClaudeUUID != "" {
-		m["claudeUUID"] = s.ClaudeUUID
-	}
-	if s.ParentID != "" {
+
+	if verbosity == VerbosityFull {
+		// Full: always include all fields
+		m["priority"] = s.Priority
+		m["pinned"] = s.Pinned
+		if s.IsLive() {
+			m["pendingInput"] = s.PendingInput
+		}
 		m["parent"] = s.ParentID
-	}
-	if s.Cwd != "" {
 		m["cwd"] = s.Cwd
-	}
-	if s.SpawnCwd != "" {
+		if s.ClaudeUUID != "" {
+			m["claudeUUID"] = s.ClaudeUUID
+		} else {
+			m["claudeUUID"] = nil
+		}
 		m["spawnCwd"] = s.SpawnCwd
+		m["createdAt"] = s.CreatedAt.UTC().Format(time.RFC3339)
+		if s.PID != 0 {
+			m["pid"] = float64(s.PID)
+		} else {
+			m["pid"] = nil
+		}
+		meta := map[string]any{}
+		for k, v := range s.Metadata.Tags {
+			meta[k] = v
+		}
+		if s.Metadata.Name != "" {
+			meta["name"] = s.Metadata.Name
+		}
+		if s.Metadata.Description != "" {
+			meta["description"] = s.Metadata.Description
+		}
+		m["metadata"] = meta
+	} else {
+		// Flat/nested: only ✓* fields when non-default
+		if s.Priority != 0 {
+			m["priority"] = s.Priority
+		}
+		if s.Pinned {
+			m["pinned"] = s.Pinned
+		}
+		if s.IsLive() && s.PendingInput != "" {
+			m["pendingInput"] = s.PendingInput
+		}
 	}
-	if s.PID != 0 {
-		m["pid"] = float64(s.PID)
-	}
-	// Always include pendingInput for loaded sessions (empty string = nothing typed)
-	if s.IsLive() {
-		m["pendingInput"] = s.PendingInput
-	}
-	// Metadata: flat key-value pairs (spec: "Arbitrary key-value pairs")
-	// Tags are the primary storage; Name/Description included for backward compat.
-	meta := map[string]any{}
-	for k, v := range s.Metadata.Tags {
-		meta[k] = v
-	}
-	if s.Metadata.Name != "" {
-		meta["name"] = s.Metadata.Name
-	}
-	if s.Metadata.Description != "" {
-		meta["description"] = s.Metadata.Description
-	}
-	m["metadata"] = meta
+
 	return m
 }
 
 // ToMsgWithChildren converts a session to a protocol message with recursive children.
-func (s *Session) ToMsgWithChildren(allSessions map[string]*Session) map[string]any {
-	m := s.ToMsg()
+// Verbosity is applied recursively to all children.
+func (s *Session) ToMsgWithChildren(allSessions map[string]*Session, verbosity string) map[string]any {
+	m := s.ToMsg(verbosity)
 	children := make([]any, 0)
 	for _, other := range allSessions {
 		if other.ParentID == s.ID && other.Status != StatusArchived {
-			children = append(children, other.ToMsgWithChildren(allSessions))
+			children = append(children, other.ToMsgWithChildren(allSessions, verbosity))
 		}
 	}
 	m["children"] = children

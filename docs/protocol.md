@@ -130,7 +130,7 @@ If a session was stopped before producing output, or if there is no assistant me
 | `size` | integer ≥ 1 | No | Number of slots. Falls back to `config.json` if omitted. |
 | `noRestore` | boolean | No | Skip restoring previously live sessions (default false). |
 
-**Response:** `{ type: "pool", pool }` — full pool state after init.
+**Response:** `{ type: "health", health }` — pool state after init (same format as `health`).
 
 **Behavior:** Initializes the pool daemon. Reads flags from `config.json`. Errors if pool already initialized (sessions are running). Updates `pools.json` registry.
 
@@ -311,10 +311,11 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 | `tree` | boolean | No | Show descendants as nested tree (default false = flat list of direct children) |
 | `archived` | boolean | No | Include archived sessions (default false = hidden) |
 | `statuses` | string[] | No | Filter by status (e.g. `["idle", "processing"]`). Omit for no filtering. |
+| `verbosity` | string | No | `"flat"` (default), `"nested"`, or `"full"`. See Session Object in SPEC.md. |
 
-**Response:** `{ type: "sessions", sessions }` — array of session info objects.
+**Response:** `{ type: "sessions", sessions }` — array of session objects at the requested verbosity.
 
-**Behavior:** Lists sessions. Each session includes: `sessionId`, `claudeUUID` (null if not yet discovered), `status`, `parentId`, `priority`, `cwd`, `spawnCwd`, `createdAt`, `pid`, `pinned`, `metadata`, `children` (array of child sessions, populated when `tree: true`).
+**Behavior:** Lists sessions. Fields included depend on verbosity (see SPEC.md Session Object table).
 - Default: returns direct children of the caller (excludes archived).
 - `tree: true`: returns children with their descendants nested recursively (each child has its own `children` array populated).
 - `all: true`: returns every session in the pool (flat list).
@@ -329,17 +330,18 @@ Priority defaults to 0 for new sessions. Use `set-priority` to change it after c
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `sessionId` | sessionId | Yes | Target session |
+| `verbosity` | string | No | `"flat"`, `"nested"`, or `"full"` (default). See Session Object in SPEC.md. |
 
-**Response:** `{ type: "session", session }` — a session object (see below).
+**Response:** `{ type: "session", session }` — a session object at the requested verbosity.
 
-**Behavior:** Returns a **session object** with all information about the session:
+**Behavior:** Returns a **session object** with information about the session. Fields depend on verbosity — see SPEC.md Session Object table. Example at default verbosity (`full`):
 
 ```json
 {
   "sessionId": "a7f2x9",
   "claudeUUID": "2947bf12-d307-4a1c-...",
   "status": "idle",
-  "parentId": null,
+  "parent": "",
   "priority": 0,
   "cwd": "/Users/me/project",
   "spawnCwd": "/Users/me",
