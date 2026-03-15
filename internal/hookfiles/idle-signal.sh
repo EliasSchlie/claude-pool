@@ -101,6 +101,10 @@ case "${1:-}" in
         fi
         ;;
     clear)
-        rm -f "$signal_file" "$signal_file.pending"
+        rm -f "$signal_file"
+        # NOTE: Do NOT remove $signal_file.pending here. The "stop" trigger's
+        # background verification process uses it as a coordination file. If
+        # PostToolUse fires between Stop and the verification completing, clearing
+        # .pending would prevent the idle signal from ever being written.
         ;;
 esac
