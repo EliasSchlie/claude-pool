@@ -27,7 +27,10 @@ package integration
 //  11.  "multiple clients read simultaneously"
 //  12.  "buffer-based pendingInput detection without attach"
 //  13.  "buffer-based pendingInput clears on Ctrl-U"
-//  14.  "attach to promptless session and submit"
+//  14.  "attach response includes dimensions"
+//  15.  "pty-resize changes dimensions"
+//  16.  "pty-resize on non-live session errors"
+//  17.  "attach to promptless session and submit"
 
 import (
 	"errors"
@@ -310,6 +313,70 @@ func TestAttach(t *testing.T) {
 		assertNotError(t, resp)
 
 		p.waitForPendingInput(s1, func(v string) bool { return v == "" }, 10*time.Second)
+	})
+
+	t.Run("attach response includes dimensions", func(t *testing.T) {
+		// s1 is still pinned and live from previous steps
+		resp := sc.send(Msg{"type": "attach", "sessionId": s1})
+		assertNotError(t, resp)
+		assertType(t, resp, "attached")
+
+		cols := numVal(resp, "cols")
+		rows := numVal(resp, "rows")
+		if cols <= 0 {
+			t.Fatalf("expected positive cols, got %v", cols)
+		}
+		if rows <= 0 {
+			t.Fatalf("expected positive rows, got %v", rows)
+		}
+	})
+
+	t.Run("pty-resize changes dimensions", func(t *testing.T) {
+		// Resize to a known size
+		resp := sc.send(Msg{"type": "pty-resize", "sessionId": s1, "cols": 120, "rows": 40})
+		assertNotError(t, resp)
+
+		// Verify via attach response
+		attachResp := sc.send(Msg{"type": "attach", "sessionId": s1})
+		assertNotError(t, attachResp)
+
+		if numVal(attachResp, "cols") != 120 {
+			t.Fatalf("expected cols=120 after resize, got %v", numVal(attachResp, "cols"))
+		}
+		if numVal(attachResp, "rows") != 40 {
+			t.Fatalf("expected rows=40 after resize, got %v", numVal(attachResp, "rows"))
+		}
+
+		// Resize to a different size to confirm it's not a cached value
+		resp2 := sc.send(Msg{"type": "pty-resize", "sessionId": s1, "cols": 200, "rows": 50})
+		assertNotError(t, resp2)
+
+		attachResp2 := sc.send(Msg{"type": "attach", "sessionId": s1})
+		assertNotError(t, attachResp2)
+
+		if numVal(attachResp2, "cols") != 200 {
+			t.Fatalf("expected cols=200 after second resize, got %v", numVal(attachResp2, "cols"))
+		}
+		if numVal(attachResp2, "rows") != 50 {
+			t.Fatalf("expected rows=50 after second resize, got %v", numVal(attachResp2, "rows"))
+		}
+	})
+
+	t.Run("pty-resize on non-live session errors", func(t *testing.T) {
+		// Unpin s1 and archive it (archive offloads idle sessions first per spec)
+		sc.send(Msg{"type": "set", "sessionId": s1, "pinned": false})
+		p.run("archive", "--session", s1)
+		p.waitForStatus(s1, "archived", 15*time.Second)
+
+		resp := sc.send(Msg{"type": "pty-resize", "sessionId": s1, "cols": 80, "rows": 24})
+		assertError(t, resp)
+
+		// Restore s1 for subsequent tests
+		p.run("unarchive", "--session", s1)
+		restoreResp := sc.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: resize-restored"})
+		assertNotError(t, restoreResp)
+		p.waitForStatus(s1, "idle", 60*time.Second)
+		sc.send(Msg{"type": "set", "sessionId": s1, "pinned": 300})
 	})
 
 	t.Run("attach to promptless session and submit", func(t *testing.T) {
