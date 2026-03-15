@@ -27,10 +27,9 @@ These files require **explicit user permission** before any modification:
 
 Key docs:
 - [SPEC.md](SPEC.md) — **Product contract** (read first)
-- [docs/protocol.md](docs/protocol.md) — Full protocol reference (field tables, JSON shapes, per-state behavior)
-- [docs/architecture.md](docs/architecture.md) — Component overview, multi-pool access
+- [docs/architecture.md](docs/architecture.md) — Components, design decisions, hooks, directory structure
+- [docs/protocol.md](docs/protocol.md) — Socket API implementation details (output capture, per-state behavior)
 - [docs/testing.md](docs/testing.md) — Testing strategy (no mocking, real sessions, haiku model)
-- [docs/extraction-plan.md](docs/extraction-plan.md) — Implementation plan, OC reference notes
 
 ## Scope
 
@@ -50,4 +49,4 @@ When a bug is found in production that wasn't caught by integration tests, figur
 
 ## Origin
 
-Designed from requirements, not copied from Open Cockpit. Open Cockpit code is a reference for patterns and edge cases. See [docs/extraction-plan.md](docs/extraction-plan.md).
+Designed from requirements, not copied from Open Cockpit. Open Cockpit code is a reference for patterns and edge cases.

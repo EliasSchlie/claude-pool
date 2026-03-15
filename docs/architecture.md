@@ -22,13 +22,13 @@ claude-pool daemon
 Core business logic. Manages pool.json, session allocation, queueing, offloading, session restoration. All state mutations go through a mutex to prevent races. External interface uses internal session IDs — slot indices are an implementation detail.
 
 ### Pool Directory
-Each pool is a self-contained directory. The daemon takes `--pool-dir <path>` to specify where to operate. Named pools default to `~/.claude-pool/pools/<name>/`. The pool directory contains config, state, logs, socket, hook scripts, and a `.claude/` folder with hooks that sessions inherit automatically.
+Each pool is a self-contained directory. The daemon takes `--pool-dir <path>` to specify where to operate. Named pools default to `~/.claude-pool/<name>/`. The pool directory contains config, state, logs, socket, hook scripts, and a `.claude/` folder with hooks that sessions inherit automatically.
 
 ### PTY Manager
 Owns all terminal instances in-process via `creack/pty`. On daemon restart, re-adopts orphaned PTY processes by checking PIDs from pool.json.
 
 ### API Server
-Listens on `~/.claude-pool/pools/<name>/api.sock`. Accepts newline-delimited JSON. Routes requests to pool manager.
+Listens on `~/.claude-pool/<name>/api.sock`. Accepts newline-delimited JSON. Routes requests to pool manager.
 
 ### Attach Server
 When a client requests `attach`, creates a temporary Unix socket for raw PTY I/O. The pipe closes when the session is offloaded or dies. Multiple clients can attach to the same session simultaneously (broadcast).
@@ -45,9 +45,9 @@ Pools are discovered via a shared registry (`~/.claude-pool/pools.json`):
 
 ```json
 {
-  "default": { "socket": "~/.claude-pool/pools/default/api.sock" },
-  "work": { "socket": "~/.claude-pool/pools/work/api.sock" },
-  "vps": { "socket": "ssh://user@vps/home/user/.claude-pool/pools/default/api.sock" }
+  "default": { "socket": "~/.claude-pool/default/api.sock" },
+  "work": { "socket": "~/.claude-pool/work/api.sock" },
+  "vps": { "socket": "ssh://user@vps/home/user/.claude-pool/default/api.sock" }
 }
 ```
 
@@ -59,37 +59,36 @@ Remote pools use SSH tunnels. The CLI automatically forwards the remote Unix soc
 
 ```bash
 # CLI transparently handles this:
-ssh -L /tmp/pool-vps.sock:/home/user/.claude-pool/pools/default/api.sock user@vps
+ssh -L /tmp/pool-vps.sock:/home/user/.claude-pool/default/api.sock user@vps
 
 # Registry entry:
-"vps": { "socket": "ssh://user@vps/home/user/.claude-pool/pools/default/api.sock" }
+"vps": { "socket": "ssh://user@vps/home/user/.claude-pool/default/api.sock" }
 ```
 
 Full protocol support including subscribe (persistent event stream) works over the tunnel. Zero additional infra — uses existing SSH auth, encrypted, works through NAT/firewalls.
 
-### Daemon Auto-Start
-
-When the CLI connects and finds no running daemon (socket missing), it automatically spawns one — same pattern as Docker, `gpg-agent`, `ssh-agent`. Explicit `claude-pool daemon start/stop` still available for manual control.
-
 ## Key Design Decisions
 
-### Sessions, not slots
-Clients never see or think about slots. The pool manages slots internally (which physical PTY holds which session). Clients use internal session IDs. This means the pool is free to move sessions between slots, change its internal allocation strategy, etc. without breaking clients.
+1. **Sessions, not slots.** Clients use internal session IDs. The pool manages slots transparently — free to move sessions between slots without breaking clients.
+2. **Socket as the only client interface.** No client reads pool files directly.
+3. **Single daemon per pool.** One process owns everything. On restart, re-adopts orphaned PTY processes.
+4. **Automatic slot management.** LRU eviction when slots are needed. No manual offload command.
+5. **Uniform pools.** All sessions run the same flags. Different flags = different pool.
+6. **Config-driven spawning.** `config.json` drives all spawn operations. Changes affect future spawns only.
+7. **Each pool can run its own code version.** Safe testing of new versions alongside stable pools.
+8. **CLI is a separate package.** Thin router resolving pool names to socket connections. Keeps daemon minimal.
+9. **Sugar operations live in the daemon.** High-level ops (start, followup, wait, set) coordinate multiple internal steps server-side.
+10. **Pool config survives destroy.** Directory + config persist. Only manual deletion fully removes a pool.
 
-### Socket as the only client interface
-All clients use the same socket API. No client reads pool files directly.
+## Implementation Details
 
-### Single daemon per pool
-One process per pool owns everything: API server, PTY instances, pool state. On restart, re-adopts orphaned PTY processes.
-
-### Automatic slot management
-The pool decides when to offload sessions (LRU eviction when slots are needed for `start`). Clients can manually offload specific sessions, but there's no bulk "clean" operation.
-
-### Uniform pools
-All sessions in a pool run with the same flags. Different flags = different pool.
-
-### Config-driven spawning
-Pool config.json stores flags and settings. `init` and `resize` read from config. Changes to config affect future spawns only.
+- Written in Go. Single static binary, no runtime dependencies. PTY via `creack/pty`, sockets and JSON via stdlib.
+- Newline-delimited JSON protocol over Unix sockets. Socket permissions `0600` (owner-only).
+- Offloaded sessions stored as `meta.json` (JSONL transcripts are the persistent record).
+- Default flags: `--dangerously-skip-permissions`.
+- Pending input detection: polls terminal buffer for un-submitted text (consecutive-miss threshold).
+- Lock discipline: hold mutex only for in-memory state mutations. Never across I/O, process spawning, or network calls.
+- Slot states are internal — consumers never see them (invariant #5). Slot errors are recycled automatically.
 
 ## Hooks
 
@@ -111,6 +110,35 @@ Hooks tell the pool daemon when sessions change state (idle, processing, etc.). 
 ### Why two layers
 
 Different pools (or different branches under test) can run different hook versions independently. The global `settings.json` entries point to the fixed hook-runner, which dispatches to whichever pool owns the session. No version conflicts, no race conditions between concurrent pools.
+
+## Pool Directory Structure
+
+```
+~/.claude-pool/<name>/
+  config.json            # Pool configuration (flags, size, keepFresh)
+  pool.json              # Pool state (sessions, queue, mappings)
+  api.sock               # Daemon socket
+  daemon.pid             # Daemon PID
+  daemon.log             # Single JSONL log file (all categories, 30-day retention)
+  offloaded/             # Offloaded session metadata
+  archived/              # Archived sessions (auto-cleaned after 30 days)
+  session-pids/          # PID → internal ID mapping
+  idle-signals/          # Session idle signal files
+  hooks/                 # Pool-local hook scripts (deployed by init)
+```
+
+Global (not per-pool):
+
+```
+~/.claude-pool/
+  pools.json             # Pool name → socket path (auto-updated)
+  hook-runner.sh         # Global hook entry point (delegates to pool-local scripts)
+  hooks/                 # Global hook script templates
+  default/               # Default pool
+  work/                  # Named pool
+```
+
+Deleting `~/.claude-pool/<name>/` completely removes that pool with zero side effects.
 
 ## What Claude Pool Does NOT Do
 
