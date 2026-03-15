@@ -245,7 +245,6 @@ func TestSlots(t *testing.T) {
 	})
 
 	t.Run("pendingInput resets LRU timestamp", func(t *testing.T) {
-		// Get two idle sessions at same priority
 		sessions := pool.listSessions()
 		var slotA, slotB string
 		for _, s := range sessions {
@@ -264,10 +263,17 @@ func TestSlots(t *testing.T) {
 		pool.run("set", "--session", slotA, "--priority", "0")
 		pool.run("set", "--session", slotB, "--priority", "0")
 
-		// Type into slotA via debug input (simulates pendingInput) — makes it most recently used
+		// Touch slotB to make it MRU — slotA is now the LRU candidate
+		pool.run("followup", "--session", slotB, "--prompt", "respond with exactly: touch-lru")
+		pool.waitForIdle(slotB, 300*time.Second)
+
+		// Type into slotA via debug input — pendingInput should reset its LRU timestamp
 		pool.run("debug", "input", "--session", slotA, "--data", "some text")
 
-		// Start new session — slotB (no pendingInput activity) should be evicted, not slotA
+		// Verify pendingInput was populated
+		pool.waitForPendingInput(slotA, func(v string) bool { return v != "" }, 10*time.Second)
+
+		// Start new session — slotB should be evicted (slotA's LRU was reset by pendingInput)
 		resp := pool.runJSON("start", "--prompt", "respond with exactly: lru-pending")
 		newSid := strVal(resp, "sessionId")
 
@@ -280,8 +286,9 @@ func TestSlots(t *testing.T) {
 
 		pool.waitForIdle(newSid, 300*time.Second)
 
-		// Clear pendingInput via Ctrl-U
+		// Clear pendingInput and verify it was cleared
 		pool.run("debug", "input", "--session", slotA, "--data", "\x15")
+		pool.waitForPendingInput(slotA, func(v string) bool { return v == "" }, 10*time.Second)
 		pool.run("archive", "--session", slotB)
 	})
 
@@ -333,8 +340,12 @@ func TestSlots(t *testing.T) {
 		result := pool.run("debug", "input", "--session", target, "--data", "debug-test")
 		assertExitOK(t, result)
 
-		// Clear it
+		// Verify the bytes arrived
+		pool.waitForPendingInput(target, func(v string) bool { return v != "" }, 10*time.Second)
+
+		// Clear it and verify
 		pool.run("debug", "input", "--session", target, "--data", "\x15")
+		pool.waitForPendingInput(target, func(v string) bool { return v == "" }, 10*time.Second)
 	})
 
 	t.Run("debug capture reads slot buffer", func(t *testing.T) {

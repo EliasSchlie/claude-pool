@@ -335,7 +335,7 @@ func TestSession(t *testing.T) {
 
 	t.Run("spawnCwd matches --dir", func(t *testing.T) {
 		info := pool.getSessionInfo(s1)
-		assertContains(t, info.SpawnCwd, "workdir")
+		assertContains(t, info.SpawnCwd, pool.workDir)
 	})
 
 	t.Run("wait without session or parent waits for any", func(t *testing.T) {
@@ -344,7 +344,11 @@ func TestSession(t *testing.T) {
 		sid := strVal(startResp, "sessionId")
 
 		waitResp := pool.runJSON("wait", "--timeout", "120000")
-		assertNonEmpty(t, "wait-any content", strVal(waitResp, "content"))
+		waitedSid := strVal(waitResp, "sessionId")
+		if waitedSid != sid {
+			t.Fatalf("expected wait to return new session %s, got %s", sid, waitedSid)
+		}
+		assertContains(t, strVal(waitResp, "content"), "any-wait")
 
 		pool.run("archive", "--session", sid)
 	})

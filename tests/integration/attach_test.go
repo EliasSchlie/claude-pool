@@ -30,6 +30,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -242,25 +243,46 @@ func TestAttach(t *testing.T) {
 		drainAttach(conn2)
 
 		// Send a followup — both clients should receive terminal output
-		sc.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: multi-client-test"})
+		followupResp := sc.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: multi-client-test"})
+		assertNotError(t, followupResp)
 		p.waitForStatus(s1, "processing", 15*time.Second)
 
-		buf1 := make([]byte, 8192)
-		conn1.SetReadDeadline(time.Now().Add(30 * time.Second))
-		n1, err1 := conn1.Read(buf1)
-
-		buf2 := make([]byte, 8192)
-		conn2.SetReadDeadline(time.Now().Add(30 * time.Second))
-		n2, err2 := conn2.Read(buf2)
-
-		if err1 != nil {
-			t.Fatalf("client 1 read failed: %v", err1)
+		// Read from both clients concurrently
+		type readResult struct {
+			n   int
+			err error
 		}
-		if err2 != nil {
-			t.Fatalf("client 2 read failed: %v", err2)
+		var wg sync.WaitGroup
+		r1, r2 := make(chan readResult, 1), make(chan readResult, 1)
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 8192)
+			conn1.SetReadDeadline(time.Now().Add(30 * time.Second))
+			n, err := conn1.Read(buf)
+			r1 <- readResult{n, err}
+		}()
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 8192)
+			conn2.SetReadDeadline(time.Now().Add(30 * time.Second))
+			n, err := conn2.Read(buf)
+			r2 <- readResult{n, err}
+		}()
+
+		res1 := <-r1
+		res2 := <-r2
+		wg.Wait()
+
+		if res1.err != nil {
+			t.Fatalf("client 1 read failed: %v", res1.err)
 		}
-		if n1 == 0 || n2 == 0 {
-			t.Fatalf("both clients should receive output: client1=%d bytes, client2=%d bytes", n1, n2)
+		if res2.err != nil {
+			t.Fatalf("client 2 read failed: %v", res2.err)
+		}
+		if res1.n == 0 || res2.n == 0 {
+			t.Fatalf("both clients should receive output: client1=%d bytes, client2=%d bytes", res1.n, res2.n)
 		}
 
 		p.waitForStatus(s1, "idle", 30*time.Second)
