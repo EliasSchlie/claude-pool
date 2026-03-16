@@ -16,8 +16,17 @@ These files require **explicit user permission** before any modification:
 - `SPEC.md` — Invariants + API surface contract
 - `tests/integration/` — Integration tests. Propose changes and get approval first.
 
+## Quick Reference
+
+- **Deploy plugin:** `./deploy-plugin.sh` (bumps version, copies to cache, then `/reload-plugins`)
+- **Plugin test:** `claude --plugin-dir .` (loads skill + hooks for one session only)
+- **Standalone install:** `./claude-pool install` (fallback — writes directly to `~/.claude/`)
+
 ## Architecture
 
+- `.claude-plugin/` — Plugin manifest
+- `skills/claude-pool/` — Plugin skill
+- `hooks/` — Plugin hooks (hooks.json + hook-runner.sh)
 - `cmd/claude-pool/` — Daemon entry point + install/uninstall commands
 - `internal/` — Daemon packages (pool, pty, api, attach, discovery, paths, hookfiles)
 - `tests/integration/` — Integration tests (real Claude sessions, `--model haiku`)

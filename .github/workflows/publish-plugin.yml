@@ -1,0 +1,62 @@
+name: Publish plugin to marketplace
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    if: contains(github.event.head_commit.message, '[publish]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: claude-pool,claude-plugins
+
+      - name: Checkout plugin repo
+        uses: actions/checkout@v5
+
+      - name: Read version
+        id: version
+        run: |
+          version=$(python3 -c "import json; print(json.load(open('.claude-plugin/plugin.json'))['version'])")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Publishing v$version"
+
+      - name: Update marketplace
+        run: |
+          git clone https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/EliasSchlie/claude-plugins.git /tmp/marketplace
+          cd /tmp/marketplace
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git pull --rebase origin main
+            python3 -c "
+          import json
+          mp = json.load(open('.claude-plugin/marketplace.json'))
+          for p in mp['plugins']:
+              if p['name'] == 'claude-pool':
+                  p['version'] = '${{ steps.version.outputs.version }}'
+                  break
+          json.dump(mp, open('.claude-plugin/marketplace.json', 'w'), indent=2)
+          print()
+          "
+            git add .claude-plugin/marketplace.json
+            if git diff --cached --quiet; then
+              echo "No version change needed"
+              exit 0
+            fi
+            git commit -m "Update claude-pool to v${{ steps.version.outputs.version }} [skip ci]"
+            if git push origin main; then
+              echo "Published v${{ steps.version.outputs.version }} to marketplace"
+              exit 0
+            fi
+            echo "Push failed (attempt $attempt), retrying..."
+            git reset --hard HEAD~1
+          done
+          echo "Failed after 3 attempts"
+          exit 1

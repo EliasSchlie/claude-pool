@@ -1,0 +1,10 @@
+{
+  "name": "claude-pool",
+  "description": "Managed pools of Claude Code sessions — spawn, offload, restore, prompt, attach",
+  "version": "0.1.0",
+  "author": {
+    "name": "Elias Schlie"
+  },
+  "repository": "https://github.com/EliasSchlie/claude-pool",
+  "license": "MIT"
+}
