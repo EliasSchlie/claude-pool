@@ -1,7 +1,7 @@
 {
   "name": "claude-pool",
-  "description": "Managed pools of Claude Code sessions — spawn, offload, restore, prompt, attach",
-  "version": "0.1.0",
+  "description": "Managed pools of Claude Code sessions \u2014 spawn, offload, restore, prompt, attach",
+  "version": "0.1.1",
   "author": {
     "name": "Elias Schlie"
   },
