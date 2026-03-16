@@ -497,8 +497,11 @@ func (m *Manager) deliverPromptWithSettle(s *Session, prompt string, settleDelay
 
 		// Brief check that prompt text appeared in buffer (Claude's TUI uses raw
 		// mode so exact-match echo rarely works — keep timeout short).
-		if !waitForBufferContent(proc, prompt, 200*time.Millisecond) {
-			log.Printf("[deliver] session %s: prompt not echoed in buffer (expected with TUI), sending Enter", sid)
+		// Skip for slash commands (/clear, /resume) — they never echo in TUI mode.
+		if !strings.HasPrefix(prompt, "/") {
+			if !waitForBufferContent(proc, prompt, 200*time.Millisecond) {
+				log.Printf("[deliver] session %s: prompt not echoed in buffer (expected with TUI), sending Enter", sid)
+			}
 		}
 
 		if err := proc.WriteString("\r"); err != nil { // Enter
@@ -557,8 +560,22 @@ func (m *Manager) deliverPromptAsync(sessionID, prompt string) {
 	m.mu.Unlock()
 }
 
+// stopProcessingSession sends Ctrl-C and waits for the session to become idle.
+// Used by handleArchive and handleFollowup (force) to stop a processing session
+// before further action. Must be called WITHOUT m.mu held.
+func (m *Manager) stopProcessingSession(sid string, timeout time.Duration) {
+	m.awaitDelivery(sid)
+
+	m.mu.Lock()
+	if proc := m.procs[sid]; proc != nil {
+		proc.WriteString("\x03")
+	}
+	m.mu.Unlock()
+
+	m.waitForSessionIdle(sid, timeout)
+}
+
 // waitForSessionIdle waits until a session reaches StatusIdle.
-// Used by handleArchive to wait for Ctrl-C to complete before offloading.
 // Must be called WITHOUT m.mu held.
 func (m *Manager) waitForSessionIdle(sid string, timeout time.Duration) {
 	deadline := time.After(timeout)
@@ -718,7 +735,12 @@ func (m *Manager) claimSlotForQueued(slot, queued *Session) bool {
 		return false
 	}
 	delete(m.sessions, slot.ID)
-	m.clearIdleSignals(queued.PID)
+	// Only clear stale signals when the slot is idle (signal already consumed).
+	// For Fresh slots (/clear in progress), the signal hasn't fired yet —
+	// clearing it would race with the /clear completion signal.
+	if slot.Status == StatusIdle {
+		m.clearIdleSignals(queued.PID)
+	}
 
 	if slot.Status == StatusIdle {
 		// Slot is ready — deliver immediately (idle signal already consumed).

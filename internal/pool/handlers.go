@@ -419,29 +419,19 @@ func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 		m.savePoolState()
 		m.mu.Unlock()
 
-		// Wait for any in-flight prompt delivery to finish before
-		// sending Ctrl-C — otherwise the old prompt's Enter keystroke
-		// arrives after Ctrl-C, starting the old command.
-		m.awaitDelivery(sid)
-
-		m.mu.Lock()
-		proc := m.procs[sid]
-		if proc != nil {
-			proc.WriteString("\x03")
-		}
-		m.mu.Unlock()
-
-		// Give Claude time to process the Ctrl-C: cancel the current
-		// task, write "[Request interrupted by user]", and return to
-		// its prompt. Then deliver the new prompt directly — don't
-		// rely on Stop hook (may not fire reliably for shell builtins).
-		time.Sleep(3 * time.Second)
+		// Stop then deliver: Ctrl-C → wait for idle → deliver new prompt.
+		m.stopProcessingSession(sid, 30*time.Second)
 
 		m.mu.Lock()
 		s = m.sessions[sid]
-		if s != nil {
-			m.deliverPrompt(s, prompt)
+		if s == nil || !s.IsLive() {
+			m.mu.Unlock()
+			return api.ErrorResponse(id, "session died during force followup")
 		}
+		s.Status = StatusProcessing
+		s.LastUsedAt = time.Now()
+		m.deliverPrompt(s, prompt)
+		m.broadcastStatus(s, StatusIdle)
 		m.mu.Unlock()
 
 		return api.Response(id, "started", api.Msg{
@@ -885,18 +875,7 @@ func (m *Manager) handleArchive(id any, req api.Msg) api.Msg {
 		log.Printf("[archive] session %s: stopping processing session (pid=%d)", s.ID, s.PID)
 		sid := s.ID
 		m.mu.Unlock()
-
-		// Same logic as handleStop: await delivery, send Ctrl-C
-		m.awaitDelivery(sid)
-		m.mu.Lock()
-		if proc := m.procs[sid]; proc != nil {
-			proc.WriteString("\x03")
-		}
-		m.mu.Unlock()
-
-		// Wait for session to become idle (stop hook fires idle signal)
-		m.waitForSessionIdle(sid, 30*time.Second)
-
+		m.stopProcessingSession(sid, 30*time.Second)
 		m.mu.Lock()
 		s = m.sessions[sid]
 		if s == nil {
@@ -1042,6 +1021,13 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 		m.sessions[s.ID] = s
 		log.Printf("[pin] creating new pinned session %s (parent=%s duration=%.0fs)", s.ID, parentID, duration)
 
+		// Try to find a fresh slot, evicting if necessary
+		if m.findFreshSlot() == nil {
+			if evicted := m.findEvictableSession(); evicted != nil {
+				log.Printf("[pin] session %s: evicting idle session %s to free slot", s.ID, evicted.ID)
+				m.offloadSessionLocked(evicted)
+			}
+		}
 		if fresh := m.findFreshSlot(); fresh != nil {
 			log.Printf("[pin] session %s: taking over slot from %s (status=%s pid=%d)", s.ID, fresh.ID, fresh.Status, fresh.PID)
 			proc := m.transferProcess(fresh, s)
@@ -1055,28 +1041,6 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 				m.startWatchers(s, proc)
 			}
 			delete(m.sessions, fresh.ID)
-		} else if evicted := m.findEvictableSession(); evicted != nil {
-			log.Printf("[pin] session %s: evicting idle session %s to free slot", s.ID, evicted.ID)
-			m.offloadSessionLocked(evicted)
-			// offload recycles the process into a pre-warmed slot — claim it
-			if fresh := m.findFreshSlot(); fresh != nil {
-				proc := m.transferProcess(fresh, s)
-				if fresh.Status == StatusIdle {
-					s.Status = StatusIdle
-				} else {
-					s.Status = StatusFresh
-				}
-				if proc != nil {
-					m.clearIdleSignals(s.PID)
-					m.startWatchers(s, proc)
-				}
-				delete(m.sessions, fresh.ID)
-			} else {
-				// Shouldn't happen — offload just created a fresh slot
-				log.Printf("[pin] session %s: no fresh slot after eviction (unexpected), queuing", s.ID)
-				s.Status = StatusQueued
-				m.queue = append([]*Session{s}, m.queue...)
-			}
 		} else {
 			log.Printf("[pin] session %s: no slots available, queuing at front", s.ID)
 			s.Status = StatusQueued
