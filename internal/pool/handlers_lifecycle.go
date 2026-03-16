@@ -175,18 +175,7 @@ func (m *Manager) handleSet(id any, req api.Msg) api.Msg {
 					"type": "event", "event": "updated",
 					"sessionId": s.ID, "changes": api.Msg{"pinned": false},
 				})
-				// Re-evaluate queue: this session is now evictable, so a
-				// queued request that was blocked by all-pinned can proceed.
-				if len(m.queue) > 0 {
-					m.tryDequeue()
-					if len(m.queue) > 0 {
-						if evicted := m.findEvictableSession(); evicted != nil {
-							log.Printf("[set] session %s: evicting %s to serve queue after unpin", s.ID, evicted.ID)
-							m.offloadSessionLocked(evicted)
-							m.tryDequeue()
-						}
-					}
-				}
+				m.tryDrainQueue()
 			}
 		case float64:
 			duration := v
@@ -350,17 +339,7 @@ func (m *Manager) handleUnpin(id any, req api.Msg) api.Msg {
 		"type": "event", "event": "updated",
 		"sessionId": s.ID, "changes": api.Msg{"pinned": false},
 	})
-	// Re-evaluate queue: this session is now evictable
-	if len(m.queue) > 0 {
-		m.tryDequeue()
-		if len(m.queue) > 0 {
-			if evicted := m.findEvictableSession(); evicted != nil {
-				log.Printf("[unpin] evicting %s to serve queue after unpin", evicted.ID)
-				m.offloadSessionLocked(evicted)
-				m.tryDequeue()
-			}
-		}
-	}
+	m.tryDrainQueue()
 	m.savePoolState()
 	return api.OkResponse(id)
 }

@@ -92,8 +92,7 @@
             "resuming": { "type": "number" },
             "clearing": { "type": "number" },
             "idle": { "type": "number" },
-            "processing": { "type": "number" },
-            "crashed": { "type": "number" }
+            "processing": { "type": "number" }
           },
           "description": "Counts by slot state (sum = size)"
         },

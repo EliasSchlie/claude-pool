@@ -179,10 +179,12 @@ func (m *Manager) handleHealth(id any) api.Msg {
 // buildHealthResponse builds the Pool Object (SPEC: Pool Object table).
 // Caller must hold m.mu.
 func (m *Manager) buildHealthResponse(id any) api.Msg {
-	// SPEC: slots — counts by slot state (sum = size)
+	// SPEC: slots — counts by slot state (sum = size).
+	// "crashed" is omitted: crashed processes are recycled immediately
+	// (watchProcessDone → tryReplaceDeadSessions), so the count is always 0.
 	slots := map[string]float64{
 		"fresh": 0, "spawning": 0, "resuming": 0, "clearing": 0,
-		"idle": 0, "processing": 0, "crashed": 0,
+		"idle": 0, "processing": 0,
 	}
 	// SPEC: sessions — counts by session state (all sessions)
 	sessions := map[string]float64{
@@ -216,18 +218,20 @@ func (m *Manager) buildHealthResponse(id any) api.Msg {
 		}
 	}
 
-	cfg, _ := m.config.Load()
+	health := api.Msg{
+		"name":       m.poolName,
+		"size":       float64(m.poolSize),
+		"queueDepth": float64(len(m.queue)),
+		"slots":      slots,
+		"sessions":   sessions,
+	}
+	if cfg, err := m.config.Load(); err == nil {
+		health["config"] = configToMsg(cfg)
+	} else {
+		log.Printf("[health] config load failed: %v", err)
+	}
 
-	return api.Response(id, "health", api.Msg{
-		"health": api.Msg{
-			"name":       m.poolName,
-			"size":       float64(m.poolSize),
-			"queueDepth": float64(len(m.queue)),
-			"slots":      slots,
-			"sessions":   sessions,
-			"config":     configToMsg(cfg),
-		},
-	})
+	return api.Response(id, "health", api.Msg{"health": health})
 }
 
 // --- Start ---

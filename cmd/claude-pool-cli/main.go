@@ -457,15 +457,9 @@ func doStart(c *conn, args []string, jsonMode bool) error {
 		}
 	}
 
-	// SPEC: "If omitted and the caller is a Claude Code instance, defaults to
-	// that session's Claude Code UUID."
-	// CLAUDE_CODE_SESSION_ID is set by Claude Code itself (any session).
-	// CLAUDE_POOL_SESSION_ID is set by the pool daemon (pool sessions only).
 	if _, hasParent := msg["parent"]; !hasParent {
-		if uuid := os.Getenv("CLAUDE_CODE_SESSION_ID"); uuid != "" {
-			msg["parent"] = uuid
-		} else if poolSID := os.Getenv("CLAUDE_POOL_SESSION_ID"); poolSID != "" {
-			msg["parent"] = poolSID
+		if id := callerSessionID(); id != "" {
+			msg["parent"] = id
 		}
 	}
 
@@ -636,10 +630,8 @@ func doWait(c *conn, args []string, jsonMode bool) error {
 	}
 
 	if !hasSession && !hasParent {
-		if uuid := os.Getenv("CLAUDE_CODE_SESSION_ID"); uuid != "" {
-			msg["parent"] = uuid
-		} else if poolSID := os.Getenv("CLAUDE_POOL_SESSION_ID"); poolSID != "" {
-			msg["parent"] = poolSID
+		if id := callerSessionID(); id != "" {
+			msg["parent"] = id
 		}
 	}
 
@@ -699,11 +691,8 @@ func doInfo(c *conn, args []string, jsonMode bool) error {
 func doLs(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "ls"}
 
-	// SPEC: ls auto-detection follows same rules as start --parent.
-	if uuid := os.Getenv("CLAUDE_CODE_SESSION_ID"); uuid != "" {
-		msg["callerId"] = uuid
-	} else if poolSID := os.Getenv("CLAUDE_POOL_SESSION_ID"); poolSID != "" {
-		msg["callerId"] = poolSID
+	if id := callerSessionID(); id != "" {
+		msg["callerId"] = id
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -990,6 +979,19 @@ func doPools(jsonMode bool) error {
 		}
 	}
 	return nil
+}
+
+// --- Helpers ---
+
+// callerSessionID returns the caller's session identifier for auto-detection.
+// SPEC: "defaults to that session's Claude Code UUID."
+// Prefers CLAUDE_CODE_SESSION_ID (set by Claude Code for any session) over
+// CLAUDE_POOL_SESSION_ID (set by pool daemon for pool sessions only).
+func callerSessionID() string {
+	if uuid := os.Getenv("CLAUDE_CODE_SESSION_ID"); uuid != "" {
+		return uuid
+	}
+	return os.Getenv("CLAUDE_POOL_SESSION_ID")
 }
 
 // --- Output ---

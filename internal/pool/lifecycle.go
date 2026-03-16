@@ -725,6 +725,23 @@ func (m *Manager) writeIdleSignal(pid int, trigger string) {
 
 // --- Queue management ---
 
+// tryDrainQueue attempts to serve queued requests by trying free slots first,
+// then evicting an idle session if needed. Used after unpin/pin-expiry when
+// previously-pinned sessions become evictable. Must be called with m.mu held.
+func (m *Manager) tryDrainQueue() {
+	if len(m.queue) == 0 {
+		return
+	}
+	m.tryDequeue()
+	if len(m.queue) > 0 {
+		if evicted := m.findEvictableSession(); evicted != nil {
+			log.Printf("[queue] evicting %s to serve queue", evicted.ID)
+			m.offloadSessionLocked(evicted)
+			m.tryDequeue()
+		}
+	}
+}
+
 // tryDequeueWithEviction attempts to dequeue a session by first trying free
 // slots, then evicting an idle session if needed. excludeID prevents evicting
 // the session itself (e.g., during followup/pin). Must be called with m.mu held.
@@ -1122,16 +1139,8 @@ func (m *Manager) expirePins() {
 			})
 		}
 	}
-	// Re-evaluate queue: expired pins make sessions evictable
-	if expired && len(m.queue) > 0 {
-		m.tryDequeue()
-		if len(m.queue) > 0 {
-			if evicted := m.findEvictableSession(); evicted != nil {
-				log.Printf("[pin-expiry] evicting %s to serve queue after pin expiry", evicted.ID)
-				m.offloadSessionLocked(evicted)
-				m.tryDequeue()
-			}
-		}
+	if expired {
+		m.tryDrainQueue()
 	}
 }
 
