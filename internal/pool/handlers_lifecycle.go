@@ -489,6 +489,11 @@ func (m *Manager) handleResize(id any, req api.Msg) api.Msg {
 	m.poolSize = target
 	log.Printf("[resize] pool size: %d → %d", oldSize, target)
 
+	// SPEC: "Change slot count immediately and update config."
+	if _, err := m.config.Update(map[string]any{"size": target}); err != nil {
+		log.Printf("[resize] config update failed: %v", err)
+	}
+
 	if target > oldSize {
 		log.Printf("[resize] spawning %d new sessions", target-oldSize)
 		for i := oldSize; i < target; i++ {

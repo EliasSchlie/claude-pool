@@ -72,43 +72,46 @@
     "healthReport": {
       "type": "object",
       "properties": {
+        "name": {
+          "type": "string",
+          "description": "Pool name"
+        },
         "size": {
           "type": "integer",
           "description": "Current slot count"
-        },
-        "counts": {
-          "type": "object",
-          "properties": {
-            "queued": { "type": "integer" },
-            "idle": { "type": "integer" },
-            "processing": { "type": "integer" },
-            "offloaded": { "type": "integer" },
-            "error": { "type": "integer" },
-            "archived": { "type": "integer" }
-          },
-          "description": "Session count per state"
         },
         "queueDepth": {
           "type": "integer",
           "description": "Number of queued requests"
         },
-        "sessions": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "sessionId": { "$ref": "#/$defs/sessionId" },
-              "status": { "$ref": "#/$defs/sessionStatus" },
-              "pid": { "type": ["integer", "null"] },
-              "pidAlive": { "type": "boolean" }
-            },
-            "required": ["sessionId", "status", "pidAlive"]
+        "slots": {
+          "type": "object",
+          "properties": {
+            "fresh": { "type": "number" },
+            "spawning": { "type": "number" },
+            "resuming": { "type": "number" },
+            "clearing": { "type": "number" },
+            "idle": { "type": "number" },
+            "processing": { "type": "number" },
+            "crashed": { "type": "number" }
           },
-          "description": "Per-session health: status and PID liveness"
-        }
+          "description": "Counts by slot state (sum = size)"
+        },
+        "sessions": {
+          "type": "object",
+          "properties": {
+            "queued": { "type": "number" },
+            "idle": { "type": "number" },
+            "processing": { "type": "number" },
+            "offloaded": { "type": "number" },
+            "archived": { "type": "number" }
+          },
+          "description": "Counts by session state (all sessions in the pool)"
+        },
+        "config": { "$ref": "#/$defs/poolConfig" }
       },
-      "required": ["size", "counts", "queueDepth", "sessions"],
-      "description": "Pool health: counts per state, PID liveness, queue depth"
+      "required": ["name", "size", "queueDepth", "slots", "sessions", "config"],
+      "description": "Pool Object (SPEC: Pool Object table)"
     },
 
     "sessionInfo": {

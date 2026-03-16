@@ -48,6 +48,9 @@ type Session struct {
 
 	// Internal: pool-owned pre-warmed session (can be claimed by start/pin)
 	PreWarmed bool
+	// Internal: process was recycled via /clear (not freshly spawned).
+	// Used to distinguish "clearing" from "spawning" in health slot states.
+	Recycled bool
 
 	// Internal: pending prompt for queued sessions
 	PendingPrompt string

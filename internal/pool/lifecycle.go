@@ -174,6 +174,7 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 		pw := m.newSession("")
 		pw.Status = StatusFresh
 		pw.PreWarmed = true
+		pw.Recycled = true
 		pw.PID = proc.PID()
 		pw.Cwd = s.Cwd
 		// Don't carry over ClaudeUUID — /clear will create a new session
