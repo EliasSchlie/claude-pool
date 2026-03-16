@@ -21,6 +21,7 @@ These files require **explicit user permission** before any modification:
 - **Deploy plugin:** `./deploy-plugin.sh` (bumps version, copies to cache, then `/reload-plugins`)
 - **Plugin test:** `claude --plugin-dir .` (loads skill + hooks for one session only)
 - **Standalone install:** `./claude-pool install` (fallback — writes directly to `~/.claude/`)
+- ⚠️ Don't use both plugin AND standalone install — hooks fire twice. Run `claude-pool uninstall` before switching to plugin.
 
 ## Architecture
 
