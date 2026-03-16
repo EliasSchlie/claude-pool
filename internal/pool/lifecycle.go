@@ -1106,15 +1106,28 @@ func (m *Manager) expirePins() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	expired := false
 	now := time.Now()
 	for _, s := range m.sessions {
 		if s.Pinned && !s.PinExpiry.IsZero() && now.After(s.PinExpiry) {
 			log.Printf("[pin-expiry] session %s: pin expired", s.ID)
 			s.Pinned = false
+			expired = true
 			m.broadcastEvent(api.Msg{
 				"type": "event", "event": "updated",
 				"sessionId": s.ID, "changes": api.Msg{"pinned": false},
 			})
+		}
+	}
+	// Re-evaluate queue: expired pins make sessions evictable
+	if expired && len(m.queue) > 0 {
+		m.tryDequeue()
+		if len(m.queue) > 0 {
+			if evicted := m.findEvictableSession(); evicted != nil {
+				log.Printf("[pin-expiry] evicting %s to serve queue after pin expiry", evicted.ID)
+				m.offloadSessionLocked(evicted)
+				m.tryDequeue()
+			}
 		}
 	}
 }
