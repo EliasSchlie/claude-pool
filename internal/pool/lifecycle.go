@@ -122,14 +122,13 @@ func (m *Manager) spawnSession(s *Session, resume bool) {
 				}
 				raw := string(proc.Buffer())
 				buf := strings.ToLower(stripANSI(raw))
-				if strings.Contains(buf, "trust?") {
-					log.Printf("[trust] session %s pid=%d: detected trust prompt, sending Enter", sid, proc.PID())
-					time.Sleep(500 * time.Millisecond)
-					// Send "1" to select option 1 ("Yes, I trust"), then Enter.
-					// Claude's TUI selection menu may not process bare Enter reliably.
-					proc.WriteString("1")
-					time.Sleep(100 * time.Millisecond)
+				if strings.Contains(buf, "yes,") && strings.Contains(buf, "trust") {
+					log.Printf("[trust] session %s pid=%d: detected trust prompt, accepting", sid, proc.PID())
+					// Wait for TUI to fully render, then press Enter.
+					// Option 1 ("Yes, I trust this folder") is pre-selected.
+					time.Sleep(1 * time.Second)
 					proc.WriteString("\r")
+					log.Printf("[trust] session %s pid=%d: sent Enter", sid, proc.PID())
 					return
 				}
 			}
