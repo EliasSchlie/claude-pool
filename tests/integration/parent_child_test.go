@@ -36,8 +36,10 @@ package integration
 //  17.  "archive leaf session succeeds"
 //  18.  "archive parent after children archived"
 //  19.  "recursive archive archives entire subtree"
+//  20.  "real parent auto-detection via Claude prompt"
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -306,5 +308,65 @@ func TestParentChild(t *testing.T) {
 		if len(archivedSessions) < 4 {
 			t.Fatalf("expected at least 4 with --archived, got %d", len(archivedSessions))
 		}
+	})
+
+	t.Run("real parent auto-detection via Claude prompt", func(t *testing.T) {
+		// All previous sessions archived. Pool has 3 fresh slots.
+		root := pool.startSession("respond with exactly: auto-root")
+
+		rootInfo := pool.getSessionInfo(root)
+		rootUUID := rootInfo.ClaudeUUID
+		if rootUUID == "" {
+			t.Fatal("root session should have a Claude UUID by now")
+		}
+
+		// Ask Claude to start a child session via bash — tests real auto-detection
+		// through env var propagation, not simulated runInSession.
+		cmd := fmt.Sprintf(
+			"CLAUDE_POOL_HOME=%s CLAUDE_POOL_DAEMON=%s %s --pool %s start --prompt 'respond with exactly: auto-spawned-child'",
+			pool.homeDir, daemonBinPath, cliBinPath, pool.name,
+		)
+		pool.run("followup", "--session", root,
+			"--prompt", fmt.Sprintf("run this exact bash command: %s", cmd))
+		pool.waitForIdle(root, 300*time.Second)
+
+		// Find the child session — it's the non-archived session that isn't root
+		sessions := pool.listSessions()
+		var childSid string
+		for _, s := range sessions {
+			if s.SessionID != root {
+				childSid = s.SessionID
+				break
+			}
+		}
+		if childSid == "" {
+			t.Fatal("expected Claude to have started a child session via bash")
+		}
+
+		pool.waitForIdle(childSid, 300*time.Second)
+
+		// SPEC: auto-detected parent is the caller's Claude UUID
+		childInfo := pool.getSessionInfo(childSid)
+		if childInfo.Parent != rootUUID {
+			t.Fatalf("child parent should be root's Claude UUID %q (auto-detected), got %q",
+				rootUUID, childInfo.Parent)
+		}
+
+		// SPEC: ls top-level — children not repeated as separate entries
+		topLevel := pool.listSessions()
+		for _, s := range topLevel {
+			if s.SessionID == childSid {
+				t.Fatal("child session should not appear at top level in ls")
+			}
+		}
+
+		// Nested: child appears under root
+		nestedResp := pool.runJSON("ls", "--verbosity", "nested")
+		nestedSessions := parseSessions(t, nestedResp)
+		rootNested, found := findSession(nestedSessions, root)
+		if !found {
+			t.Fatal("root not found in nested ls")
+		}
+		assertHasChild(t, rootNested, childSid)
 	})
 }

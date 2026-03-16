@@ -27,10 +27,11 @@ package integration
 //  11.  "multiple clients read simultaneously"
 //  12.  "buffer-based pendingInput detection without attach"
 //  13.  "buffer-based pendingInput clears on Ctrl-U"
-//  14.  "attach response includes dimensions"
-//  15.  "pty-resize changes dimensions"
-//  16.  "pty-resize on non-live session errors"
-//  17.  "attach to promptless session and submit"
+//  14.  "process death closes attach pipe"
+//  15.  "attach response includes dimensions"
+//  16.  "pty-resize changes dimensions"
+//  17.  "pty-resize on non-live session errors"
+//  18.  "attach to promptless session and submit"
 
 import (
 	"errors"
@@ -313,6 +314,44 @@ func TestAttach(t *testing.T) {
 		assertNotError(t, resp)
 
 		p.waitForPendingInput(s1, func(v string) bool { return v == "" }, 10*time.Second)
+	})
+
+	t.Run("process death closes attach pipe", func(t *testing.T) {
+		// SPEC: "The pipe closes when the session is offloaded or dies."
+		// Offload path tested in "eviction closes attach pipe". This tests death.
+		attachResp := sc.send(Msg{"type": "attach", "sessionId": s1})
+		assertNotError(t, attachResp)
+		sockPath := strVal(attachResp, "socketPath")
+
+		deathConn, err := net.Dial("unix", sockPath)
+		if err != nil {
+			t.Fatalf("connect to attach socket: %v", err)
+		}
+		defer deathConn.Close()
+		drainAttach(deathConn)
+
+		info := p.getSessionInfo(s1)
+		killPID(t, int(info.PID))
+
+		// Pipe should close with EOF
+		buf := make([]byte, 4096)
+		deathConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		for {
+			_, err := deathConn.Read(buf)
+			if err != nil {
+				if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+					t.Fatalf("expected EOF after process death, got: %v", err)
+				}
+				break
+			}
+		}
+
+		p.waitForStatus(s1, "offloaded", 15*time.Second)
+
+		// Restore s1 for subsequent tests
+		sc.send(Msg{"type": "followup", "sessionId": s1, "prompt": "respond with exactly: death-restored"})
+		p.waitForStatus(s1, "idle", 60*time.Second)
+		sc.send(Msg{"type": "set", "sessionId": s1, "pinned": 300})
 	})
 
 	t.Run("attach response includes dimensions", func(t *testing.T) {

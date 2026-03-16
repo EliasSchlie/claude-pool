@@ -234,7 +234,7 @@ func setupPool(t *testing.T, size int) *pool {
 		t.Fatalf("init failed (exit %d): %s", result.ExitCode, result.Stderr)
 	}
 
-	p.waitForIdleCount(size, 90*time.Second)
+	p.waitForSlotsReady(size, 90*time.Second)
 	return p
 }
 
@@ -358,27 +358,34 @@ func (p *pool) waitForIdle(sessionID string, timeout time.Duration) Msg {
 	return resp
 }
 
-// waitForIdleCount polls health until at least n sessions are idle.
-func (p *pool) waitForIdleCount(n int, timeout time.Duration) {
+// waitForSlotCondition polls health until predicate returns true on the slots counts.
+func (p *pool) waitForSlotCondition(label string, predicate func(Msg) bool, timeout time.Duration) {
 	p.t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		result := p.run("health", "--json")
-		if result.ExitCode == 0 {
-			var resp Msg
-			if err := json.Unmarshal([]byte(result.Stdout), &resp); err == nil {
-				if health, ok := resp["health"].(map[string]any); ok {
-					if counts, ok := health["counts"].(map[string]any); ok {
-						if numVal(counts, "idle") >= float64(n) {
-							return
-						}
-					}
-				}
-			}
+		slots := p.getHealthSection("slots")
+		if slots != nil && predicate(slots) {
+			return
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	p.t.Fatalf("waitForIdleCount(%d): timed out after %v", n, timeout)
+	p.t.Fatalf("waitForSlotCondition(%s): timed out after %v", label, timeout)
+}
+
+// waitForSlotsReady polls health until at least n slots are available (fresh or idle).
+func (p *pool) waitForSlotsReady(n int, timeout time.Duration) {
+	p.t.Helper()
+	p.waitForSlotCondition(fmt.Sprintf("ready>=%d", n), func(slots Msg) bool {
+		return numVal(slots, "fresh")+numVal(slots, "idle") >= float64(n)
+	}, timeout)
+}
+
+// waitForIdleSlots polls health until at least n slots are in idle state (hosting idle sessions).
+func (p *pool) waitForIdleSlots(n int, timeout time.Duration) {
+	p.t.Helper()
+	p.waitForSlotCondition(fmt.Sprintf("idle>=%d", n), func(slots Msg) bool {
+		return numVal(slots, "idle") >= float64(n)
+	}, timeout)
 }
 
 // waitForPoolSize polls health until the pool reaches the target slot count.
@@ -386,20 +393,28 @@ func (p *pool) waitForPoolSize(target int, timeout time.Duration) {
 	p.t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		result := p.run("health", "--json")
-		if result.ExitCode == 0 {
-			var resp Msg
-			if err := json.Unmarshal([]byte(result.Stdout), &resp); err == nil {
-				if health, ok := resp["health"].(map[string]any); ok {
-					if int(numVal(health, "size")) == target {
-						return
-					}
-				}
-			}
+		health := p.getHealthSafe()
+		if health != nil && int(numVal(health, "size")) == target {
+			return
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	p.t.Fatalf("waitForPoolSize(%d): timed out after %v", target, timeout)
+}
+
+// getHealthSafe returns the health object or nil if unavailable (for polling loops).
+func (p *pool) getHealthSafe() Msg {
+	p.t.Helper()
+	result := p.run("health", "--json")
+	if result.ExitCode != 0 {
+		return nil
+	}
+	var resp Msg
+	if err := json.Unmarshal([]byte(result.Stdout), &resp); err != nil {
+		return nil
+	}
+	health, _ := resp["health"].(map[string]any)
+	return health
 }
 
 // waitForPendingInput polls info until pendingInput matches.
@@ -455,6 +470,54 @@ func (p *pool) getHealth() Msg {
 		p.t.Fatalf("expected health object")
 	}
 	return health
+}
+
+// getHealthSection returns a named section ("slots" or "sessions") from health, or nil if unavailable.
+func (p *pool) getHealthSection(key string) Msg {
+	p.t.Helper()
+	health := p.getHealthSafe()
+	if health == nil {
+		return nil
+	}
+	section, _ := health[key].(map[string]any)
+	return section
+}
+
+// idleSessionIDs returns IDs of sessions with status "idle" from ls, fatals if fewer than min.
+func (p *pool) idleSessionIDs(min int) []string {
+	p.t.Helper()
+	sessions := p.listSessions()
+	var ids []string
+	for _, s := range sessions {
+		if s.Status == "idle" {
+			ids = append(ids, s.SessionID)
+		}
+	}
+	if len(ids) < min {
+		p.t.Fatalf("expected at least %d idle sessions, got %d", min, len(ids))
+	}
+	return ids
+}
+
+// startSession starts a new session with the given prompt and waits for it to become idle.
+// Returns the session ID.
+func (p *pool) startSession(prompt string) string {
+	p.t.Helper()
+	resp := p.runJSON("start", "--prompt", prompt)
+	id := strVal(resp, "sessionId")
+	p.waitForIdle(id, 300*time.Second)
+	return id
+}
+
+// archiveAll archives all non-archived sessions (active + offloaded).
+func (p *pool) archiveAll() {
+	p.t.Helper()
+	for _, s := range p.listSessions() {
+		p.run("archive", "--session", s.SessionID)
+	}
+	for _, s := range p.listSessions("--status", "offloaded") {
+		p.run("archive", "--session", s.SessionID)
+	}
 }
 
 // listSessions runs ls --json with optional args and returns parsed sessions.

@@ -67,31 +67,35 @@ func TestPool(t *testing.T) {
 		}
 		assertNumVal(t, health, "size", 2)
 
-		pool.waitForIdleCount(2, 90*time.Second)
+		pool.waitForSlotsReady(2, 90*time.Second)
 
-		sessions := pool.listSessions()
-		if len(sessions) < 2 {
-			t.Fatalf("expected at least 2 sessions, got %d", len(sessions))
-		}
-		s1 = sessions[0].SessionID
-		s2 = sessions[1].SessionID
+		// Pre-warmed slots are ready but no user sessions exist yet
+		assertSessionCount(t, pool.listSessions(), 0)
+
+		// Start real sessions (claims pre-warmed slots)
+		s1 = pool.startSession("respond with exactly: init-s1")
+		s2 = pool.startSession("respond with exactly: init-s2")
 	})
 
 	// Prevents: init response diverging from health response
-	// (SPEC: "Pool state after initialization (same as health).")
+	// (SPEC: init and health both return a Pool Object.)
 	t.Run("init response matches health", func(t *testing.T) {
 		health := pool.getHealth()
 
-		// Verify health fields present — same ones we check in the health step
+		// SPEC: Pool Object fields
+		assertNonEmpty(t, "name", strVal(health, "name"))
 		assertNumVal(t, health, "size", 2)
-		if _, ok := health["counts"]; !ok {
-			t.Fatal("init health response missing 'counts'")
-		}
 		if _, ok := health["queueDepth"]; !ok {
-			t.Fatal("init health response missing 'queueDepth'")
+			t.Fatal("pool object missing 'queueDepth'")
+		}
+		if _, ok := health["slots"]; !ok {
+			t.Fatal("pool object missing 'slots'")
 		}
 		if _, ok := health["sessions"]; !ok {
-			t.Fatal("init health response missing 'sessions'")
+			t.Fatal("pool object missing 'sessions'")
+		}
+		if _, ok := health["config"]; !ok {
+			t.Fatal("pool object missing 'config'")
 		}
 	})
 
@@ -109,9 +113,15 @@ func TestPool(t *testing.T) {
 		health := pool.getHealth()
 
 		assertNumVal(t, health, "size", 2)
-		counts, _ := health["counts"].(map[string]any)
-		assertNumVal(t, counts, "idle", 2)
 		assertNumVal(t, health, "queueDepth", 0)
+
+		// Both slots host idle user sessions
+		slots, _ := health["slots"].(map[string]any)
+		assertNumVal(t, slots, "idle", 2)
+
+		// Session counts match
+		sessions, _ := health["sessions"].(map[string]any)
+		assertNumVal(t, sessions, "idle", 2)
 	})
 
 	t.Run("pools lists the pool", func(t *testing.T) {
@@ -171,7 +181,13 @@ func TestPool(t *testing.T) {
 	t.Run("resize up to 3", func(t *testing.T) {
 		result := pool.run("resize", "--size", "3")
 		assertExitOK(t, result)
-		pool.waitForIdleCount(3, 60*time.Second)
+		// s1, s2 are idle user sessions; 3rd slot is fresh (pre-warmed)
+		pool.waitForSlotsReady(3, 60*time.Second)
+
+		// SPEC: resize "changes slot count immediately and updates config"
+		cfgResp := pool.runJSON("config")
+		cfg, _ := cfgResp["config"].(map[string]any)
+		assertNumVal(t, cfg, "size", 3)
 	})
 
 	t.Run("resize down to 1", func(t *testing.T) {
@@ -184,20 +200,16 @@ func TestPool(t *testing.T) {
 		pool.waitForPoolSize(1, 15*time.Second)
 	})
 
+	// State: pool size 1, s1 idle in the surviving slot. s2 offloaded.
+
 	t.Run("resize reversal clears pending kill tokens", func(t *testing.T) {
 		pool.run("resize", "--size", "2")
-		pool.waitForIdleCount(2, 60*time.Second)
+		pool.waitForSlotsReady(2, 60*time.Second)
 
-		sessions := pool.listSessions()
-		var idle []string
-		for _, s := range sessions {
-			if s.Status == "idle" {
-				idle = append(idle, s.SessionID)
-			}
-		}
-		if len(idle) < 2 {
-			t.Fatalf("expected 2 idle sessions, got %d", len(idle))
-		}
+		// New slot is fresh (pre-warmed) — start a session to claim it
+		pool.startSession("respond with exactly: extra")
+
+		idle := pool.idleSessionIDs(2)
 		sa, sb := idle[0], idle[1]
 
 		pool.run("followup", "--session", sa, "--prompt", "run the bash command: sleep 60")
@@ -219,20 +231,13 @@ func TestPool(t *testing.T) {
 
 		pool.run("stop", "--session", sa)
 		pool.run("stop", "--session", sb)
-		pool.waitForIdleCount(2, 60*time.Second)
+		pool.waitForIdleSlots(2, 60*time.Second)
 	})
 
+	// State: pool size 2, 2 idle user sessions in slots.
+
 	t.Run("deferred eviction of processing sessions", func(t *testing.T) {
-		sessions := pool.listSessions()
-		var idle []string
-		for _, s := range sessions {
-			if s.Status == "idle" {
-				idle = append(idle, s.SessionID)
-			}
-		}
-		if len(idle) < 2 {
-			t.Fatalf("expected 2 idle sessions, got %d", len(idle))
-		}
+		idle := pool.idleSessionIDs(2)
 		sa, sb := idle[0], idle[1]
 
 		pool.run("followup", "--session", sa, "--prompt", "run the bash command: sleep 60")
@@ -247,22 +252,16 @@ func TestPool(t *testing.T) {
 		pool.waitForPoolSize(1, 15*time.Second)
 	})
 
+	// State: pool size 1, 1 user session idle.
+
 	t.Run("resize respects pins", func(t *testing.T) {
 		pool.run("resize", "--size", "2")
-		pool.waitForIdleCount(2, 60*time.Second)
+		pool.waitForSlotsReady(2, 60*time.Second)
 
-		sessions := pool.listSessions()
-		var idle []string
-		for _, s := range sessions {
-			if s.Status == "idle" {
-				idle = append(idle, s.SessionID)
-			}
-		}
-		if len(idle) < 2 {
-			t.Fatalf("expected 2 idle sessions, got %d", len(idle))
-		}
+		// Start a session for the fresh slot so we have 2 user sessions
+		pool.startSession("respond with exactly: pin-test")
 
-		pinned := idle[0]
+		pinned := pool.idleSessionIDs(2)[0]
 		pool.run("set", "--session", pinned, "--pinned", "300")
 
 		pool.run("resize", "--size", "1")
@@ -296,7 +295,7 @@ func TestPool(t *testing.T) {
 		}
 		assertNumVal(t, health, "size", 2)
 
-		pool.waitForIdleCount(2, 90*time.Second)
+		pool.waitForSlotsReady(2, 90*time.Second)
 
 		// Config survives destroy+init cycle
 		cfgResp := pool.runJSON("config")
@@ -322,14 +321,11 @@ func TestPool(t *testing.T) {
 		pool.awaitSocketGone(10 * time.Second)
 
 		pool.runJSON("init", "--size", "2", "--dir", pool.workDir, "--keep-fresh", "0", "--no-restore")
-		pool.waitForIdleCount(2, 90*time.Second)
+		pool.waitForSlotsReady(2, 90*time.Second)
 
+		// No user sessions should exist — all slots are fresh pre-warmed
 		sessions := pool.listSessions("--verbosity", "full")
-		for _, s := range sessions {
-			if s.SessionID == s1 || s.SessionID == s2 {
-				t.Fatalf("session %s should not appear with --no-restore", s.SessionID)
-			}
-		}
+		assertSessionCount(t, sessions, 0)
 	})
 
 	_ = s1
