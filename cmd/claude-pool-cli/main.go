@@ -31,7 +31,9 @@ func dial(socketPath string) (*conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot connect to pool: %w", err)
 	}
-	return &conn{c: c, scanner: bufio.NewScanner(c)}, nil
+	s := bufio.NewScanner(c)
+	s.Buffer(make([]byte, 0, 64*1024), 4*1024*1024) // 4MB max — debug-capture can be large
+	return &conn{c: c, scanner: s}, nil
 }
 
 func (c *conn) send(msg map[string]any) (map[string]any, error) {
