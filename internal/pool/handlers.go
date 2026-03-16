@@ -121,17 +121,37 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 		restored++
 	}
 
-	// Fill remaining slots with fresh pre-warmed sessions
+	// Fill remaining slots with fresh pre-warmed sessions.
+	// Spawn the first one and wait for it to become idle before spawning the
+	// rest. This ensures the workspace trust prompt (if shown) is accepted
+	// and cached before concurrent sessions start — Claude's TUI trust
+	// prompt doesn't reliably process Enter when multiple PTYs race.
 	fresh := size - restored
 	if fresh > 0 {
 		log.Printf("[init] spawning %d fresh pre-warmed sessions", fresh)
-	}
-	for i := restored; i < size; i++ {
 		s := m.newSession("")
 		s.Status = StatusFresh
 		s.PreWarmed = true
 		m.sessions[s.ID] = s
 		m.spawnSession(s, false)
+
+		if fresh > 1 {
+			// Wait for first session to become idle (trust accepted) before
+			// spawning the rest. Release lock for the wait.
+			sid := s.ID
+			m.mu.Unlock()
+			m.waitForSessionIdle(sid, 60*time.Second)
+			m.mu.Lock()
+			log.Printf("[init] first session ready, spawning %d more", fresh-1)
+		}
+
+		for i := 1; i < fresh; i++ {
+			s := m.newSession("")
+			s.Status = StatusFresh
+			s.PreWarmed = true
+			m.sessions[s.ID] = s
+			m.spawnSession(s, false)
+		}
 	}
 
 	log.Printf("[init] pool initialized: %d sessions total", restored+fresh)

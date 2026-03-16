@@ -124,11 +124,14 @@ func (m *Manager) spawnSession(s *Session, resume bool) {
 				buf := strings.ToLower(stripANSI(raw))
 				if strings.Contains(buf, "yes,") && strings.Contains(buf, "trust") {
 					log.Printf("[trust] session %s pid=%d: detected trust prompt, accepting", sid, proc.PID())
-					// Wait for TUI to fully render, then press Enter.
-					// Option 1 ("Yes, I trust this folder") is pre-selected.
+					// Wait for TUI to fully render, then press Enter twice.
+					// Some TUI frameworks need multiple Enter presses, or
+					// the first one is consumed by the prompt framework.
 					time.Sleep(1 * time.Second)
 					proc.WriteString("\r")
-					log.Printf("[trust] session %s pid=%d: sent Enter", sid, proc.PID())
+					time.Sleep(500 * time.Millisecond)
+					proc.WriteString("\r")
+					log.Printf("[trust] session %s pid=%d: sent Enter (x2)", sid, proc.PID())
 					return
 				}
 			}
