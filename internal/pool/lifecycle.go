@@ -178,17 +178,10 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 }
 
 // archiveSessionLocked archives a session. Must be called with m.mu held.
-// For processing sessions, handleArchive stops them first via Ctrl-C + wait.
-// archiveDescendants may call this on processing children — Ctrl-C is sent
-// as a courtesy but we can't wait for idle under the lock.
+// The caller must ensure processing sessions have been stopped first
+// (via stopProcessingSession outside the lock).
 func (m *Manager) archiveSessionLocked(s *Session) {
 	if s.IsLive() {
-		if s.Status == StatusProcessing {
-			if proc := m.procs[s.ID]; proc != nil {
-				log.Printf("[archive] session %s: sending Ctrl-C to processing session (pid=%d)", s.ID, s.PID)
-				proc.WriteString("\x03")
-			}
-		}
 		log.Printf("[archive] session %s: offloading live session (status=%s)", s.ID, s.Status)
 		m.offloadSessionLocked(s)
 	}
@@ -204,13 +197,53 @@ func (m *Manager) archiveSessionLocked(s *Session) {
 	})
 }
 
+// archiveDescendants archives all descendants of a parent session.
+// Processing descendants are stopped first (Ctrl-C + wait for idle)
+// by releasing and re-acquiring the lock per descendant.
+// Must be called with m.mu held. May temporarily release m.mu.
 func (m *Manager) archiveDescendants(parentID string) {
-	for _, s := range m.sessions {
-		if s.ParentID == parentID && s.Status != StatusArchived {
-			log.Printf("[archive] archiving descendant %s of parent %s", s.ID, parentID)
-			m.archiveDescendants(s.ID)
-			m.archiveSessionLocked(s)
+	// Collect all descendants first (recursive)
+	var collectAll func(pid string)
+	var all []string
+	collectAll = func(pid string) {
+		for _, s := range m.sessions {
+			if s.ParentID == pid && s.Status != StatusArchived {
+				collectAll(s.ID)
+				all = append(all, s.ID)
+			}
 		}
+	}
+	collectAll(parentID)
+
+	// Stop any processing descendants first (requires releasing the lock)
+	for _, sid := range all {
+		s := m.sessions[sid]
+		if s != nil && s.Status == StatusProcessing {
+			log.Printf("[archive] stopping processing descendant %s of parent %s", sid, parentID)
+			m.mu.Unlock()
+			m.stopProcessingSession(sid, 30*time.Second)
+			m.mu.Lock()
+		}
+	}
+
+	// Now archive them all under the lock. Re-check for processing —
+	// a descendant could have started processing while we were stopping
+	// a sibling (lock was released during stopProcessingSession).
+	for _, sid := range all {
+		s := m.sessions[sid]
+		if s == nil || s.Status == StatusArchived {
+			continue
+		}
+		if s.Status == StatusProcessing {
+			m.mu.Unlock()
+			m.stopProcessingSession(sid, 30*time.Second)
+			m.mu.Lock()
+			s = m.sessions[sid]
+			if s == nil || s.Status == StatusArchived {
+				continue
+			}
+		}
+		m.archiveSessionLocked(s)
 	}
 }
 
@@ -592,7 +625,7 @@ func (m *Manager) waitForSessionIdle(sid string, timeout time.Duration) {
 
 		select {
 		case <-deadline:
-			log.Printf("[archive] session %s: timed out waiting for idle", sid)
+			log.Printf("[wait-idle] session %s: timed out waiting for idle", sid)
 			return
 		case <-ch:
 			m.mu.Lock()
@@ -632,24 +665,6 @@ func (m *Manager) waitForSessionReady(id any, sid string, timeout time.Duration)
 		case <-ch:
 			m.mu.Lock()
 		}
-	}
-}
-
-// writeIdleSignal writes a synthetic idle signal for cases where no hook fires
-// (e.g., after Ctrl-C interrupts processing).
-func (m *Manager) writeIdleSignal(pid int, trigger string) {
-	signalPath := m.paths.IdleSignal(pid)
-	signal := map[string]any{
-		"cwd":        m.paths.Root,
-		"session_id": "",
-		"transcript": "",
-		"ts":         time.Now().Unix(),
-		"trigger":    trigger,
-	}
-	data, _ := json.Marshal(signal)
-	log.Printf("[idle-signal] writing synthetic idle signal for pid %d (trigger=%s)", pid, trigger)
-	if err := os.WriteFile(signalPath, append(data, '\n'), 0600); err != nil {
-		log.Printf("[idle-signal] error writing signal for pid %d: %v", pid, err)
 	}
 }
 
