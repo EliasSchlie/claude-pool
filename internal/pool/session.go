@@ -52,6 +52,7 @@ type Session struct {
 	// Internal: pending prompt for queued sessions
 	PendingPrompt string
 	PendingForce  bool
+	PendingResume string // Claude UUID to /resume before delivering PendingPrompt
 
 	// Internal: spawn retry tracking
 	SpawnAttempts int // consecutive spawn failures (reset on success)

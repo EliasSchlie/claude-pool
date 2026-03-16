@@ -137,19 +137,17 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 	prevStatus := s.Status
 	log.Printf("[offload] session %s: %s → offloaded (pid=%d claude=%s)", s.ID, prevStatus, s.PID, s.ClaudeUUID)
 
-	// Close attach pipe before killing process
+	// Close attach pipe before clearing
 	if pipe := m.pipes[s.ID]; pipe != nil {
 		pipe.Close()
 		delete(m.pipes, s.ID)
 	}
 
-	if proc := m.procs[s.ID]; proc != nil {
-		log.Printf("[offload] session %s: killing pid %d", s.ID, proc.PID())
-		proc.Kill()
-		proc.Close()
-		delete(m.procs, s.ID)
-		delete(m.pidToSID, s.PID)
-	}
+	proc := m.procs[s.ID]
+
+	// Dissociate process from session (but keep process alive)
+	delete(m.procs, s.ID)
+	delete(m.pidToSID, s.PID)
 
 	m.saveOffloadMeta(s)
 	s.Status = StatusOffloaded
@@ -158,6 +156,50 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 	s.PendingInput = ""
 	delete(m.attachTyping, s.ID)
 	m.broadcastStatus(s, prevStatus)
+
+	// Recycle the process: create a pre-warmed session to hold it,
+	// send /clear to reset the Claude context. The process stays alive —
+	// SPEC: "the pool never spawns throwaway processes."
+	if proc != nil && !proc.Exited() {
+		pw := m.newSession("")
+		pw.Status = StatusFresh
+		pw.PreWarmed = true
+		pw.PID = proc.PID()
+		pw.Cwd = s.Cwd
+		// Don't carry over ClaudeUUID — /clear will create a new session
+		m.sessions[pw.ID] = pw
+		m.procs[pw.ID] = proc
+		m.pidToSID[proc.PID()] = pw.ID
+		log.Printf("[offload] session %s: recycled pid %d into pre-warmed session %s", s.ID, proc.PID(), pw.ID)
+
+		m.sendClear(pw, proc)
+		m.startWatchers(pw, proc)
+	}
+}
+
+// sendClear sends /clear to a process to reset its Claude context.
+// The process goes through a fresh startup cycle (SessionStart → idle signal).
+// Must be called with m.mu held. Actual I/O happens in a goroutine.
+func (m *Manager) sendClear(s *Session, proc *ptyPkg.Process) {
+	sid := s.ID
+	done := m.done
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
+
+		if proc.Exited() {
+			return
+		}
+		proc.WriteString("\x1b")
+		time.Sleep(100 * time.Millisecond)
+		proc.WriteString("\x15") // Ctrl-U
+		time.Sleep(50 * time.Millisecond)
+		proc.WriteString("/clear\r")
+		log.Printf("[clear] session %s: sent /clear to pid %d", sid, proc.PID())
+	}()
 }
 
 func (m *Manager) archiveSessionLocked(s *Session) {
@@ -167,8 +209,8 @@ func (m *Manager) archiveSessionLocked(s *Session) {
 			if proc := m.procs[s.ID]; proc != nil {
 				proc.WriteString("\x03")
 			}
-			// No sleep — offloadSessionLocked kills the process immediately.
-			// The Ctrl-C is a courtesy signal before the kill.
+			// offloadSessionLocked sends /clear which queues behind the
+			// Ctrl-C interrupt in the PTY — the process handles both in order.
 		}
 		log.Printf("[archive] session %s: offloading live session (status=%s)", s.ID, s.Status)
 		m.offloadSessionLocked(s)
@@ -335,15 +377,41 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 			// Fresh → Idle transitions. If the session is Processing, a startup
 			// signal is stale (arrived after handleAttachInput set Processing)
 			// and must not cause a false Processing → Idle transition.
+			// Exception: if there's pending work (PendingResume/PendingPrompt),
+			// the signal is from /resume or /clear completing — process it.
 			trigger, _ := sig["trigger"].(string)
-			if s.Status == StatusProcessing && (trigger == "session-start" || trigger == "session-clear") {
+			if s.Status == StatusProcessing && (trigger == "session-start" || trigger == "session-clear") &&
+				s.PendingResume == "" && s.PendingPrompt == "" {
 				log.Printf("[idle-watch] session %s: ignoring stale %s signal (status=%s)", sessionID, trigger, s.Status)
 				m.mu.Unlock()
 				continue
 			}
 
 			if s.Status == StatusFresh || s.Status == StatusProcessing {
-				// Deliver any pending prompt immediately — avoids a transient
+				// Use a longer settle delay after session-start/session-clear
+				// triggers — Claude's TUI needs time to finish rendering its
+				// startup/clear output before it can accept typed input.
+				settleDelay := 200 * time.Millisecond
+				if trigger == "session-start" || trigger == "session-clear" {
+					settleDelay = 2 * time.Second
+				}
+
+				// Stage 1: deliver /resume if pending (before any prompt).
+				// After /resume completes, another idle signal fires and we
+				// proceed to PendingPrompt delivery.
+				if s.PendingResume != "" {
+					uuid := s.PendingResume
+					s.PendingResume = ""
+					prevStatus := s.Status
+					s.Status = StatusProcessing
+					log.Printf("[idle-watch] session %s: delivering /resume %s", sessionID, uuid)
+					m.broadcastStatus(s, prevStatus)
+					m.deliverPromptWithSettle(s, "/resume "+uuid, settleDelay)
+					m.mu.Unlock()
+					continue
+				}
+
+				// Stage 2: deliver any pending prompt — avoids a transient
 				// idle state that confuses wait-without-sessionId.
 				if s.PendingPrompt != "" {
 					prompt := s.PendingPrompt
@@ -356,7 +424,7 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 					m.broadcastStatus(s, prevStatus)
 					// Register delivery under the lock so awaitDelivery
 					// can't miss it between unlock and goroutine start.
-					m.deliverPrompt(s, prompt)
+					m.deliverPromptWithSettle(s, prompt, settleDelay)
 					m.mu.Unlock()
 					continue
 				}
@@ -369,6 +437,17 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 
 				// Check if a queued session can claim this slot
 				m.serveQueueFromSlot(s)
+
+				// If queue still has entries, try to free a slot via eviction.
+				// This handles the case where a queued session was waiting for
+				// a slot being /cleared — now that it's idle, it's evictable.
+				if len(m.queue) > 0 {
+					if evicted := m.findEvictableSession(); evicted != nil {
+						log.Printf("[idle-watch] session %s: evicting %s to serve queue (depth=%d)", sessionID, evicted.ID, len(m.queue))
+						m.offloadSessionLocked(evicted)
+						m.tryDequeue()
+					}
+				}
 
 				// Maintain fresh slot target (SPEC: Fresh Slot Maintenance)
 				m.maintainFreshSlots()
@@ -589,24 +668,76 @@ func (m *Manager) tryDequeue() {
 		m.tryKillTokens()
 	}
 
-	// Second pass: fill available slots from queue
-	active := 0
-	for _, s := range m.sessions {
-		if s.IsLive() {
-			active++
+	// Second pass: assign queued sessions to available fresh/idle pre-warmed slots.
+	// No process spawning — SPEC: "the pool never spawns throwaway processes."
+	for len(m.queue) > 0 {
+		fresh := m.findFreshSlot()
+		if fresh == nil {
+			break
 		}
-	}
 
-	for active < m.poolSize && len(m.queue) > 0 {
-		s := m.queue[0]
+		queued := m.queue[0]
 		m.queue = m.queue[1:]
 
-		log.Printf("[dequeue] dequeuing session %s (active=%d/%d, remaining queue=%d)", s.ID, active, m.poolSize, len(m.queue))
-		s.Status = StatusFresh
-		m.spawnSession(s, s.ClaudeUUID != "")
-		// PendingPrompt is delivered by watchIdleSignal when the session
-		// becomes ready (Fresh → idle signal → checks PendingPrompt).
-		active++
+		log.Printf("[dequeue] session %s claiming slot from pre-warmed %s (pid=%d, status=%s)",
+			queued.ID, fresh.ID, fresh.PID, fresh.Status)
+
+		// If this is a resume (offloaded session with ClaudeUUID), set up
+		// two-stage delivery: /resume first, then PendingPrompt.
+		if queued.ClaudeUUID != "" {
+			queued.PendingResume = queued.ClaudeUUID
+		}
+
+		proc := m.transferProcess(fresh, queued)
+		if proc == nil {
+			break
+		}
+		delete(m.sessions, fresh.ID)
+
+		m.clearIdleSignals(queued.PID)
+
+		if fresh.Status == StatusIdle {
+			if queued.PendingResume != "" {
+				// Slot is ready, send /resume immediately — don't wait for
+				// an idle signal (already consumed by the pre-warmed session).
+				uuid := queued.PendingResume
+				queued.PendingResume = ""
+				queued.Status = StatusProcessing
+				log.Printf("[dequeue] session %s: slot idle, delivering /resume %s", queued.ID, uuid)
+				m.deliverPrompt(queued, "/resume "+uuid)
+				m.startWatchers(queued, proc)
+				m.broadcastEvent(api.Msg{
+					"type": "event", "event": "status",
+					"sessionId": queued.ID, "status": StatusProcessing, "prevStatus": StatusQueued,
+				})
+			} else if queued.PendingPrompt != "" {
+				// Slot is ready, deliver prompt now
+				queued.Status = StatusProcessing
+				prompt := queued.PendingPrompt
+				queued.PendingPrompt = ""
+				queued.PendingForce = false
+				m.deliverPrompt(queued, prompt)
+				m.startWatchers(queued, proc)
+				m.broadcastEvent(api.Msg{
+					"type": "event", "event": "status",
+					"sessionId": queued.ID, "status": StatusProcessing, "prevStatus": StatusQueued,
+				})
+			} else {
+				// Promptless: session takes the slot idle
+				queued.Status = StatusIdle
+				m.startWatchers(queued, proc)
+				m.broadcastEvent(api.Msg{
+					"type": "event", "event": "status",
+					"sessionId": queued.ID, "status": StatusIdle, "prevStatus": StatusQueued,
+				})
+			}
+		} else {
+			// Slot still starting (/clear in progress) — wait for idle
+			// signal to deliver PendingResume then PendingPrompt.
+			queued.Status = StatusFresh
+			m.startWatchers(queued, proc)
+		}
+		m.savePoolState()
 	}
 }
 
@@ -672,7 +803,11 @@ func (m *Manager) transferProcess(from, to *Session) *ptyPkg.Process {
 	m.procs[to.ID] = proc
 	m.pidToSID[proc.PID()] = to.ID
 	to.PID = from.PID
-	to.ClaudeUUID = from.ClaudeUUID
+	// Only copy ClaudeUUID if the target doesn't already have one
+	// (resume sessions keep their own UUID for /resume delivery)
+	if to.ClaudeUUID == "" {
+		to.ClaudeUUID = from.ClaudeUUID
+	}
 	to.Cwd = from.Cwd
 	return proc
 }
@@ -713,13 +848,20 @@ func (m *Manager) findFreshSlot() *Session {
 }
 
 // findEvictableSession returns the best session to evict, or nil if none
-// qualifies. Fresh and idle unpinned sessions are candidates. Fresh sessions
-// (still pre-warming) are evicted before idle ones since they haven't served
-// any user work yet.
+// qualifies. Idle sessions and fresh pre-warmed sessions are candidates.
+// Fresh user sessions (being /cleared+/resumed) are excluded — interrupting
+// them would corrupt the resume sequence.
 func (m *Manager) findEvictableSession() *Session {
 	var best *Session
 	for _, s := range m.sessions {
-		if (s.Status != StatusIdle && s.Status != StatusFresh) || s.Pinned {
+		if s.Pinned {
+			continue
+		}
+		if s.Status == StatusIdle {
+			// Idle sessions are always evictable
+		} else if s.Status == StatusFresh && s.PreWarmed {
+			// Fresh pre-warmed sessions are evictable (pool-owned, just starting)
+		} else {
 			continue
 		}
 		if best == nil || evictsBefore(s, best) {
@@ -730,7 +872,7 @@ func (m *Manager) findEvictableSession() *Session {
 }
 
 // evictsBefore returns true if a should be evicted before b.
-// Order: fresh pre-warmed first → lower priority → pre-warmed → fresh → empty pendingInput → oldest LRU.
+// Order: fresh pre-warmed first → lower priority → pre-warmed → empty pendingInput → oldest LRU.
 func evictsBefore(a, b *Session) bool {
 	// Fresh pre-warmed sessions evicted first — no user work, no user intent
 	aFreshPW := a.Status == StatusFresh && a.PreWarmed
@@ -744,12 +886,6 @@ func evictsBefore(a, b *Session) bool {
 	// Pre-warmed sessions evicted before user sessions
 	if a.PreWarmed != b.PreWarmed {
 		return a.PreWarmed
-	}
-	// Fresh user sessions evicted before idle (haven't done work yet)
-	aFresh := a.Status == StatusFresh
-	bFresh := b.Status == StatusFresh
-	if aFresh != bFresh {
-		return aFresh
 	}
 	// Sessions with empty pendingInput evicted before those with pending text
 	aHasInput := a.PendingInput != ""
@@ -794,9 +930,44 @@ func (m *Manager) tryKillTokens() {
 			break
 		}
 		log.Printf("[kill-tokens] evicting session %s (tokens remaining=%d)", evicted.ID, m.killTokens-1)
-		m.offloadSessionLocked(evicted)
+
+		if evicted.PreWarmed {
+			// Pre-warmed slot: kill the process and remove the session entirely
+			// to actually reduce pool capacity. offloadSessionLocked would
+			// recycle the process into a new pre-warmed session, defeating
+			// the purpose of shrinking.
+			m.killSessionLocked(evicted)
+		} else {
+			// User session: offload it (process gets recycled into a pre-warmed
+			// slot). The next iteration will kill that pre-warmed slot.
+			m.offloadSessionLocked(evicted)
+		}
 		m.killTokens--
 	}
+}
+
+// killSessionLocked kills a session's process and removes it entirely.
+// Used only for pool shrink (tryKillTokens) and daemon shutdown —
+// normal offload uses /clear to recycle the process.
+func (m *Manager) killSessionLocked(s *Session) {
+	prevStatus := s.Status
+	log.Printf("[kill] session %s: killing pid %d (pool shrink)", s.ID, s.PID)
+
+	if pipe := m.pipes[s.ID]; pipe != nil {
+		pipe.Close()
+		delete(m.pipes, s.ID)
+	}
+
+	if proc := m.procs[s.ID]; proc != nil {
+		proc.Kill()
+		proc.Close()
+		delete(m.procs, s.ID)
+		delete(m.pidToSID, s.PID)
+	}
+
+	delete(m.attachTyping, s.ID)
+	delete(m.sessions, s.ID)
+	m.broadcastStatus(s, prevStatus)
 }
 
 // maintainFreshSlots proactively offloads idle sessions to keep at least
@@ -837,13 +1008,8 @@ func (m *Manager) maintainFreshSlots() {
 
 		log.Printf("[keep-fresh] offloading session %s to maintain %d fresh slots (currently %d)", best.ID, target, fresh)
 		m.offloadSessionLocked(best)
-
-		// Spawn a fresh pre-warmed replacement
-		ns := m.newSession("")
-		ns.Status = StatusFresh
-		ns.PreWarmed = true
-		m.sessions[ns.ID] = ns
-		m.spawnSession(ns, false)
+		// No spawn needed — offloadSessionLocked creates a pre-warmed session
+		// from the recycled process (SPEC: process reuse via /clear).
 		m.savePoolState()
 	}
 }
