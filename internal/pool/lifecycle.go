@@ -172,7 +172,7 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 		m.pidToSID[proc.PID()] = pw.ID
 		log.Printf("[offload] session %s: recycled pid %d into pre-warmed session %s", s.ID, proc.PID(), pw.ID)
 
-		m.sendClear(pw, proc)
+		m.sendClear(pw, proc, 200*time.Millisecond)
 		m.startWatchers(pw, proc)
 	}
 }
@@ -180,19 +180,20 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 // sendClear sends /clear to a process to reset its Claude context.
 // The process goes through a fresh startup cycle (SessionStart → idle signal).
 // Must be called with m.mu held. Actual I/O happens in a goroutine.
-func (m *Manager) sendClear(s *Session, proc *ptyPkg.Process) {
+func (m *Manager) sendClear(s *Session, proc *ptyPkg.Process, delay time.Duration) {
 	sid := s.ID
 	done := m.done
 	go func() {
 		select {
 		case <-done:
 			return
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(delay):
 		}
 
 		if proc.Exited() {
 			return
 		}
+
 		proc.WriteString("\x1b")
 		time.Sleep(100 * time.Millisecond)
 		proc.WriteString("\x15") // Ctrl-U
@@ -345,15 +346,19 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 				m.mu.Unlock()
 				continue
 			}
-			os.Remove(signalPath)
-			log.Printf("[idle-watch] session %s: read signal file (pid=%d): %s", sessionID, pid, strings.TrimSpace(string(data)))
 
+			// Check session still exists and is live BEFORE removing the signal.
+			// If the session was deleted or offloaded, leave the signal for
+			// the new process owner's watcher.
 			s = m.sessions[sessionID]
-			if s == nil {
-				log.Printf("[idle-watch] session %s: gone, stopping watcher", sessionID)
+			if s == nil || !s.IsLive() {
+				log.Printf("[idle-watch] session %s: no longer live, leaving signal for new owner", sessionID)
 				m.mu.Unlock()
 				return
 			}
+
+			os.Remove(signalPath)
+			log.Printf("[idle-watch] session %s: read signal file (pid=%d): %s", sessionID, pid, strings.TrimSpace(string(data)))
 
 			// Parse signal JSON for cwd and transcript
 			var sig map[string]any
