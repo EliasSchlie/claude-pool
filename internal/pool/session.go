@@ -53,6 +53,12 @@ type Session struct {
 	PendingPrompt string
 	PendingForce  bool
 
+	// Internal: multi-step clear workflow (/clear → /update-plugins → /clear).
+	// When Clearing is true, the idle watcher delivers the next ClearQueue
+	// entry before checking PendingPrompt. Cleared when the queue is drained.
+	Clearing   bool
+	ClearQueue []string
+
 	// Internal: spawn retry tracking
 	SpawnAttempts int // consecutive spawn failures (reset on success)
 

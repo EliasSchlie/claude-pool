@@ -131,6 +131,24 @@ func (m *Manager) spawnSession(s *Session, resume bool) {
 	go m.watchIdleSignal(s.ID, proc.PID())
 }
 
+// --- Clear workflow ---
+
+// startClearSequence initiates the multi-step clear workflow on an idle session:
+// /clear → /update-plugins → /clear. The first /clear resets context, /update-plugins
+// refreshes hooks and skills, and the final /clear removes the update conversation.
+// The remaining steps are queued in ClearQueue and delivered by watchIdleSignal.
+// Must be called with m.mu held. Session must be idle.
+func (m *Manager) startClearSequence(s *Session) {
+	prevStatus := s.Status
+	s.Clearing = true
+	s.ClearQueue = []string{"/update-plugins", "/clear"}
+	s.Status = StatusProcessing
+	log.Printf("[clear] session %s: starting clear sequence (pid=%d)", s.ID, s.PID)
+	m.broadcastStatus(s, prevStatus)
+	m.clearIdleSignals(s.PID)
+	m.deliverPrompt(s, "/clear")
+}
+
 // --- Offload & Archive ---
 
 func (m *Manager) offloadSessionLocked(s *Session) {
@@ -156,6 +174,8 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 	s.PID = 0
 	s.Pinned = false
 	s.PendingInput = ""
+	s.Clearing = false
+	s.ClearQueue = nil
 	delete(m.attachTyping, s.ID)
 	m.broadcastStatus(s, prevStatus)
 }
@@ -335,14 +355,35 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 			// Fresh → Idle transitions. If the session is Processing, a startup
 			// signal is stale (arrived after handleAttachInput set Processing)
 			// and must not cause a false Processing → Idle transition.
+			// Exception: sessions in the clear workflow expect session-clear
+			// signals as legitimate completion signals for each /clear step.
 			trigger, _ := sig["trigger"].(string)
-			if s.Status == StatusProcessing && (trigger == "session-start" || trigger == "session-clear") {
+			if s.Status == StatusProcessing && !s.Clearing && (trigger == "session-start" || trigger == "session-clear") {
 				log.Printf("[idle-watch] session %s: ignoring stale %s signal (status=%s)", sessionID, trigger, s.Status)
 				m.mu.Unlock()
 				continue
 			}
 
 			if s.Status == StatusFresh || s.Status == StatusProcessing {
+				// Process clear queue before pending prompts — the clear
+				// workflow (/clear → /update-plugins → /clear) must finish
+				// before the session is available for user prompts.
+				if s.Clearing {
+					if len(s.ClearQueue) > 0 {
+						next := s.ClearQueue[0]
+						s.ClearQueue = s.ClearQueue[1:]
+						prevStatus := s.Status
+						s.Status = StatusProcessing
+						log.Printf("[idle-watch] session %s: clear queue step %q (%d remaining)", sessionID, next, len(s.ClearQueue))
+						m.broadcastStatus(s, prevStatus)
+						m.deliverPrompt(s, next)
+						m.mu.Unlock()
+						continue
+					}
+					s.Clearing = false
+					log.Printf("[idle-watch] session %s: clear workflow complete", sessionID)
+				}
+
 				// Deliver any pending prompt immediately — avoids a transient
 				// idle state that confuses wait-without-sessionId.
 				if s.PendingPrompt != "" {
@@ -835,24 +876,24 @@ func (m *Manager) maintainFreshSlots() {
 			return
 		}
 
-		log.Printf("[keep-fresh] offloading session %s to maintain %d fresh slots (currently %d)", best.ID, target, fresh)
-		m.offloadSessionLocked(best)
-
-		// Spawn a fresh pre-warmed replacement
-		ns := m.newSession("")
-		ns.Status = StatusFresh
-		ns.PreWarmed = true
-		m.sessions[ns.ID] = ns
-		m.spawnSession(ns, false)
+		log.Printf("[keep-fresh] clearing session %s to maintain %d fresh slots (currently %d)", best.ID, target, fresh)
+		best.PreWarmed = true
+		best.ParentID = ""
+		best.Metadata = SessionMetadata{}
+		m.startClearSequence(best)
 		m.savePoolState()
+		// Clear is async — don't loop. The session will become idle
+		// after the clear workflow completes, triggering another check.
+		return
 	}
 }
 
-// countFreshSlots returns the number of pre-warmed sessions (fresh or idle+prewarmed).
+// countFreshSlots returns the number of pre-warmed sessions (fresh, idle+prewarmed,
+// or currently being cleared into a fresh slot).
 func (m *Manager) countFreshSlots() int {
 	count := 0
 	for _, s := range m.sessions {
-		if s.PreWarmed && (s.Status == StatusFresh || s.Status == StatusIdle) {
+		if s.PreWarmed && (s.Status == StatusFresh || s.Status == StatusIdle || s.Clearing) {
 			count++
 		}
 	}
