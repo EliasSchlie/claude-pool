@@ -419,29 +419,19 @@ func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 		m.savePoolState()
 		m.mu.Unlock()
 
-		// Wait for any in-flight prompt delivery to finish before
-		// sending Ctrl-C — otherwise the old prompt's Enter keystroke
-		// arrives after Ctrl-C, starting the old command.
-		m.awaitDelivery(sid)
-
-		m.mu.Lock()
-		proc := m.procs[sid]
-		if proc != nil {
-			proc.WriteString("\x03")
-		}
-		m.mu.Unlock()
-
-		// Give Claude time to process the Ctrl-C: cancel the current
-		// task, write "[Request interrupted by user]", and return to
-		// its prompt. Then deliver the new prompt directly — don't
-		// rely on Stop hook (may not fire reliably for shell builtins).
-		time.Sleep(3 * time.Second)
+		// Stop then deliver: Ctrl-C → wait for idle → deliver new prompt.
+		m.stopProcessingSession(sid, 30*time.Second)
 
 		m.mu.Lock()
 		s = m.sessions[sid]
-		if s != nil {
-			m.deliverPrompt(s, prompt)
+		if s == nil || !s.IsLive() {
+			m.mu.Unlock()
+			return api.ErrorResponse(id, "session died during force followup")
 		}
+		s.Status = StatusProcessing
+		s.LastUsedAt = time.Now()
+		m.deliverPrompt(s, prompt)
+		m.broadcastStatus(s, StatusIdle)
 		m.mu.Unlock()
 
 		return api.Response(id, "started", api.Msg{
@@ -852,15 +842,16 @@ func (m *Manager) handleArchive(id any, req api.Msg) api.Msg {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	s := m.resolveSession(sessionID)
 	if s == nil {
+		m.mu.Unlock()
 		return api.ErrorResponse(id, "session not found: "+sessionID)
 	}
 
 	if s.Status == StatusArchived {
 		log.Printf("[archive] session %s: already archived", s.ID)
+		m.mu.Unlock()
 		return api.OkResponse(id)
 	}
 
@@ -870,6 +861,7 @@ func (m *Manager) handleArchive(id any, req api.Msg) api.Msg {
 		for _, other := range m.sessions {
 			if other.ParentID == s.ID && other.Status != StatusArchived {
 				log.Printf("[archive] session %s: rejected, has unarchived child %s", s.ID, other.ID)
+				m.mu.Unlock()
 				return api.ErrorResponse(id, "session has unarchived children; use recursive: true")
 			}
 		}
@@ -877,8 +869,24 @@ func (m *Manager) handleArchive(id any, req api.Msg) api.Msg {
 		m.archiveDescendants(s.ID)
 	}
 
+	// If processing, stop first (Ctrl-C → wait for idle) before offloading.
+	// /clear only works on an idle Claude — can't send it while processing.
+	if s.Status == StatusProcessing {
+		log.Printf("[archive] session %s: stopping processing session (pid=%d)", s.ID, s.PID)
+		sid := s.ID
+		m.mu.Unlock()
+		m.stopProcessingSession(sid, 30*time.Second)
+		m.mu.Lock()
+		s = m.sessions[sid]
+		if s == nil {
+			m.mu.Unlock()
+			return api.ErrorResponse(id, "session died during archive stop")
+		}
+	}
+
 	m.archiveSessionLocked(s)
 	m.savePoolState()
+	m.mu.Unlock()
 	return api.OkResponse(id)
 }
 
@@ -1013,6 +1021,13 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 		m.sessions[s.ID] = s
 		log.Printf("[pin] creating new pinned session %s (parent=%s duration=%.0fs)", s.ID, parentID, duration)
 
+		// Try to find a fresh slot, evicting if necessary
+		if m.findFreshSlot() == nil {
+			if evicted := m.findEvictableSession(); evicted != nil {
+				log.Printf("[pin] session %s: evicting idle session %s to free slot", s.ID, evicted.ID)
+				m.offloadSessionLocked(evicted)
+			}
+		}
 		if fresh := m.findFreshSlot(); fresh != nil {
 			log.Printf("[pin] session %s: taking over slot from %s (status=%s pid=%d)", s.ID, fresh.ID, fresh.Status, fresh.PID)
 			proc := m.transferProcess(fresh, s)
@@ -1026,11 +1041,6 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 				m.startWatchers(s, proc)
 			}
 			delete(m.sessions, fresh.ID)
-		} else if evicted := m.findEvictableSession(); evicted != nil {
-			log.Printf("[pin] session %s: evicting idle session %s to free slot", s.ID, evicted.ID)
-			m.offloadSessionLocked(evicted)
-			s.Status = StatusFresh
-			m.spawnSession(s, false)
 		} else {
 			log.Printf("[pin] session %s: no slots available, queuing at front", s.ID)
 			s.Status = StatusQueued

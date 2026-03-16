@@ -76,6 +76,7 @@ test prompts must use relative subdirectories.
 | `attach_test.go` | 2 | Attach pipe, pendingInput, keystroke/submit, eviction closes pipe, re-attach, multiple simultaneous clients, attach dimensions, pty-resize, promptless attach |
 | `subscribe_test.go` | 2 | Event stream, filters, re-subscribe, updated events |
 | `keep_fresh_test.go` | 3 | Proactive offloading to maintain fresh slots, pin protection, keepFresh=0 disables, config update triggers maintenance |
+| `process_reuse_test.go` | 1, 2 | Slot processes never killed/respawned — PID stability across eviction and resume (spec: "never spawns throwaway processes") |
 | `multi_pool_test.go` | 1+1 | Two pools in shared registry, session isolation, concurrent ops, destroy isolation (invariant #1) |
 
 Shared infrastructure:

@@ -79,7 +79,8 @@ func (m *Manager) HandleDisconnect(conn net.Conn) {
 	m.hub.RemoveByConn(conn)
 }
 
-// Shutdown performs cleanup on daemon exit.
+// Shutdown performs cleanup on daemon exit. Kills all processes —
+// this is the one place where process killing is always correct.
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -87,7 +88,7 @@ func (m *Manager) Shutdown() {
 		pipe.Close()
 	}
 	for sid, proc := range m.procs {
-		log.Printf("killing session %s (PID %d)", sid, proc.PID())
+		log.Printf("[shutdown] killing session %s (PID %d)", sid, proc.PID())
 		proc.Kill()
 		proc.Close()
 	}
