@@ -9,9 +9,18 @@ import (
 
 // Config holds pool configuration (persisted as config.json).
 type Config struct {
-	Flags string `json:"flags,omitempty"`
-	Size  int    `json:"size,omitempty"`
-	Dir   string `json:"dir,omitempty"` // Session spawn directory (defaults to pool dir)
+	Flags     string `json:"flags,omitempty"`
+	Size      int    `json:"size,omitempty"`
+	Dir       string `json:"dir,omitempty"`       // Session spawn directory (defaults to pool dir)
+	KeepFresh *int   `json:"keepFresh,omitempty"` // Target fresh slot count (nil = use default 1)
+}
+
+// KeepFreshVal returns the effective keepFresh value (default: 1).
+func (c Config) KeepFreshVal() int {
+	if c.KeepFresh != nil {
+		return *c.KeepFresh
+	}
+	return 1
 }
 
 // ConfigManager handles reading/writing config.json with a mutex.
@@ -92,6 +101,21 @@ func (cm *ConfigManager) Update(update map[string]any) (Config, error) {
 	}
 	if v, ok := update["dir"].(string); ok {
 		cfg.Dir = v
+	}
+	if v, ok := update["keepFresh"]; ok {
+		var n int
+		switch val := v.(type) {
+		case float64:
+			n = int(val)
+		case int:
+			n = val
+		default:
+			return Config{}, fmt.Errorf("keepFresh must be a number")
+		}
+		if n < 0 {
+			return Config{}, fmt.Errorf("keepFresh must be >= 0")
+		}
+		cfg.KeepFresh = &n
 	}
 
 	if err := cm.saveLocked(cfg); err != nil {

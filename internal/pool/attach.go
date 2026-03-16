@@ -38,6 +38,7 @@ func newAttachPipe(sessionID, socketDir string, proc *ptyPkg.Process) (*attachPi
 	}
 	if err := os.Chmod(socketPath, 0600); err != nil {
 		ln.Close()
+		os.Remove(socketPath)
 		return nil, err
 	}
 

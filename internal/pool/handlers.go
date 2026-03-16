@@ -33,6 +33,14 @@ func (m *Manager) handleConfig(id any, req api.Msg) api.Msg {
 		if err != nil {
 			return api.ErrorResponse(id, "config update failed: "+err.Error())
 		}
+		// If keepFresh was updated, trigger fresh slot maintenance
+		if _, ok := setMap["keepFresh"]; ok {
+			m.mu.Lock()
+			if m.initialized {
+				m.maintainFreshSlots()
+			}
+			m.mu.Unlock()
+		}
 		return api.ConfigResponse(id, configToMsg(cfg))
 	}
 
@@ -130,6 +138,7 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 	log.Printf("[init] pool initialized: %d sessions total", restored+fresh)
 	m.savePoolState()
 	m.startTypingPoller()
+	m.startMaintenanceLoop()
 
 	// SPEC: "Pool state after initialization (same as health)."
 	return m.buildHealthResponse(id)
@@ -160,6 +169,12 @@ func (m *Manager) buildHealthResponse(id any) api.Msg {
 		status := s.ExternalStatus()
 		counts[status]++
 
+		// Track fresh pre-warmed slots separately for keepFresh monitoring.
+		// Includes both StatusFresh (starting) and PreWarmed+Idle (ready, unclaimed).
+		if s.PreWarmed && (s.Status == StatusFresh || s.Status == StatusIdle) {
+			counts["fresh"]++
+		}
+
 		hs := api.Msg{
 			"sessionId": s.ID,
 			"status":    status,
@@ -187,15 +202,12 @@ func (m *Manager) buildHealthResponse(id any) api.Msg {
 
 func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 	prompt, _ := req["prompt"].(string)
-	if prompt == "" {
-		return api.ErrorResponse(id, "prompt is required")
-	}
 	parentID := parentFromReq(req)
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	if !m.initialized {
+		m.mu.Unlock()
 		return api.ErrorResponse(id, "pool not initialized")
 	}
 
@@ -206,6 +218,14 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 	}
 	m.sessions[s.ID] = s
 	log.Printf("[start] created session %s (parent=%s, prompt=%d chars, name=%q)", s.ID, parentID, len(prompt), s.Metadata.Name)
+
+	// Promptless start: claim a slot and leave the session idle (SPEC).
+	// If the slot is still starting (fresh), block until ready so the
+	// caller gets an idle session with a discovered ClaudeUUID.
+	if prompt == "" {
+		m.mu.Unlock()
+		return m.handleStartPromptless(id, s)
+	}
 
 	// Try to claim a fresh/idle slot
 	if fresh := m.findFreshSlot(); fresh != nil {
@@ -235,6 +255,7 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 			"sessionId": s.ID, "status": StatusProcessing, "parent": s.ParentID,
 		})
 		m.savePoolState()
+		m.mu.Unlock()
 		return api.Response(id, "started", api.Msg{
 			"sessionId": s.ID,
 			"status":    StatusProcessing,
@@ -254,9 +275,72 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 	m.tryDequeueWithEviction(s, "")
 	m.savePoolState()
 
+	resp := api.Response(id, "started", api.Msg{
+		"sessionId": s.ID,
+		"status":    s.ExternalStatus(),
+	})
+	m.mu.Unlock()
+	return resp
+}
+
+// handleStartPromptless creates a session without a prompt — claims a slot and
+// leaves it idle. Blocks until the session is ready if the slot was still starting.
+// Must be called WITHOUT m.mu held.
+func (m *Manager) handleStartPromptless(id any, s *Session) api.Msg {
+	m.mu.Lock()
+
+	if fresh := m.findFreshSlot(); fresh != nil {
+		proc := m.transferProcess(fresh, s)
+		wasFresh := fresh.Status == StatusFresh
+		delete(m.sessions, fresh.ID)
+
+		if wasFresh {
+			s.Status = StatusFresh
+		} else {
+			s.Status = StatusIdle
+		}
+		m.clearIdleSignals(s.PID)
+		m.startWatchers(s, proc)
+		m.broadcastEvent(api.Msg{
+			"type": "event", "event": "created",
+			"sessionId": s.ID, "status": s.ExternalStatus(), "parent": s.ParentID,
+		})
+		m.savePoolState()
+
+		if wasFresh {
+			sid := s.ID
+			m.mu.Unlock()
+			return m.waitForSessionReady(id, sid, 60*time.Second)
+		}
+		m.mu.Unlock()
+		return api.Response(id, "started", api.Msg{
+			"sessionId": s.ID,
+			"status":    StatusIdle,
+		})
+	}
+
+	// No free slot — queue without prompt
+	s.Status = StatusQueued
+	m.queue = append(m.queue, s)
+	m.broadcastEvent(api.Msg{
+		"type": "event", "event": "created",
+		"sessionId": s.ID, "status": s.Status, "parent": s.ParentID,
+	})
+	m.tryDequeueWithEviction(s, "")
+	m.savePoolState()
+
+	// If dequeued into a slot (status changed from queued), wait for ready
+	if s.Status != StatusQueued {
+		sid := s.ID
+		m.mu.Unlock()
+		return m.waitForSessionReady(id, sid, 60*time.Second)
+	}
+
+	// Still queued — return immediately with queued status
+	m.mu.Unlock()
 	return api.Response(id, "started", api.Msg{
 		"sessionId": s.ID,
-		"status":    s.Status,
+		"status":    s.ExternalStatus(),
 	})
 }
 
@@ -697,7 +781,7 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 		if s.Status == StatusArchived && !showArchived {
 			continue
 		}
-		if statusFilter != nil && !statusFilter[s.Status] {
+		if statusFilter != nil && !statusFilter[s.ExternalStatus()] {
 			continue
 		}
 
@@ -1268,9 +1352,12 @@ func (m *Manager) handleAttach(id any, req api.Msg) api.Msg {
 	// Reuse existing pipe if still open
 	if pipe, ok := m.pipes[s.ID]; ok {
 		log.Printf("[attach] session %s: reusing existing pipe at %s", s.ID, pipe.socketPath)
-		return api.Response(id, "attached", api.Msg{
-			"socketPath": pipe.socketPath,
-		})
+		resp := api.Msg{"socketPath": pipe.socketPath}
+		if cols, rows, err := proc.GetSize(); err == nil {
+			resp["cols"] = float64(cols)
+			resp["rows"] = float64(rows)
+		}
+		return api.Response(id, "attached", resp)
 	}
 
 	pipe, err := newAttachPipe(s.ID, m.paths.Root, proc)
@@ -1286,9 +1373,51 @@ func (m *Manager) handleAttach(id any, req api.Msg) api.Msg {
 
 	m.pipes[s.ID] = pipe
 	log.Printf("[attach] session %s: pipe created at %s", s.ID, pipe.socketPath)
-	return api.Response(id, "attached", api.Msg{
-		"socketPath": pipe.socketPath,
-	})
+	resp := api.Msg{"socketPath": pipe.socketPath}
+	if cols, rows, err := proc.GetSize(); err == nil {
+		resp["cols"] = float64(cols)
+		resp["rows"] = float64(rows)
+	}
+	return api.Response(id, "attached", resp)
+}
+
+// --- PTY Resize ---
+
+func (m *Manager) handlePtyResize(id any, req api.Msg) api.Msg {
+	sessionID, _ := req["sessionId"].(string)
+	if sessionID == "" {
+		return api.ErrorResponse(id, "sessionId is required")
+	}
+
+	cols, colsOk := req["cols"].(float64)
+	rows, rowsOk := req["rows"].(float64)
+	if !colsOk || !rowsOk {
+		return api.ErrorResponse(id, "cols and rows are required")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s := m.resolveSession(sessionID)
+	if s == nil {
+		return api.ErrorResponse(id, "session not found: "+sessionID)
+	}
+	if !s.IsLive() {
+		return api.ErrorResponse(id, "session is not live (status: "+s.ExternalStatus()+")")
+	}
+
+	proc := m.procs[s.ID]
+	if proc == nil {
+		return api.ErrorResponse(id, "no process for session")
+	}
+
+	if err := proc.SetSize(uint16(cols), uint16(rows)); err != nil {
+		log.Printf("[pty-resize] session %s: error: %v", s.ID, err)
+		return api.ErrorResponse(id, "resize failed: "+err.Error())
+	}
+
+	log.Printf("[pty-resize] session %s: %dx%d", s.ID, int(cols), int(rows))
+	return api.OkResponse(id)
 }
 
 // inputClass holds classified raw input bytes.

@@ -219,6 +219,20 @@ func (p *Process) Ptmx() *os.File {
 	return p.ptmx
 }
 
+// SetSize sets the PTY dimensions and sends SIGWINCH to the process.
+func (p *Process) SetSize(cols, rows uint16) error {
+	return pty.Setsize(p.ptmx, &pty.Winsize{Cols: cols, Rows: rows})
+}
+
+// GetSize returns the current PTY dimensions.
+func (p *Process) GetSize() (cols, rows uint16, err error) {
+	ws, err := pty.GetsizeFull(p.ptmx)
+	if err != nil {
+		return 0, 0, err
+	}
+	return ws.Cols, ws.Rows, nil
+}
+
 // RingBuffer is a simple fixed-size ring buffer.
 type RingBuffer struct {
 	mu   sync.Mutex

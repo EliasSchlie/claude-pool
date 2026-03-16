@@ -17,7 +17,9 @@ import (
 func (m *Manager) newSession(parentID string) *Session {
 	now := time.Now()
 	cwd := m.paths.Root
-	if cfg, err := m.config.Load(); err == nil && cfg.Dir != "" {
+	if cfg, err := m.config.Load(); err != nil {
+		log.Printf("[session] config load error (using defaults): %v", err)
+	} else if cfg.Dir != "" {
 		cwd = cfg.Dir
 	}
 	return &Session{
@@ -49,7 +51,10 @@ func (m *Manager) resolveSession(sessionID string) *Session {
 // --- Spawn ---
 
 func (m *Manager) spawnSession(s *Session, resume bool) {
-	cfg, _ := m.config.Load()
+	cfg, err := m.config.Load()
+	if err != nil {
+		log.Printf("[spawn] session %s: config load error (using defaults): %v", s.ID, err)
+	}
 	flags := cfg.Flags
 	cwd := cfg.Dir
 	if cwd == "" {
@@ -73,10 +78,20 @@ func (m *Manager) spawnSession(s *Session, resume bool) {
 
 	proc, err := ptyPkg.Spawn(opts)
 	if err != nil {
-		log.Printf("spawn error for session %s: %v", s.ID, err)
-		s.Status = StatusError
+		log.Printf("[spawn] error for session %s: %v", s.ID, err)
+		s.SpawnAttempts++
+		if s.SpawnAttempts >= maxSpawnAttempts {
+			log.Printf("[spawn] session %s: %d consecutive failures, marking error", s.ID, s.SpawnAttempts)
+			s.Status = StatusError
+			m.broadcastStatus(s, StatusFresh)
+		} else {
+			log.Printf("[spawn] session %s: attempt %d/%d failed, will retry on next dequeue", s.ID, s.SpawnAttempts, maxSpawnAttempts)
+			s.Status = StatusQueued
+			m.queue = append(m.queue, s)
+		}
 		return
 	}
+	s.SpawnAttempts = 0 // reset on success
 
 	s.PID = proc.PID()
 	s.Flags = flags
@@ -354,6 +369,9 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 
 				// Check if a queued session can claim this slot
 				m.serveQueueFromSlot(s)
+
+				// Maintain fresh slot target (SPEC: Fresh Slot Maintenance)
+				m.maintainFreshSlots()
 			} else {
 				log.Printf("[idle-watch] session %s: consumed stale signal (status=%s)", sessionID, s.Status)
 			}
@@ -593,33 +611,29 @@ func (m *Manager) tryDequeue() {
 }
 
 // serveQueueFromSlot takes a pre-warmed idle session and gives it to the first
-// queued session that has a pending prompt. Must be called with m.mu held.
+// queued session. Must be called with m.mu held.
 // Only pre-warmed sessions can be consumed this way — user sessions are preserved.
 func (m *Manager) serveQueueFromSlot(idle *Session) {
 	if len(m.queue) == 0 || !idle.PreWarmed {
 		return
 	}
 
-	// Find first queued session with a pending prompt
-	for i, queued := range m.queue {
-		if queued.PendingPrompt == "" {
-			continue
-		}
-		proc := m.transferProcess(idle, queued)
-		if proc == nil {
-			return
-		}
-		delete(m.sessions, idle.ID)
-		queued.Status = StatusProcessing
+	// Find first queued session (with or without prompt)
+	queued := m.queue[0]
+	proc := m.transferProcess(idle, queued)
+	if proc == nil {
+		return
+	}
+	delete(m.sessions, idle.ID)
+	m.queue = m.queue[1:]
 
+	if queued.PendingPrompt != "" {
+		queued.Status = StatusProcessing
 		prompt := queued.PendingPrompt
 		queued.PendingPrompt = ""
 		queued.PendingForce = false
 
-		// Remove from queue
-		m.queue = append(m.queue[:i], m.queue[i+1:]...)
-
-		log.Printf("[serve-queue] session %s claimed slot from %s (pid=%d)", queued.ID, idle.ID, queued.PID)
+		log.Printf("[serve-queue] session %s claimed slot from %s (pid=%d, prompt)", queued.ID, idle.ID, queued.PID)
 		m.clearIdleSignals(queued.PID)
 		m.deliverPrompt(queued, prompt)
 		m.startWatchers(queued, proc)
@@ -628,9 +642,19 @@ func (m *Manager) serveQueueFromSlot(idle *Session) {
 			"type": "event", "event": "status",
 			"sessionId": queued.ID, "status": StatusProcessing, "prevStatus": StatusQueued,
 		})
-		m.savePoolState()
-		return
+	} else {
+		// Promptless: session takes the slot and becomes idle
+		queued.Status = StatusIdle
+		log.Printf("[serve-queue] session %s claimed slot from %s (pid=%d, promptless)", queued.ID, idle.ID, queued.PID)
+		m.clearIdleSignals(queued.PID)
+		m.startWatchers(queued, proc)
+
+		m.broadcastEvent(api.Msg{
+			"type": "event", "event": "status",
+			"sessionId": queued.ID, "status": StatusIdle, "prevStatus": StatusQueued,
+		})
 	}
+	m.savePoolState()
 }
 
 // --- Process transfer helpers ---
@@ -759,6 +783,7 @@ func (m *Manager) tryReplaceDeadSessions() {
 		m.spawnSession(s, false)
 		liveCount++
 	}
+	m.savePoolState()
 }
 
 func (m *Manager) tryKillTokens() {
@@ -771,5 +796,118 @@ func (m *Manager) tryKillTokens() {
 		log.Printf("[kill-tokens] evicting session %s (tokens remaining=%d)", evicted.ID, m.killTokens-1)
 		m.offloadSessionLocked(evicted)
 		m.killTokens--
+	}
+}
+
+// maintainFreshSlots proactively offloads idle sessions to keep at least
+// keepFresh fresh slots available. Must be called with m.mu held.
+// SPEC: Fresh Slot Maintenance.
+func (m *Manager) maintainFreshSlots() {
+	cfg, err := m.config.Load()
+	if err != nil {
+		return
+	}
+	target := cfg.KeepFreshVal()
+	if target <= 0 {
+		return
+	}
+
+	for {
+		fresh := m.countFreshSlots()
+		if fresh >= target {
+			return
+		}
+
+		// Find an evictable idle user session (not pinned, not pre-warmed).
+		// Pre-warmed sessions are already fresh slots — offloading them
+		// would just cycle them without progress.
+		var best *Session
+		for _, s := range m.sessions {
+			if s.Status != StatusIdle || s.Pinned || s.PreWarmed {
+				continue
+			}
+			if best == nil || evictsBefore(s, best) {
+				best = s
+			}
+		}
+		if best == nil {
+			log.Printf("[keep-fresh] want %d fresh slots, have %d, but no evictable idle sessions", target, fresh)
+			return
+		}
+
+		log.Printf("[keep-fresh] offloading session %s to maintain %d fresh slots (currently %d)", best.ID, target, fresh)
+		m.offloadSessionLocked(best)
+
+		// Spawn a fresh pre-warmed replacement
+		ns := m.newSession("")
+		ns.Status = StatusFresh
+		ns.PreWarmed = true
+		m.sessions[ns.ID] = ns
+		m.spawnSession(ns, false)
+		m.savePoolState()
+	}
+}
+
+// countFreshSlots returns the number of pre-warmed sessions (fresh or idle+prewarmed).
+func (m *Manager) countFreshSlots() int {
+	count := 0
+	for _, s := range m.sessions {
+		if s.PreWarmed && (s.Status == StatusFresh || s.Status == StatusIdle) {
+			count++
+		}
+	}
+	return count
+}
+
+// startMaintenanceLoop launches a goroutine that periodically expires pins
+// and cleans up old archived sessions. SPEC: "Pin is time-limited" and
+// "Archived: Auto-cleaned after 30 days."
+func (m *Manager) startMaintenanceLoop() {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-m.done:
+				return
+			case <-ticker.C:
+				m.expirePins()
+				m.cleanupArchivedSessions()
+			}
+		}
+	}()
+}
+
+// expirePins unpins sessions whose PinExpiry has passed.
+func (m *Manager) expirePins() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	for _, s := range m.sessions {
+		if s.Pinned && !s.PinExpiry.IsZero() && now.After(s.PinExpiry) {
+			log.Printf("[pin-expiry] session %s: pin expired", s.ID)
+			s.Pinned = false
+			m.broadcastEvent(api.Msg{
+				"type": "event", "event": "updated",
+				"sessionId": s.ID, "changes": api.Msg{"pinned": false},
+			})
+		}
+	}
+}
+
+const archiveRetention = 30 * 24 * time.Hour
+
+// cleanupArchivedSessions removes archived sessions older than 30 days.
+func (m *Manager) cleanupArchivedSessions() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cutoff := time.Now().Add(-archiveRetention)
+	for id, s := range m.sessions {
+		if s.Status == StatusArchived && s.CreatedAt.Before(cutoff) {
+			log.Printf("[archive-cleanup] removing session %s (created %s)", id, s.CreatedAt.Format(time.RFC3339))
+			delete(m.sessions, id)
+		}
 	}
 }
