@@ -103,6 +103,7 @@ func (m *Manager) spawnSession(s *Session, resume bool) {
 
 	// Auto-accept workspace trust prompt if Claude asks.
 	// SessionStart hook handles idle signal — no manual signal needed.
+	sid := s.ID
 	go func() {
 		deadline := time.After(30 * time.Second)
 		ticker := time.NewTicker(500 * time.Millisecond)
@@ -111,6 +112,7 @@ func (m *Manager) spawnSession(s *Session, resume bool) {
 		for {
 			select {
 			case <-deadline:
+				log.Printf("[trust] session %s pid=%d: trust handler timed out (30s)", sid, proc.PID())
 				return
 			case <-m.done:
 				return
@@ -118,9 +120,15 @@ func (m *Manager) spawnSession(s *Session, resume bool) {
 				if proc.Exited() {
 					return
 				}
-				buf := strings.ToLower(stripANSI(string(proc.Buffer())))
+				raw := string(proc.Buffer())
+				buf := strings.ToLower(stripANSI(raw))
 				if strings.Contains(buf, "trust?") {
-					time.Sleep(200 * time.Millisecond)
+					log.Printf("[trust] session %s pid=%d: detected trust prompt, sending Enter", sid, proc.PID())
+					time.Sleep(500 * time.Millisecond)
+					// Send "1" to select option 1 ("Yes, I trust"), then Enter.
+					// Claude's TUI selection menu may not process bare Enter reliably.
+					proc.WriteString("1")
+					time.Sleep(100 * time.Millisecond)
 					proc.WriteString("\r")
 					return
 				}
