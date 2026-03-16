@@ -457,10 +457,15 @@ func doStart(c *conn, args []string, jsonMode bool) error {
 		}
 	}
 
-	// Auto-detect parent from CLAUDE_POOL_SESSION_ID if not explicitly set
+	// SPEC: "If omitted and the caller is a Claude Code instance, defaults to
+	// that session's Claude Code UUID."
+	// CLAUDE_CODE_SESSION_ID is set by Claude Code itself (any session).
+	// CLAUDE_POOL_SESSION_ID is set by the pool daemon (pool sessions only).
 	if _, hasParent := msg["parent"]; !hasParent {
-		if envParent := os.Getenv("CLAUDE_POOL_SESSION_ID"); envParent != "" {
-			msg["parent"] = envParent
+		if uuid := os.Getenv("CLAUDE_CODE_SESSION_ID"); uuid != "" {
+			msg["parent"] = uuid
+		} else if poolSID := os.Getenv("CLAUDE_POOL_SESSION_ID"); poolSID != "" {
+			msg["parent"] = poolSID
 		}
 	}
 
@@ -631,8 +636,10 @@ func doWait(c *conn, args []string, jsonMode bool) error {
 	}
 
 	if !hasSession && !hasParent {
-		if envParent := os.Getenv("CLAUDE_POOL_SESSION_ID"); envParent != "" {
-			msg["parent"] = envParent
+		if uuid := os.Getenv("CLAUDE_CODE_SESSION_ID"); uuid != "" {
+			msg["parent"] = uuid
+		} else if poolSID := os.Getenv("CLAUDE_POOL_SESSION_ID"); poolSID != "" {
+			msg["parent"] = poolSID
 		}
 	}
 
@@ -692,8 +699,11 @@ func doInfo(c *conn, args []string, jsonMode bool) error {
 func doLs(c *conn, args []string, jsonMode bool) error {
 	msg := map[string]any{"type": "ls"}
 
-	if envSession := os.Getenv("CLAUDE_POOL_SESSION_ID"); envSession != "" {
-		msg["callerId"] = envSession
+	// SPEC: ls auto-detection follows same rules as start --parent.
+	if uuid := os.Getenv("CLAUDE_CODE_SESSION_ID"); uuid != "" {
+		msg["callerId"] = uuid
+	} else if poolSID := os.Getenv("CLAUDE_POOL_SESSION_ID"); poolSID != "" {
+		msg["callerId"] = poolSID
 	}
 
 	for i := 0; i < len(args); i++ {

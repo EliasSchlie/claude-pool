@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 )
 
 // transcriptEntry pairs a parsed JSONL entry with its original line.
@@ -32,16 +31,6 @@ func (m *Manager) captureJSONL(s *Session, turns int, detail string) string {
 	lines := m.readTranscriptLines(s)
 	if len(lines) == 0 {
 		return ""
-	}
-
-	// After process recycling via /clear, Claude may keep the same session UUID,
-	// so the transcript contains entries from prior sessions. Filter to only
-	// entries created after this session started.
-	if !s.CreatedAt.IsZero() {
-		lines = filterLinesByTimestamp(lines, s.CreatedAt)
-		if len(lines) == 0 {
-			return ""
-		}
 	}
 
 	// Find start line for requested turn range by scanning from the end.
@@ -85,36 +74,6 @@ func findTurnStart(lines []string, turns int) int {
 		}
 	}
 	return 0 // fewer turns than requested — return everything
-}
-
-// filterLinesByTimestamp returns only lines whose timestamp is at or after cutoff.
-// Lines without a parseable timestamp are included (conservative: don't drop data).
-func filterLinesByTimestamp(lines []string, cutoff time.Time) []string {
-	result := make([]string, 0, len(lines))
-	for _, line := range lines {
-		var entry map[string]any
-		if json.Unmarshal([]byte(line), &entry) != nil {
-			result = append(result, line)
-			continue
-		}
-		ts, _ := entry["timestamp"].(string)
-		if ts == "" {
-			result = append(result, line)
-			continue
-		}
-		t, err := time.Parse(time.RFC3339Nano, ts)
-		if err != nil {
-			t, err = time.Parse(time.RFC3339, ts)
-		}
-		if err != nil {
-			result = append(result, line)
-			continue
-		}
-		if !t.Before(cutoff) {
-			result = append(result, line)
-		}
-	}
-	return result
 }
 
 // captureBuffer returns ANSI-stripped terminal output for the requested turns.
