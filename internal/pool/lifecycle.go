@@ -172,46 +172,22 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 		m.pidToSID[proc.PID()] = pw.ID
 		log.Printf("[offload] session %s: recycled pid %d into pre-warmed session %s", s.ID, proc.PID(), pw.ID)
 
-		m.sendClear(pw, proc, 200*time.Millisecond)
+		m.deliverPromptWithSettle(pw, "/clear", 200*time.Millisecond)
 		m.startWatchers(pw, proc)
 	}
 }
 
-// sendClear sends /clear to a process to reset its Claude context.
-// The process goes through a fresh startup cycle (SessionStart → idle signal).
-// Must be called with m.mu held. Actual I/O happens in a goroutine.
-func (m *Manager) sendClear(s *Session, proc *ptyPkg.Process, delay time.Duration) {
-	sid := s.ID
-	done := m.done
-	go func() {
-		select {
-		case <-done:
-			return
-		case <-time.After(delay):
-		}
-
-		if proc.Exited() {
-			return
-		}
-
-		proc.WriteString("\x1b")
-		time.Sleep(100 * time.Millisecond)
-		proc.WriteString("\x15") // Ctrl-U
-		time.Sleep(50 * time.Millisecond)
-		proc.WriteString("/clear\r")
-		log.Printf("[clear] session %s: sent /clear to pid %d", sid, proc.PID())
-	}()
-}
-
+// archiveSessionLocked archives a session. Must be called with m.mu held.
+// For processing sessions, handleArchive stops them first via Ctrl-C + wait.
+// archiveDescendants may call this on processing children — Ctrl-C is sent
+// as a courtesy but we can't wait for idle under the lock.
 func (m *Manager) archiveSessionLocked(s *Session) {
 	if s.IsLive() {
 		if s.Status == StatusProcessing {
-			log.Printf("[archive] session %s: interrupting processing session (pid=%d)", s.ID, s.PID)
 			if proc := m.procs[s.ID]; proc != nil {
+				log.Printf("[archive] session %s: sending Ctrl-C to processing session (pid=%d)", s.ID, s.PID)
 				proc.WriteString("\x03")
 			}
-			// offloadSessionLocked sends /clear which queues behind the
-			// Ctrl-C interrupt in the PTY — the process handles both in order.
 		}
 		log.Printf("[archive] session %s: offloading live session (status=%s)", s.ID, s.Status)
 		m.offloadSessionLocked(s)
@@ -307,20 +283,14 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 		case <-ticker.C:
 			m.mu.Lock()
 			s := m.sessions[sessionID]
-			if s == nil {
+			if s == nil || !s.IsLive() || s.PID != pid {
 				m.mu.Unlock()
 				return
 			}
-			if !s.IsLive() {
-				m.mu.Unlock()
-				return
-			}
+			needUUID := s.ClaudeUUID == ""
 			m.mu.Unlock()
 
 			// Check for Claude UUID from PID mapping (skip if already known)
-			m.mu.Lock()
-			needUUID := m.sessions[sessionID] != nil && m.sessions[sessionID].ClaudeUUID == ""
-			m.mu.Unlock()
 			if needUUID {
 				if data, err := os.ReadFile(pidMapPath); err == nil {
 					claudeUUID := strings.TrimSpace(string(data))
@@ -347,12 +317,17 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 				continue
 			}
 
-			// Check session still exists and is live BEFORE removing the signal.
-			// If the session was deleted or offloaded, leave the signal for
-			// the new process owner's watcher.
+			// Check session still exists, is live, AND still owns this PID
+			// BEFORE removing the signal. If the session was transferred to a
+			// different PID (offloaded → restored on another slot), this watcher
+			// is stale — leave the signal for the new PID owner's watcher.
 			s = m.sessions[sessionID]
-			if s == nil || !s.IsLive() {
-				log.Printf("[idle-watch] session %s: no longer live, leaving signal for new owner", sessionID)
+			if s == nil || !s.IsLive() || s.PID != pid {
+				sPID := 0
+				if s != nil {
+					sPID = s.PID
+				}
+				log.Printf("[idle-watch] session %s: stale watcher (watching pid=%d, session pid=%d), leaving signal", sessionID, pid, sPID)
 				m.mu.Unlock()
 				return
 			}
@@ -582,6 +557,32 @@ func (m *Manager) deliverPromptAsync(sessionID, prompt string) {
 	m.mu.Unlock()
 }
 
+// waitForSessionIdle waits until a session reaches StatusIdle.
+// Used by handleArchive to wait for Ctrl-C to complete before offloading.
+// Must be called WITHOUT m.mu held.
+func (m *Manager) waitForSessionIdle(sid string, timeout time.Duration) {
+	deadline := time.After(timeout)
+
+	m.mu.Lock()
+	for {
+		s := m.sessions[sid]
+		if s == nil || s.Status == StatusIdle || s.Status == StatusOffloaded || !s.IsLive() {
+			m.mu.Unlock()
+			return
+		}
+		ch := m.statusNotify
+		m.mu.Unlock()
+
+		select {
+		case <-deadline:
+			log.Printf("[archive] session %s: timed out waiting for idle", sid)
+			return
+		case <-ch:
+			m.mu.Lock()
+		}
+	}
+}
+
 // waitForSessionReady waits until a session transitions out of StatusFresh.
 // Must be called WITHOUT m.mu held. Returns an API response.
 func (m *Manager) waitForSessionReady(id any, sid string, timeout time.Duration) api.Msg {
@@ -676,73 +677,15 @@ func (m *Manager) tryDequeue() {
 	// Second pass: assign queued sessions to available fresh/idle pre-warmed slots.
 	// No process spawning — SPEC: "the pool never spawns throwaway processes."
 	for len(m.queue) > 0 {
-		fresh := m.findFreshSlot()
-		if fresh == nil {
+		slot := m.findFreshSlot()
+		if slot == nil {
 			break
 		}
-
 		queued := m.queue[0]
 		m.queue = m.queue[1:]
-
-		log.Printf("[dequeue] session %s claiming slot from pre-warmed %s (pid=%d, status=%s)",
-			queued.ID, fresh.ID, fresh.PID, fresh.Status)
-
-		// If this is a resume (offloaded session with ClaudeUUID), set up
-		// two-stage delivery: /resume first, then PendingPrompt.
-		if queued.ClaudeUUID != "" {
-			queued.PendingResume = queued.ClaudeUUID
-		}
-
-		proc := m.transferProcess(fresh, queued)
-		if proc == nil {
+		if !m.claimSlotForQueued(slot, queued) {
 			break
 		}
-		delete(m.sessions, fresh.ID)
-
-		m.clearIdleSignals(queued.PID)
-
-		if fresh.Status == StatusIdle {
-			if queued.PendingResume != "" {
-				// Slot is ready, send /resume immediately — don't wait for
-				// an idle signal (already consumed by the pre-warmed session).
-				uuid := queued.PendingResume
-				queued.PendingResume = ""
-				queued.Status = StatusProcessing
-				log.Printf("[dequeue] session %s: slot idle, delivering /resume %s", queued.ID, uuid)
-				m.deliverPrompt(queued, "/resume "+uuid)
-				m.startWatchers(queued, proc)
-				m.broadcastEvent(api.Msg{
-					"type": "event", "event": "status",
-					"sessionId": queued.ID, "status": StatusProcessing, "prevStatus": StatusQueued,
-				})
-			} else if queued.PendingPrompt != "" {
-				// Slot is ready, deliver prompt now
-				queued.Status = StatusProcessing
-				prompt := queued.PendingPrompt
-				queued.PendingPrompt = ""
-				queued.PendingForce = false
-				m.deliverPrompt(queued, prompt)
-				m.startWatchers(queued, proc)
-				m.broadcastEvent(api.Msg{
-					"type": "event", "event": "status",
-					"sessionId": queued.ID, "status": StatusProcessing, "prevStatus": StatusQueued,
-				})
-			} else {
-				// Promptless: session takes the slot idle
-				queued.Status = StatusIdle
-				m.startWatchers(queued, proc)
-				m.broadcastEvent(api.Msg{
-					"type": "event", "event": "status",
-					"sessionId": queued.ID, "status": StatusIdle, "prevStatus": StatusQueued,
-				})
-			}
-		} else {
-			// Slot still starting (/clear in progress) — wait for idle
-			// signal to deliver PendingResume then PendingPrompt.
-			queued.Status = StatusFresh
-			m.startWatchers(queued, proc)
-		}
-		m.savePoolState()
 	}
 }
 
@@ -753,44 +696,64 @@ func (m *Manager) serveQueueFromSlot(idle *Session) {
 	if len(m.queue) == 0 || !idle.PreWarmed {
 		return
 	}
-
-	// Find first queued session (with or without prompt)
 	queued := m.queue[0]
-	proc := m.transferProcess(idle, queued)
-	if proc == nil {
-		return
-	}
-	delete(m.sessions, idle.ID)
 	m.queue = m.queue[1:]
+	m.claimSlotForQueued(idle, queued)
+}
 
-	if queued.PendingPrompt != "" {
-		queued.Status = StatusProcessing
-		prompt := queued.PendingPrompt
-		queued.PendingPrompt = ""
-		queued.PendingForce = false
+// claimSlotForQueued transfers a pre-warmed slot's process to a queued session
+// and delivers any pending work (/resume, prompt, or nothing). Returns false
+// if the slot has no process. Must be called with m.mu held.
+func (m *Manager) claimSlotForQueued(slot, queued *Session) bool {
+	log.Printf("[claim] session %s claiming slot from %s (pid=%d, status=%s)",
+		queued.ID, slot.ID, slot.PID, slot.Status)
 
-		log.Printf("[serve-queue] session %s claimed slot from %s (pid=%d, prompt)", queued.ID, idle.ID, queued.PID)
-		m.clearIdleSignals(queued.PID)
-		m.deliverPrompt(queued, prompt)
-		m.startWatchers(queued, proc)
+	// Set up two-stage delivery for resume: /resume first, then PendingPrompt.
+	if queued.ClaudeUUID != "" {
+		queued.PendingResume = queued.ClaudeUUID
+	}
 
-		m.broadcastEvent(api.Msg{
-			"type": "event", "event": "status",
-			"sessionId": queued.ID, "status": StatusProcessing, "prevStatus": StatusQueued,
-		})
+	proc := m.transferProcess(slot, queued)
+	if proc == nil {
+		return false
+	}
+	delete(m.sessions, slot.ID)
+	m.clearIdleSignals(queued.PID)
+
+	if slot.Status == StatusIdle {
+		// Slot is ready — deliver immediately (idle signal already consumed).
+		if queued.PendingResume != "" {
+			uuid := queued.PendingResume
+			queued.PendingResume = ""
+			queued.Status = StatusProcessing
+			log.Printf("[claim] session %s: delivering /resume %s", queued.ID, uuid)
+			m.deliverPrompt(queued, "/resume "+uuid)
+		} else if queued.PendingPrompt != "" {
+			queued.Status = StatusProcessing
+			prompt := queued.PendingPrompt
+			queued.PendingPrompt = ""
+			queued.PendingForce = false
+			log.Printf("[claim] session %s: delivering prompt (%d chars)", queued.ID, len(prompt))
+			m.deliverPrompt(queued, prompt)
+		} else {
+			queued.Status = StatusIdle
+			log.Printf("[claim] session %s: claiming slot (promptless)", queued.ID)
+		}
 	} else {
-		// Promptless: session takes the slot and becomes idle
-		queued.Status = StatusIdle
-		log.Printf("[serve-queue] session %s claimed slot from %s (pid=%d, promptless)", queued.ID, idle.ID, queued.PID)
-		m.clearIdleSignals(queued.PID)
-		m.startWatchers(queued, proc)
+		// Slot still starting (/clear in progress) — wait for idle signal
+		// to deliver PendingResume then PendingPrompt.
+		queued.Status = StatusFresh
+	}
 
+	m.startWatchers(queued, proc)
+	if queued.Status != StatusFresh {
 		m.broadcastEvent(api.Msg{
 			"type": "event", "event": "status",
-			"sessionId": queued.ID, "status": StatusIdle, "prevStatus": StatusQueued,
+			"sessionId": queued.ID, "status": queued.Status, "prevStatus": StatusQueued,
 		})
 	}
 	m.savePoolState()
+	return true
 }
 
 // --- Process transfer helpers ---

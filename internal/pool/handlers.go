@@ -852,15 +852,16 @@ func (m *Manager) handleArchive(id any, req api.Msg) api.Msg {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	s := m.resolveSession(sessionID)
 	if s == nil {
+		m.mu.Unlock()
 		return api.ErrorResponse(id, "session not found: "+sessionID)
 	}
 
 	if s.Status == StatusArchived {
 		log.Printf("[archive] session %s: already archived", s.ID)
+		m.mu.Unlock()
 		return api.OkResponse(id)
 	}
 
@@ -870,6 +871,7 @@ func (m *Manager) handleArchive(id any, req api.Msg) api.Msg {
 		for _, other := range m.sessions {
 			if other.ParentID == s.ID && other.Status != StatusArchived {
 				log.Printf("[archive] session %s: rejected, has unarchived child %s", s.ID, other.ID)
+				m.mu.Unlock()
 				return api.ErrorResponse(id, "session has unarchived children; use recursive: true")
 			}
 		}
@@ -877,8 +879,35 @@ func (m *Manager) handleArchive(id any, req api.Msg) api.Msg {
 		m.archiveDescendants(s.ID)
 	}
 
+	// If processing, stop first (Ctrl-C → wait for idle) before offloading.
+	// /clear only works on an idle Claude — can't send it while processing.
+	if s.Status == StatusProcessing {
+		log.Printf("[archive] session %s: stopping processing session (pid=%d)", s.ID, s.PID)
+		sid := s.ID
+		m.mu.Unlock()
+
+		// Same logic as handleStop: await delivery, send Ctrl-C
+		m.awaitDelivery(sid)
+		m.mu.Lock()
+		if proc := m.procs[sid]; proc != nil {
+			proc.WriteString("\x03")
+		}
+		m.mu.Unlock()
+
+		// Wait for session to become idle (stop hook fires idle signal)
+		m.waitForSessionIdle(sid, 30*time.Second)
+
+		m.mu.Lock()
+		s = m.sessions[sid]
+		if s == nil {
+			m.mu.Unlock()
+			return api.ErrorResponse(id, "session died during archive stop")
+		}
+	}
+
 	m.archiveSessionLocked(s)
 	m.savePoolState()
+	m.mu.Unlock()
 	return api.OkResponse(id)
 }
 
@@ -1029,8 +1058,25 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 		} else if evicted := m.findEvictableSession(); evicted != nil {
 			log.Printf("[pin] session %s: evicting idle session %s to free slot", s.ID, evicted.ID)
 			m.offloadSessionLocked(evicted)
-			s.Status = StatusFresh
-			m.spawnSession(s, false)
+			// offload recycles the process into a pre-warmed slot — claim it
+			if fresh := m.findFreshSlot(); fresh != nil {
+				proc := m.transferProcess(fresh, s)
+				if fresh.Status == StatusIdle {
+					s.Status = StatusIdle
+				} else {
+					s.Status = StatusFresh
+				}
+				if proc != nil {
+					m.clearIdleSignals(s.PID)
+					m.startWatchers(s, proc)
+				}
+				delete(m.sessions, fresh.ID)
+			} else {
+				// Shouldn't happen — offload just created a fresh slot
+				log.Printf("[pin] session %s: no fresh slot after eviction (unexpected), queuing", s.ID)
+				s.Status = StatusQueued
+				m.queue = append([]*Session{s}, m.queue...)
+			}
 		} else {
 			log.Printf("[pin] session %s: no slots available, queuing at front", s.ID)
 			s.Status = StatusQueued
