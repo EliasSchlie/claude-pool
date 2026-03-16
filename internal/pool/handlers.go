@@ -614,16 +614,11 @@ func (m *Manager) handleStop(id any, req api.Msg) api.Msg {
 		sid := s.ID
 		m.mu.Unlock()
 
-		// Wait for any in-flight prompt delivery, then send Ctrl-C.
-		// Don't change status here — the Stop hook fires asynchronously
-		// (~7s delay for transcript verification), writes an idle signal,
-		// and watchIdleSignal handles the transition + queue serving.
-		m.awaitDelivery(sid)
-		m.mu.Lock()
-		if proc := m.procs[sid]; proc != nil {
-			proc.WriteString("\x03")
-		}
-		m.mu.Unlock()
+		// Ctrl-C → wait for idle. The Stop hook fires asynchronously but
+		// its deferred signal may not arrive if the transcript size changes
+		// during interruption processing. stopProcessingSession handles
+		// the full wait with a timeout fallback.
+		m.stopProcessingSession(sid, 30*time.Second)
 		return api.OkResponse(id)
 
 	default:

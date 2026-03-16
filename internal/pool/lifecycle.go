@@ -594,18 +594,41 @@ func (m *Manager) deliverPromptAsync(sessionID, prompt string) {
 }
 
 // stopProcessingSession sends Ctrl-C and waits for the session to become idle.
-// Used by handleArchive and handleFollowup (force) to stop a processing session
-// before further action. Must be called WITHOUT m.mu held.
+// Used by handleStop, handleArchive, and handleFollowup (force) to stop a
+// processing session before further action. Must be called WITHOUT m.mu held.
+//
+// The Stop hook writes an idle signal with a ~7s deferred verification.
+// If the signal doesn't arrive (transcript size changed during interruption
+// processing), a synthetic signal is written as fallback.
 func (m *Manager) stopProcessingSession(sid string, timeout time.Duration) {
 	m.awaitDelivery(sid)
 
 	m.mu.Lock()
+	pid := 0
 	if proc := m.procs[sid]; proc != nil {
 		proc.WriteString("\x03")
+		pid = proc.PID()
 	}
 	m.mu.Unlock()
 
-	m.waitForSessionIdle(sid, timeout)
+	// Wait for idle (Stop hook's deferred signal, ~7s).
+	// Use a shorter initial wait, then fall back to synthetic signal.
+	m.waitForSessionIdle(sid, 15*time.Second)
+
+	// If still not idle, write a synthetic signal as fallback.
+	// The Stop hook's transcript-size verification can fail if Claude
+	// wrote output after the Ctrl-C interruption.
+	m.mu.Lock()
+	s := m.sessions[sid]
+	if s != nil && s.Status == StatusProcessing && pid > 0 {
+		log.Printf("[stop] session %s: Stop hook signal not received after 15s, writing synthetic idle signal (pid=%d)", sid, pid)
+		m.mu.Unlock()
+		m.writeIdleSignal(pid, "stop-fallback")
+		// Wait for watchIdleSignal to consume the synthetic signal
+		m.waitForSessionIdle(sid, timeout-15*time.Second)
+	} else {
+		m.mu.Unlock()
+	}
 }
 
 // waitForSessionIdle waits until a session reaches StatusIdle.
@@ -665,6 +688,24 @@ func (m *Manager) waitForSessionReady(id any, sid string, timeout time.Duration)
 		case <-ch:
 			m.mu.Lock()
 		}
+	}
+}
+
+// writeIdleSignal writes a synthetic idle signal for cases where no hook fires
+// (e.g., after Ctrl-C when the Stop hook's transcript verification fails).
+func (m *Manager) writeIdleSignal(pid int, trigger string) {
+	signalPath := m.paths.IdleSignal(pid)
+	signal := map[string]any{
+		"cwd":        m.paths.Root,
+		"session_id": "",
+		"transcript": "",
+		"ts":         time.Now().Unix(),
+		"trigger":    trigger,
+	}
+	data, _ := json.Marshal(signal)
+	log.Printf("[idle-signal] writing synthetic idle signal for pid %d (trigger=%s)", pid, trigger)
+	if err := os.WriteFile(signalPath, append(data, '\n'), 0600); err != nil {
+		log.Printf("[idle-signal] error writing signal for pid %d: %v", pid, err)
 	}
 }
 
