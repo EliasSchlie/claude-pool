@@ -42,7 +42,7 @@ func TestMultiPool(t *testing.T) {
 			"--keep-fresh", "0",
 			"--flags", "--dangerously-skip-permissions --model haiku")
 		assertExitOK(t, result)
-		alpha.waitForIdleCount(1, 90*time.Second)
+		alpha.waitForSlotsReady(1, 90*time.Second)
 	})
 
 	t.Run("init beta", func(t *testing.T) {
@@ -51,7 +51,7 @@ func TestMultiPool(t *testing.T) {
 			"--keep-fresh", "0",
 			"--flags", "--dangerously-skip-permissions --model haiku")
 		assertExitOK(t, result)
-		beta.waitForIdleCount(1, 90*time.Second)
+		beta.waitForSlotsReady(1, 90*time.Second)
 	})
 
 	t.Run("pools lists both", func(t *testing.T) {

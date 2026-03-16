@@ -14,6 +14,7 @@ package integration
 //   3.  "keepFresh respects pins"
 //   4.  "keepFresh=0 disables proactive offloading"
 //   5.  "config update triggers fresh slot maintenance"
+//   6.  "processing sessions block keepFresh"
 
 import (
 	"fmt"
@@ -38,7 +39,7 @@ func TestKeepFresh(t *testing.T) {
 			"--flags", "--dangerously-skip-permissions --model haiku")
 		assertExitOK(t, result)
 
-		pool.waitForIdleCount(3, 90*time.Second)
+		pool.waitForSlotsReady(3, 90*time.Second)
 
 		// Verify config has keepFresh=1
 		resp := pool.runJSON("config")
@@ -80,10 +81,10 @@ func TestKeepFresh(t *testing.T) {
 
 		// Verify health shows 1 fresh slot
 		health := pool.getHealth()
-		counts, _ := health["counts"].(map[string]any)
-		if numVal(counts, "fresh") < 1 {
-			t.Fatalf("expected at least 1 fresh slot, got %v (counts: %v)",
-				numVal(counts, "fresh"), counts)
+		slots, _ := health["slots"].(map[string]any)
+		if numVal(slots, "fresh") < 1 {
+			t.Fatalf("expected at least 1 fresh slot, got %v (slots: %v)",
+				numVal(slots, "fresh"), slots)
 		}
 	})
 
@@ -106,8 +107,8 @@ func TestKeepFresh(t *testing.T) {
 		time.Sleep(5 * time.Second)
 
 		health := pool.getHealth()
-		counts, _ := health["counts"].(map[string]any)
-		idleAfter := numVal(counts, "idle")
+		slots, _ := health["slots"].(map[string]any)
+		idleAfter := numVal(slots, "idle")
 		if int(idleAfter) != idleBefore {
 			t.Fatalf("pinned idle sessions were offloaded: had %d, now have %v", idleBefore, idleAfter)
 		}
@@ -126,14 +127,7 @@ func TestKeepFresh(t *testing.T) {
 		pool.run("config", "--set", "keepFresh=0")
 
 		// Archive everything and start fresh
-		sessions := pool.listSessions()
-		for _, s := range sessions {
-			pool.run("archive", "--session", s.SessionID)
-		}
-		offloaded := pool.listSessions("--status", "offloaded")
-		for _, s := range offloaded {
-			pool.run("archive", "--session", s.SessionID)
-		}
+		pool.archiveAll()
 
 		// Start 3 sessions to fill all slots
 		var sids []string
@@ -149,28 +143,50 @@ func TestKeepFresh(t *testing.T) {
 		time.Sleep(5 * time.Second)
 
 		health := pool.getHealth()
-		counts, _ := health["counts"].(map[string]any)
-		assertNumVal(t, counts, "idle", 3)
-		assertNumVal(t, counts, "fresh", 0)
+		slots, _ := health["slots"].(map[string]any)
+		assertNumVal(t, slots, "idle", 3)
+		assertNumVal(t, slots, "fresh", 0)
 	})
 
 	t.Run("config update triggers fresh slot maintenance", func(t *testing.T) {
 		// Pool is full (3 idle, 0 fresh, keepFresh=0). Set keepFresh=1 — should trigger offload.
 		pool.run("config", "--set", "keepFresh=1")
 
-		deadline := time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			health := pool.getHealth()
-			counts, _ := health["counts"].(map[string]any)
-			if numVal(counts, "fresh") >= 1 {
-				return
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
+		pool.waitForSlotCondition("fresh>=1", func(slots Msg) bool {
+			return numVal(slots, "fresh") >= 1
+		}, 30*time.Second)
+	})
 
-		health := pool.getHealth()
-		counts, _ := health["counts"].(map[string]any)
-		t.Fatalf("expected keepFresh config update to trigger maintenance, fresh=%v (counts: %v)",
-			numVal(counts, "fresh"), counts)
+	t.Run("processing sessions block keepFresh", func(t *testing.T) {
+		// SPEC: "best-effort — if all loaded sessions are pinned or processing,
+		// the pool can't free anything."
+		pool.run("config", "--set", "keepFresh=0")
+
+		// Clean slate: archive everything, start 2 sessions
+		pool.archiveAll()
+
+		proc := pool.startSession("respond with exactly: kf-proc")
+		idle := pool.startSession("respond with exactly: kf-idle")
+
+		// Put one into processing
+		pool.run("followup", "--session", proc, "--prompt", "run the bash command: sleep 60")
+		pool.waitForStatus(proc, "processing", 15*time.Second)
+
+		// keepFresh=3 wants all slots fresh — can offload idle but NOT processing
+		pool.run("config", "--set", "keepFresh=3")
+		time.Sleep(5 * time.Second)
+
+		// idle session should be offloaded
+		infoIdle := pool.getSessionInfo(idle)
+		assertStatus(t, infoIdle, "offloaded")
+
+		// Processing session must survive
+		infoProc := pool.getSessionInfo(proc)
+		assertStatus(t, infoProc, "processing")
+
+		// Cleanup
+		pool.run("stop", "--session", proc)
+		pool.waitForStatus(proc, "idle", 15*time.Second)
+		pool.run("config", "--set", "keepFresh=1")
 	})
 }

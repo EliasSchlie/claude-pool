@@ -21,17 +21,18 @@ package integration
 //   5.  "capture buffer on offloaded errors"
 //   6.  "followup restores offloaded session"
 //   7.  "process death transitions to offloaded"
-//   8.  "archive idle session"
-//   9.  "stop on archived errors"
-//  10.  "archived session hidden from ls"
-//  11.  "capture JSONL on archived works"
-//  12.  "capture buffer on archived errors"
-//  13.  "followup on archived errors"
-//  14.  "unarchive restores to offloaded"
-//  15.  "unarchive on non-archived errors"
-//  16.  "archive stops active session first"
-//  17.  "archive is idempotent"
-//  18.  "archive queued session cancels and archives"
+//   8.  "archive idle session frees slot"
+//   9.  "archive offloaded session"
+//  10.  "stop on archived errors"
+//  11.  "archived session hidden from ls"
+//  12.  "capture JSONL on archived works"
+//  13.  "capture buffer on archived errors"
+//  14.  "followup on archived errors"
+//  15.  "unarchive restores to offloaded"
+//  16.  "unarchive on non-archived errors"
+//  17.  "archive stops active session first"
+//  18.  "archive is idempotent"
+//  19.  "archive queued session cancels and archives"
 
 import (
 	"testing"
@@ -127,7 +128,40 @@ func TestOffload(t *testing.T) {
 		pool.waitForStatus(s2, "offloaded", 15*time.Second)
 	})
 
-	t.Run("archive idle session", func(t *testing.T) {
+	t.Run("archive idle session frees slot", func(t *testing.T) {
+		// SPEC: "If the session is loaded (idle), it is offloaded first."
+		// s1 is idle (restored in step 6). Archiving should free its slot.
+		info := pool.getSessionInfo(s1)
+		assertStatus(t, info, "idle")
+		if info.PID <= 0 {
+			t.Fatalf("expected live PID for idle session, got %v", info.PID)
+		}
+
+		pool.run("archive", "--session", s1)
+
+		info = pool.getSessionInfo(s1)
+		assertStatus(t, info, "archived")
+		if info.PID != 0 {
+			t.Fatalf("archived session should have no PID, got %v", info.PID)
+		}
+
+		// Slot was freed — new session starts immediately (not queued)
+		r := pool.runJSON("start", "--prompt", "respond with exactly: slot-was-freed")
+		freed := strVal(r, "sessionId")
+		if strVal(r, "status") == "queued" {
+			t.Fatal("new session queued — slot was not freed by archiving idle session")
+		}
+		pool.waitForIdle(freed, 300*time.Second)
+
+		// Cleanup: restore s1 for later tests
+		pool.run("archive", "--session", freed)
+		pool.run("unarchive", "--session", s1)
+		pool.run("followup", "--session", s1, "--prompt", "respond with exactly: re-restored")
+		pool.waitForIdle(s1, 300*time.Second)
+	})
+
+	t.Run("archive offloaded session", func(t *testing.T) {
+		// s2 is offloaded (killed in "process death" step)
 		result := pool.run("archive", "--session", s2)
 		assertExitOK(t, result)
 

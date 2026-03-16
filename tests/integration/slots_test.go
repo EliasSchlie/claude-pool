@@ -23,6 +23,7 @@ package integration
 //  11.  "followup on queued errors"
 //  12.  "debug input sends raw bytes"
 //  13.  "debug capture reads slot buffer"
+//  14.  "all idle pinned forces queue"
 
 import (
 	"testing"
@@ -37,12 +38,15 @@ func TestSlots(t *testing.T) {
 	t.Run("start fills all slots", func(t *testing.T) {
 		r1 := pool.runJSON("start", "--prompt", "respond with exactly: slot1")
 		s1 = strVal(r1, "sessionId")
+		pool.waitForIdle(s1, 300*time.Second)
 
+		// SPEC eviction rule 1: fresh slot used before evicting idle sessions
 		r2 := pool.runJSON("start", "--prompt", "respond with exactly: slot2")
 		s2 = strVal(r2, "sessionId")
-
-		pool.waitForIdle(s1, 300*time.Second)
 		pool.waitForIdle(s2, 300*time.Second)
+
+		info1 := pool.getSessionInfo(s1)
+		assertStatus(t, info1, "idle") // fresh slot was used, s1 not evicted
 
 		health := pool.getHealth()
 		assertNumVal(t, health, "queueDepth", 0)
@@ -349,5 +353,36 @@ func TestSlots(t *testing.T) {
 		if result.Stdout == "" {
 			t.Fatal("expected non-empty slot buffer")
 		}
+	})
+
+	t.Run("all idle pinned forces queue", func(t *testing.T) {
+		// SPEC eviction rule 3: "If all idle sessions are pinned, the request
+		// queues until a slot frees up naturally."
+		idle := pool.idleSessionIDs(2)
+
+		pool.run("set", "--session", idle[0], "--pinned", "300")
+		pool.run("set", "--session", idle[1], "--pinned", "300")
+
+		resp := pool.runJSON("start", "--prompt", "respond with exactly: all-pinned")
+		queuedSid := strVal(resp, "sessionId")
+
+		if strVal(resp, "status") != "queued" {
+			t.Fatalf("expected queued when all idle are pinned, got %q", strVal(resp, "status"))
+		}
+
+		health := pool.getHealth()
+		assertNumVal(t, health, "queueDepth", 1)
+
+		// Both pinned sessions must survive
+		for _, id := range idle {
+			info := pool.getSessionInfo(id)
+			assertStatus(t, info, "idle")
+		}
+
+		// Unpin one → queued session gets its slot (evicts the now-unpinned session)
+		pool.run("set", "--session", idle[0], "--pinned", "false")
+		pool.waitForIdle(queuedSid, 300*time.Second)
+
+		pool.run("set", "--session", idle[1], "--pinned", "false")
 	})
 }

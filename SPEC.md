@@ -63,6 +63,19 @@ When a session's process dies, the session transitions to `offloaded` (not a sep
 
 When a session fails to load, the error is logged and loading is retried automatically. After repeated failures (implementation decides the threshold), the session is marked `error`. Error sessions are visible but cannot be loaded without explicit action (unarchive or implementation-specific reset).
 
+### Pool Object
+
+Returned by `health` and `init`. Describes the pool's current state as aggregate counts — no individual session list (use `ls` for that).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Pool name. |
+| `size` | integer | Current slot count. |
+| `queueDepth` | integer | Requests waiting for a slot. |
+| `slots` | object | Counts by slot state (sum = `size`): `fresh`, `spawning`, `resuming`, `clearing`, `idle`, `processing`, `crashed`. See Slot States. |
+| `sessions` | object | Counts by session state (all sessions in the pool): `queued`, `idle`, `processing`, `offloaded`, `archived`. See Session States. |
+| `config` | object | Current pool config (`flags`, `size`, `keepFresh`, plus any custom keys). |
+
 ### Output Capture
 
 Commands that return session output (`wait`, `capture`, `start --block`, `followup --block`) accept three optional parameters.
@@ -98,7 +111,7 @@ If the session is still processing or was stopped early, there might not be any 
 ---
 
 ## CLI (claude-pool)
- A
+
 The CLI must be a thin wrapper over the socket API to make it easy to create other types of clients that interact with pools (e.g. python package,...) later.
 
 These flags are available on every command:
@@ -177,10 +190,10 @@ These flags are available on every command:
   `--dir <path>` — Pool home directory (default: `~`).
   `--keep-fresh <n>` — Target number of fresh slots to maintain (see Fresh Slot Maintenance). Updates config if provided.
   `--no-restore` — Skip restoring previous sessions.
-  → Pool state after initialization (same as `health`).
+  → Pool object (see Pool Object).
 
 **health** — Pool status.
-  → `health`: object — Slot count, session states, queue depth.
+  → Pool object (see Pool Object).
 
 **resize** — Change slot count immediately and update config.
   `--size <n>` (required) — New slot count (minimum 1).
@@ -194,8 +207,8 @@ These flags are available on every command:
 
 **ping** — Health check.
 
-**pools** — List all known pools from the registry (`~/.claude-pool/pools.json`). Shows status (running/stopped) by checking if the daemon is reachable. Pool data persists after `destroy` — run `init` to restart.
-  → List of pool names, status, and config.
+**pools** — List all known pools from the registry (`~/.claude-pool/pools.json`). Checks if each daemon is reachable. Pool data persists after `destroy` — run `init` to restart.
+  → Array of `{name, status}` objects. `status` is `running` or `stopped`. Use `health` on a specific pool for detailed info.
 
 ### Debug
 
@@ -271,14 +284,38 @@ Setting `keepFresh` to 0 disables proactive offloading (only on-demand eviction)
 
 ### Slot States
 
-Slots are the physical resources that host sessions. Consumers never interact with slots directly (invariant #5).
+Slots are the physical resources that host sessions. Consumers never interact with slots directly (invariant #5). Health reports aggregate slot counts so operators can see resource utilization without exposing individual slot details.
 
 | State | Meaning |
 |-------|---------|
-| `fresh` | Pre-warmed Claude process, never prompted. Ready for immediate use. |
-| `loading` | Starting a new session or resuming an offloaded one. |
-| `live` | Hosting an active session (idle or processing). |
-| `error` | Crashed during startup or loading. Recycled automatically (killed, replaced with fresh). |
+| `fresh` | Cleared or never prompted Claude process. Ready for immediate use. |
+| `spawning` | Creating a new Claude process + PTY. Triggered by init, resize up, or crash recovery. |
+| `resuming` | Loading an offloaded session into the slot (`/resume`). Triggered by followup or pin on an offloaded session. |
+| `clearing` | Offloading the hosted session and resetting the process (`/clear`). Triggered by eviction, keepFresh maintenance, or archiving. |
+| `idle` | Hosting an idle session (finished processing, waiting for input). |
+| `processing` | Hosting a session that is actively working. |
+| `crashed` | Process died or failed to start. Recycled automatically (killed, respawned). |
+
+#### Slot State Transitions
+
+Every slot starts at `spawning`. Valid transitions:
+
+| From | To | Trigger |
+|------|----|---------|
+| `spawning` | `fresh` | Process started successfully |
+| `spawning` | `crashed` | Process failed to start |
+| `fresh` | `processing` | `start` with prompt (slot claimed, prompt sent) |
+| `fresh` | `idle` | `start` without prompt (slot claimed, no work) |
+| `fresh` | `resuming` | Offloaded session assigned to this slot |
+| `resuming` | `idle` | Session loaded successfully |
+| `resuming` | `crashed` | Process died during resume |
+| `idle` | `processing` | `followup` sends a prompt |
+| `idle` | `clearing` | Eviction, keepFresh maintenance, or archiving |
+| `processing` | `idle` | Claude finishes working |
+| `processing` | `crashed` | Process died while working |
+| `clearing` | `fresh` | Process reset complete |
+| `clearing` | `crashed` | Process died during clear |
+| `crashed` | `spawning` | Auto-recycle (kill, respawn) |
 
 ### Logging
 
