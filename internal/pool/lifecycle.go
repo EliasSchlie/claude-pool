@@ -377,6 +377,13 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 						log.Printf("[idle-watch] session %s: clear queue step %q (%d remaining)", sessionID, next, len(s.ClearQueue))
 						m.broadcastStatus(s, prevStatus)
 						m.deliverPrompt(s, next)
+						// Slash commands like /update-plugins don't trigger
+						// the Stop hook (they're internal, no AI processing).
+						// Poll the buffer for the prompt returning, then write
+						// a synthetic idle signal so the watcher can continue.
+						if strings.HasPrefix(next, "/") && next != "/clear" {
+							go m.awaitPromptAndSignal(sessionID, pid)
+						}
 						m.mu.Unlock()
 						continue
 					}
@@ -589,6 +596,43 @@ func (m *Manager) writeIdleSignal(pid int, trigger string) {
 	log.Printf("[idle-signal] writing synthetic idle signal for pid %d (trigger=%s)", pid, trigger)
 	if err := os.WriteFile(signalPath, append(data, '\n'), 0600); err != nil {
 		log.Printf("[idle-signal] error writing signal for pid %d: %v", pid, err)
+	}
+}
+
+// awaitPromptAndSignal polls the terminal buffer for the ❯ prompt to reappear
+// (indicating a slash command completed), then writes a synthetic idle signal.
+// Used for clear queue steps that don't trigger the Stop hook (e.g., /update-plugins).
+func (m *Manager) awaitPromptAndSignal(sessionID string, pid int) {
+	deadline := time.After(30 * time.Second)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	// Wait for delivery to finish first (prompt keystrokes need to be sent)
+	m.awaitDelivery(sessionID)
+
+	for {
+		select {
+		case <-m.done:
+			return
+		case <-deadline:
+			log.Printf("[clear] session %s: timed out waiting for prompt after slash command, writing synthetic signal", sessionID)
+			m.writeIdleSignal(pid, "clear-timeout")
+			return
+		case <-ticker.C:
+			m.mu.Lock()
+			proc := m.procs[sessionID]
+			if proc == nil || proc.Exited() {
+				m.mu.Unlock()
+				return
+			}
+			buf := string(proc.Buffer())
+			m.mu.Unlock()
+			if strings.Contains(buf, promptChar) {
+				log.Printf("[clear] session %s: prompt detected after slash command, writing synthetic signal", sessionID)
+				m.writeIdleSignal(pid, "clear-poll")
+				return
+			}
+		}
 	}
 }
 
