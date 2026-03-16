@@ -34,14 +34,18 @@ claude-pool-cli start                             # Start without prompt (idle s
 # Monitor and interact
 claude-pool-cli wait --session <id>               # Wait for session to become idle
 claude-pool-cli wait                              # Wait for any owned session
+claude-pool-cli wait --timeout 60000              # With timeout (default: 300000ms)
 claude-pool-cli capture --session <id>            # Get output immediately
 claude-pool-cli ls                                # List your sessions
+claude-pool-cli ls --status idle,processing       # Filter by state
+claude-pool-cli ls --archived                     # Include archived sessions
 claude-pool-cli ls --verbosity nested             # Show parent-child hierarchy
 claude-pool-cli info --session <id>               # Full session details
 
 # Follow-up and control
-claude-pool-cli followup --session <id> --prompt "prompt"  # Send to idle session
-claude-pool-cli stop --session <id>               # Interrupt processing session
+claude-pool-cli followup --session <id> --prompt "prompt"          # Send to idle session
+claude-pool-cli followup --session <id> --prompt "prompt" --block  # Send + wait for result
+claude-pool-cli stop --session <id>               # Interrupt or cancel queued session
 claude-pool-cli archive --session <id>            # Mark as done
 claude-pool-cli archive --session <id> --recursive  # Archive with descendants
 claude-pool-cli unarchive --session <id>          # Restore archived session
@@ -77,13 +81,9 @@ Commands that return output (`wait`, `capture`, `start --block`, `followup --blo
 | `--turns` | integer | `1` | How many turns back (`0` = all). |
 | `--detail` | `last`, `assistant`, `tools`, `raw` | `last` | What to include per turn (JSONL only). |
 
-## Pool Selection
+## Global Flags
 
-```bash
-claude-pool-cli --pool work start --prompt "..."  # Target a named pool
-claude-pool-cli --pool default ls                  # Default pool
-claude-pool-cli pools                              # List known pools
-```
+All commands accept `--pool <name>` (default: `default`) and `--json` for machine-readable output.
 
 ## Parent-Child Sessions
 
@@ -99,3 +99,7 @@ Sessions spawned from within a pool session automatically track their parent. `l
 | `offloaded` | Saved, not in a slot |
 | `error` | Repeatedly failed to load |
 | `archived` | Done, hidden from `ls` |
+
+## Troubleshooting
+
+For eviction tuning (`set` priority/pin) and debug commands (`debug slots`, `debug logs`, etc.), see [debug.md](debug.md).
