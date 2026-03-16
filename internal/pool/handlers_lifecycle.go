@@ -255,7 +255,10 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 				s.Status = StatusFresh
 			}
 			if proc != nil {
-				m.clearIdleSignals(s.PID)
+				// Only clear for idle slots — fresh slots' signals haven't fired yet
+				if fresh.Status == StatusIdle {
+					m.clearIdleSignals(s.PID)
+				}
 				m.startWatchers(s, proc)
 			}
 			delete(m.sessions, fresh.ID)

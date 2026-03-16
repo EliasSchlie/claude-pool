@@ -247,7 +247,12 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 			s.PendingPrompt = ""
 			m.deliverPrompt(s, prompt)
 		}
-		m.clearIdleSignals(s.PID)
+		// Only clear stale signals for idle slots (signal already consumed).
+		// For fresh slots, the session-start signal hasn't fired yet —
+		// clearing it would race with the hook and lose the signal.
+		if !wasFresh {
+			m.clearIdleSignals(s.PID)
+		}
 		m.startWatchers(s, proc)
 		m.broadcastEvent(api.Msg{
 			"type": "event", "event": "created",
@@ -297,8 +302,8 @@ func (m *Manager) handleStartPromptless(id any, s *Session) api.Msg {
 			s.Status = StatusFresh
 		} else {
 			s.Status = StatusIdle
+			m.clearIdleSignals(s.PID)
 		}
-		m.clearIdleSignals(s.PID)
 		m.startWatchers(s, proc)
 		m.broadcastEvent(api.Msg{
 			"type": "event", "event": "created",
