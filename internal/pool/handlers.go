@@ -768,6 +768,11 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 
 	results := make([]any, 0)
 	for _, s := range m.sessions {
+		// Pre-warmed sessions are slot infrastructure, not user sessions.
+		// Sessions don't exist until start creates them (SPEC invariant #5).
+		if s.PreWarmed {
+			continue
+		}
 		if s.Status == StatusArchived && !showArchived {
 			continue
 		}

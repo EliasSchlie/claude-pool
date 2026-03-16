@@ -69,12 +69,17 @@ func TestPool(t *testing.T) {
 
 		pool.waitForIdleCount(2, 90*time.Second)
 
-		sessions := pool.listSessions()
-		if len(sessions) < 2 {
-			t.Fatalf("expected at least 2 sessions, got %d", len(sessions))
-		}
-		s1 = sessions[0].SessionID
-		s2 = sessions[1].SessionID
+		// Pre-warmed slots are ready but no user sessions exist yet
+		assertSessionCount(t, pool.listSessions(), 0)
+
+		// Start real sessions (claims pre-warmed slots)
+		r1 := pool.runJSON("start", "--prompt", "respond with exactly: init-s1")
+		s1 = strVal(r1, "sessionId")
+		pool.waitForIdle(s1, 300*time.Second)
+
+		r2 := pool.runJSON("start", "--prompt", "respond with exactly: init-s2")
+		s2 = strVal(r2, "sessionId")
+		pool.waitForIdle(s2, 300*time.Second)
 	})
 
 	// Prevents: init response diverging from health response
