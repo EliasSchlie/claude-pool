@@ -578,7 +578,22 @@ func (m *Manager) handleStop(id any, req api.Msg) api.Msg {
 	log.Printf("[stop] session %s: status=%s pid=%d", s.ID, s.Status, s.PID)
 
 	switch s.Status {
-	case StatusIdle, StatusFresh:
+	case StatusFresh:
+		if s.PendingPrompt == "" {
+			m.mu.Unlock()
+			return api.ErrorResponse(id, "session is not processing or queued (status: "+s.ExternalStatus()+")")
+		}
+		// Fresh with PendingPrompt = externally "processing" (prompt queued
+		// for delivery on session-start). Cancel the pending prompt.
+		log.Printf("[stop] session %s: cancelling pending prompt (fresh, %d chars)", s.ID, len(s.PendingPrompt))
+		s.PendingPrompt = ""
+		s.PendingForce = false
+		m.broadcastStatus(s, StatusProcessing)
+		m.savePoolState()
+		m.mu.Unlock()
+		return api.OkResponse(id)
+
+	case StatusIdle:
 		m.mu.Unlock()
 		return api.ErrorResponse(id, "session is not processing or queued (status: "+s.ExternalStatus()+")")
 
