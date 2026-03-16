@@ -177,7 +177,10 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 		pw.Recycled = true
 		pw.PID = proc.PID()
 		pw.Cwd = s.Cwd
-		// Don't carry over ClaudeUUID — /clear will create a new session
+		// Don't carry over ClaudeUUID — /clear will create a new session.
+		// Remove the stale PID→UUID mapping so the idle signal watcher doesn't
+		// read the old session's UUID before /clear writes the new one.
+		os.Remove(m.paths.SessionPID(proc.PID()))
 		m.sessions[pw.ID] = pw
 		m.procs[pw.ID] = proc
 		m.pidToSID[proc.PID()] = pw.ID
