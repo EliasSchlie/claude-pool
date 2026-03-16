@@ -72,13 +72,17 @@ func doInstall() (bool, error) {
 	cacheBase := filepath.Join(claudeBase, "plugins", "cache", "local-tools", pluginName)
 	installedPath := filepath.Join(claudeBase, "plugins", "installed_plugins.json")
 
-	// Read current version from installed_plugins.json (if any)
-	currentVersion := installedVersion(installedPath)
-
-	// Determine version: bump patch if already installed, else start at 0.1.0
+	// Read current version from source plugin.json, bump it
+	srcPluginJSON := findSourcePluginJSON()
+	currentVersion := readSourceVersion(srcPluginJSON)
 	version := "0.1.0"
 	if currentVersion != "" {
 		version = bumpPatch(currentVersion)
+	}
+	// Write bumped version back to source plugin.json
+	if srcPluginJSON != "" {
+		writeSourceVersion(srcPluginJSON, version)
+		fmt.Printf("  Version: %s → %s\n", currentVersion, version)
 	}
 
 	cacheDir := filepath.Join(cacheBase, version)
@@ -197,26 +201,60 @@ func pluginJSON(version string) []byte {
 	return append(out, '\n')
 }
 
-// --- installed_plugins.json management ---
+// --- Source plugin.json management ---
 
-func installedVersion(path string) string {
+func findSourcePluginJSON() string {
+	exe, err := os.Executable()
+	if err == nil {
+		dir := filepath.Dir(exe)
+		for range 5 {
+			candidate := filepath.Join(dir, ".claude-plugin", "plugin.json")
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
+			dir = filepath.Dir(dir)
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		candidate := filepath.Join(cwd, ".claude-plugin", "plugin.json")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func readSourceVersion(path string) string {
+	if path == "" {
+		return ""
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
-	var data map[string]interface{}
-	if err := json.Unmarshal(raw, &data); err != nil {
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err != nil {
 		return ""
 	}
-	plugins, _ := data["plugins"].(map[string]interface{})
-	entries, _ := plugins[pluginKey].([]interface{})
-	if len(entries) == 0 {
-		return ""
-	}
-	entry, _ := entries[0].(map[string]interface{})
-	v, _ := entry["version"].(string)
+	v, _ := m["version"].(string)
 	return v
 }
+
+func writeSourceVersion(path, version string) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return
+	}
+	m["version"] = version
+	out, _ := json.MarshalIndent(m, "", "  ")
+	os.WriteFile(path, append(out, '\n'), 0o644)
+}
+
+// --- installed_plugins.json management ---
 
 func registerPlugin(path, cacheDir, version string) error {
 	data := map[string]interface{}{"version": 2, "plugins": map[string]interface{}{}}
