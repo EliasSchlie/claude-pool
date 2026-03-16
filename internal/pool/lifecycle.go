@@ -118,7 +118,7 @@ func (m *Manager) spawnSession(s *Session, resume bool) {
 				if proc.Exited() {
 					return
 				}
-				buf := strings.ToLower(string(proc.Buffer()))
+				buf := strings.ToLower(stripANSI(string(proc.Buffer())))
 				if strings.Contains(buf, "trust?") {
 					time.Sleep(200 * time.Millisecond)
 					proc.WriteString("\r")
