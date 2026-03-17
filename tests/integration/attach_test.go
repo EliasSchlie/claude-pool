@@ -27,11 +27,14 @@ package integration
 //  11.  "multiple clients read simultaneously"
 //  12.  "buffer-based pendingInput detection without attach"
 //  13.  "buffer-based pendingInput clears on Ctrl-U"
-//  14.  "process death closes attach pipe"
-//  15.  "attach response includes dimensions"
-//  16.  "pty-resize changes dimensions"
-//  17.  "pty-resize on non-live session errors"
-//  18.  "attach to promptless session and submit"
+//  14.  "backspace corrects pendingInput via buffer"
+//  15.  "ctrl-W deletes word from pendingInput via buffer"
+//  16.  "arrow keys and insert correct pendingInput via buffer"
+//  17.  "process death closes attach pipe"
+//  18.  "attach response includes dimensions"
+//  19.  "pty-resize changes dimensions"
+//  20.  "pty-resize on non-live session errors"
+//  21.  "attach to promptless session and submit"
 
 import (
 	"errors"
@@ -313,6 +316,56 @@ func TestAttach(t *testing.T) {
 		resp := sc.send(Msg{"type": "input", "sessionId": s1, "data": "\x15"})
 		assertNotError(t, resp)
 
+		p.waitForPendingInput(s1, func(v string) bool { return v == "" }, 10*time.Second)
+	})
+
+	t.Run("backspace corrects pendingInput via buffer", func(t *testing.T) {
+		// Prevents: keystroke-based tracking reporting raw bytes ("hello" + DEL + DEL)
+		// instead of the terminal's actual state ("hel") after backspace processing.
+		// s1 is idle and pinned, no attach pipe (closed by multi-client test defer).
+		resp := sc.send(Msg{"type": "input", "sessionId": s1, "data": "hello\x7f\x7f"})
+		assertNotError(t, resp)
+
+		val := p.waitForPendingInput(s1, func(v string) bool { return v == "hel" }, 10*time.Second)
+		if val != "hel" {
+			t.Fatalf("expected pendingInput %q after backspace, got %q", "hel", val)
+		}
+
+		// Clean up
+		sc.send(Msg{"type": "input", "sessionId": s1, "data": "\x15"})
+		p.waitForPendingInput(s1, func(v string) bool { return v == "" }, 10*time.Second)
+	})
+
+	t.Run("ctrl-W deletes word from pendingInput via buffer", func(t *testing.T) {
+		// Prevents: keystroke-based tracking not handling Ctrl-W (delete word),
+		// reporting "hello world" instead of "hello " after the terminal processes it.
+		resp := sc.send(Msg{"type": "input", "sessionId": s1, "data": "hello world\x17"})
+		assertNotError(t, resp)
+
+		val := p.waitForPendingInput(s1, func(v string) bool { return v == "hello " }, 10*time.Second)
+		if val != "hello " {
+			t.Fatalf("expected pendingInput %q after Ctrl-W, got %q", "hello ", val)
+		}
+
+		// Clean up
+		sc.send(Msg{"type": "input", "sessionId": s1, "data": "\x15"})
+		p.waitForPendingInput(s1, func(v string) bool { return v == "" }, 10*time.Second)
+	})
+
+	t.Run("arrow keys and insert correct pendingInput via buffer", func(t *testing.T) {
+		// Prevents: keystroke-based tracking appending raw escape sequences
+		// instead of reflecting the terminal's cursor-positioned insert.
+		// Type "hello", move cursor left 3, insert "X" → terminal shows "heXllo"
+		resp := sc.send(Msg{"type": "input", "sessionId": s1, "data": "hello\x1b[D\x1b[D\x1b[DX"})
+		assertNotError(t, resp)
+
+		val := p.waitForPendingInput(s1, func(v string) bool { return v == "heXllo" }, 10*time.Second)
+		if val != "heXllo" {
+			t.Fatalf("expected pendingInput %q after arrow+insert, got %q", "heXllo", val)
+		}
+
+		// Clean up
+		sc.send(Msg{"type": "input", "sessionId": s1, "data": "\x15"})
 		p.waitForPendingInput(s1, func(v string) bool { return v == "" }, 10*time.Second)
 	})
 
