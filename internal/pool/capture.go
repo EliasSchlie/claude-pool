@@ -33,6 +33,14 @@ func (m *Manager) captureJSONL(s *Session, turns int, detail string) string {
 		return ""
 	}
 
+	// Strip leading /clear entries — these are internal pool commands sent
+	// during slot recycling, not real user prompts. Only strip from the
+	// start of the transcript (later /clear commands could be user-initiated).
+	lines = stripLeadingClear(lines)
+	if len(lines) == 0 {
+		return ""
+	}
+
 	// Find start line for requested turn range by scanning from the end.
 	startLine := findTurnStart(lines, turns)
 
@@ -146,7 +154,8 @@ func parseLines(lines []string) []transcriptEntry {
 
 // userPromptTexts extracts user prompt text strings from the JSONL transcript.
 func (m *Manager) userPromptTexts(s *Session) []string {
-	entries := parseLines(m.readTranscriptLines(s))
+	lines := stripLeadingClear(m.readTranscriptLines(s))
+	entries := parseLines(lines)
 	var prompts []string
 	for _, e := range entries {
 		if isUserPrompt(e.data) {
@@ -156,6 +165,45 @@ func (m *Manager) userPromptTexts(s *Session) []string {
 		}
 	}
 	return prompts
+}
+
+// stripLeadingClear removes /clear user prompts (and everything before them)
+// from the start of the transcript. These are pool-internal commands from slot
+// recycling, not real user prompts. Only strips up to the first assistant
+// response — later /clear commands are preserved (could be user-initiated).
+func stripLeadingClear(lines []string) []string {
+	// Scan until the first assistant response (real content). Track /clear
+	// entries found in the preamble — internal messages (progress, system,
+	// local-command-caveat) may appear before /clear.
+	lastClearIdx := -1
+	for i, line := range lines {
+		var entry map[string]any
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			continue
+		}
+		typ, _ := entry["type"].(string)
+		if typ == "assistant" {
+			break // real content started
+		}
+		if typ == "user" && isClearCommand(extractTextContent(entry)) {
+			lastClearIdx = i
+		}
+	}
+	if lastClearIdx < 0 {
+		return lines // no leading /clear found
+	}
+	remaining := lines[lastClearIdx+1:]
+	if len(remaining) == 0 {
+		return nil
+	}
+	return remaining
+}
+
+// isClearCommand returns true if the text is a /clear slash command.
+// Claude Code may wrap it as plain "/clear" or "<command-name>/clear</command-name>".
+func isClearCommand(text string) bool {
+	text = strings.TrimSpace(text)
+	return text == "/clear" || strings.Contains(text, "/clear</command-name>")
 }
 
 // --- Turn boundary detection ---

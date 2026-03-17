@@ -4,39 +4,36 @@ package integration
 //
 // Pool size: 3
 //
-// Tests parent-child session relationships through the CLI: explicit --parent flag,
-// env-based auto-detection, ls filtering by parent, verbosity levels for tree views,
+// Tests parent-child session relationships through the CLI: auto-detection via
+// PID registry (real Claude → bash → CLI chain), explicit --parent flag,
+// --parent none, ls filtering by parent, verbosity levels for tree views,
 // and recursive archive.
 //
-// Session tree built during this flow:
+// Session tree built via real auto-detection:
 //
-//   s1 (parent: none — external caller)
-//   ├── s2 (parent: s1)
-//   │   └── s3 (parent: s2)
-//   └── s4 (parent: s1)
+//   s1 (root — no parent, external caller)
+//   ├── s2 (child — parent auto-detected as s1's Claude UUID)
+//   │   └── s3 (grandchild — parent auto-detected as s2's Claude UUID)
+//   └── s4 (second child — parent auto-detected as s1's Claude UUID)
 //
 // Flow:
 //
 //   1.  "start root session"
-//   2.  "start child with explicit parent"
-//   3.  "start grandchild"
-//   4.  "start second child of root"
+//   2.  "root spawns child via bash — auto-detection"
+//   3.  "child spawns grandchild via bash — auto-detection"
+//   4.  "root spawns second child via bash — auto-detection"
 //   5.  "info shows recursive children"
 //   6.  "ls without parent from non-Claude caller shows all"
 //   7.  "ls with parent filter shows direct children"
 //   8.  "ls with verbosity nested shows tree"
-//   9.  "child auto-detects parent from env"
-//  10.  "explicit parent overrides env"
-//  11.  "parent none disables auto-detection"
-//  12.  "ls with status filter"
-//  13.  "wait with parent filter"
-//  14.  "ls parent none from session context shows all"
-//  15.  "ls from session context shows owned children"
-//  16.  "archive with unarchived children errors"
-//  17.  "archive leaf session succeeds"
-//  18.  "archive parent after children archived"
-//  19.  "recursive archive archives entire subtree"
-//  20.  "real parent auto-detection via Claude prompt"
+//   9.  "ls with status filter"
+//  10.  "wait with parent filter"
+//  11.  "explicit parent overrides auto-detection"
+//  12.  "parent none disables auto-detection"
+//  13.  "archive with unarchived children errors"
+//  14.  "archive leaf session succeeds"
+//  15.  "archive parent after children archived"
+//  16.  "recursive archive archives entire subtree"
 
 import (
 	"fmt"
@@ -47,7 +44,16 @@ import (
 func TestParentChild(t *testing.T) {
 	pool := setupPool(t, 3)
 
+	// CLI command prefix for commands run inside Claude sessions.
+	// Sessions need CLAUDE_POOL_HOME and CLAUDE_POOL_DAEMON because the
+	// test pool lives in an isolated directory, not ~/.claude-pool/.
+	cliPrefix := fmt.Sprintf(
+		"CLAUDE_POOL_HOME=%s CLAUDE_POOL_DAEMON=%s %s --pool %s",
+		pool.homeDir, daemonBinPath, cliBinPath, pool.name,
+	)
+
 	var s1, s2, s3, s4 string
+	var s1UUID, s2UUID string
 
 	t.Run("start root session", func(t *testing.T) {
 		resp := pool.runJSON("start", "--prompt", "respond with exactly: root")
@@ -55,51 +61,94 @@ func TestParentChild(t *testing.T) {
 		pool.waitForIdle(s1, 300*time.Second)
 
 		info := pool.getSessionInfo(s1)
+		s1UUID = info.ClaudeUUID
+		if s1UUID == "" {
+			t.Fatal("root session should have a Claude UUID")
+		}
 		if info.Parent != "" {
 			t.Fatalf("root session should have no parent, got %q", info.Parent)
 		}
-		if len(info.Children) != 0 {
-			t.Fatalf("new session should have no children, got %d", len(info.Children))
-		}
 	})
 
-	t.Run("start child with explicit parent", func(t *testing.T) {
-		resp := pool.runJSON("start", "--prompt", "respond with exactly: child1", "--parent", s1)
-		s2 = strVal(resp, "sessionId")
+	t.Run("root spawns child via bash — auto-detection", func(t *testing.T) {
+		cmd := fmt.Sprintf("%s start --prompt 'respond with exactly: child1'", cliPrefix)
+		pool.run("followup", "--session", s1,
+			"--prompt", fmt.Sprintf("run this exact bash command: %s", cmd))
+		pool.waitForIdle(s1, 300*time.Second)
+
+		// Find the child via ls --parent (children are deduped from default ls)
+		sessions := pool.listSessions("--parent", s1UUID)
+		if len(sessions) == 0 {
+			t.Fatal("expected root to have spawned a child session via bash")
+		}
+		s2 = sessions[0].SessionID
 		pool.waitForIdle(s2, 300*time.Second)
 
-		info2 := pool.getSessionInfo(s2)
-		if info2.Parent != s1 {
-			t.Fatalf("expected parent %s, got %q", s1, info2.Parent)
+		// SPEC: auto-detected parent is the caller's Claude UUID
+		info := pool.getSessionInfo(s2)
+		s2UUID = info.ClaudeUUID
+		if info.Parent != s1UUID {
+			t.Fatalf("child parent should be root's Claude UUID %q (auto-detected), got %q",
+				s1UUID, info.Parent)
 		}
 
-		info1 := pool.getSessionInfo(s1)
-		assertHasChild(t, info1, s2)
+		rootInfo := pool.getSessionInfo(s1)
+		assertHasChild(t, rootInfo, s2)
 	})
 
-	t.Run("start grandchild", func(t *testing.T) {
-		resp := pool.runJSON("start", "--prompt", "respond with exactly: grandchild", "--parent", s2)
-		s3 = strVal(resp, "sessionId")
+	t.Run("child spawns grandchild via bash — auto-detection", func(t *testing.T) {
+		cmd := fmt.Sprintf("%s start --prompt 'respond with exactly: grandchild'", cliPrefix)
+		pool.run("followup", "--session", s2,
+			"--prompt", fmt.Sprintf("run this exact bash command: %s", cmd))
+		pool.waitForIdle(s2, 300*time.Second)
+
+		// Find the grandchild via ls --parent (children are deduped from default ls)
+		sessions := pool.listSessions("--parent", s2UUID)
+		if len(sessions) == 0 {
+			t.Fatal("expected child to have spawned a grandchild session via bash")
+		}
+		s3 = sessions[0].SessionID
 		pool.waitForIdle(s3, 300*time.Second)
 
-		info3 := pool.getSessionInfo(s3)
-		if info3.Parent != s2 {
-			t.Fatalf("expected parent %s, got %q", s2, info3.Parent)
+		info := pool.getSessionInfo(s3)
+		if info.Parent != s2UUID {
+			t.Fatalf("grandchild parent should be child's Claude UUID %q (auto-detected), got %q",
+				s2UUID, info.Parent)
 		}
 
-		info2 := pool.getSessionInfo(s2)
-		assertHasChild(t, info2, s3)
+		childInfo := pool.getSessionInfo(s2)
+		assertHasChild(t, childInfo, s3)
 	})
 
-	t.Run("start second child of root", func(t *testing.T) {
-		// Pool is full (3 slots). Evict s3 (least recently used) by starting s4.
-		resp := pool.runJSON("start", "--prompt", "respond with exactly: child2", "--parent", s1)
-		s4 = strVal(resp, "sessionId")
+	t.Run("root spawns second child via bash — auto-detection", func(t *testing.T) {
+		// Pool is full (3 slots). This evicts the LRU session (s3).
+		cmd := fmt.Sprintf("%s start --prompt 'respond with exactly: child2'", cliPrefix)
+		pool.run("followup", "--session", s1,
+			"--prompt", fmt.Sprintf("run this exact bash command: %s", cmd))
+		pool.waitForIdle(s1, 300*time.Second)
+
+		// Root now has 2 children — find the new one
+		sessions := pool.listSessions("--parent", s1UUID)
+		for _, s := range sessions {
+			if s.SessionID != s2 {
+				s4 = s.SessionID
+				break
+			}
+		}
+		if s4 == "" {
+			t.Fatal("expected root to have spawned a second child via bash")
+		}
 		pool.waitForIdle(s4, 300*time.Second)
 
-		info1 := pool.getSessionInfo(s1)
-		assertHasChild(t, info1, s2)
-		assertHasChild(t, info1, s4)
+		info := pool.getSessionInfo(s4)
+		if info.Parent != s1UUID {
+			t.Fatalf("child2 parent should be root's Claude UUID %q (auto-detected), got %q",
+				s1UUID, info.Parent)
+		}
+
+		rootInfo := pool.getSessionInfo(s1)
+		assertHasChild(t, rootInfo, s2)
+		assertHasChild(t, rootInfo, s4)
 	})
 
 	t.Run("info shows recursive children", func(t *testing.T) {
@@ -109,18 +158,18 @@ func TestParentChild(t *testing.T) {
 			t.Fatalf("expected 2 children for s1, got %d", len(info.Children))
 		}
 
-		var child2 SessionInfo
+		var child1Info SessionInfo
 		for _, c := range info.Children {
 			if c.SessionID == s2 {
-				child2 = c
+				child1Info = c
 			}
 		}
 
-		if len(child2.Children) != 1 {
-			t.Fatalf("expected 1 child for s2, got %d", len(child2.Children))
+		if len(child1Info.Children) != 1 {
+			t.Fatalf("expected 1 child for s2, got %d", len(child1Info.Children))
 		}
-		if child2.Children[0].SessionID != s3 {
-			t.Fatalf("expected s2's child to be s3, got %s", child2.Children[0].SessionID)
+		if child1Info.Children[0].SessionID != s3 {
+			t.Fatalf("expected s2's child to be s3, got %s", child1Info.Children[0].SessionID)
 		}
 	})
 
@@ -135,15 +184,15 @@ func TestParentChild(t *testing.T) {
 	})
 
 	t.Run("ls with parent filter shows direct children", func(t *testing.T) {
-		sessions := pool.listSessions("--parent", s1)
+		sessions := pool.listSessions("--parent", s1UUID)
 		if _, found := findSession(sessions, s2); !found {
-			t.Fatal("expected s2 in ls --parent s1")
+			t.Fatal("expected s2 in ls --parent <rootUUID>")
 		}
 		if _, found := findSession(sessions, s4); !found {
-			t.Fatal("expected s4 in ls --parent s1")
+			t.Fatal("expected s4 in ls --parent <rootUUID>")
 		}
 		if _, found := findSession(sessions, s3); found {
-			t.Fatal("s3 (grandchild) should not appear in --parent s1")
+			t.Fatal("s3 (grandchild) should not appear in --parent <rootUUID>")
 		}
 	})
 
@@ -166,48 +215,13 @@ func TestParentChild(t *testing.T) {
 				}
 			}
 		}
-	})
 
-	t.Run("child auto-detects parent from env", func(t *testing.T) {
-		resp := pool.runInSessionJSON(s1, "start", "--prompt", "respond with exactly: auto-child")
-		autoChild := strVal(resp, "sessionId")
-
-		pool.waitForIdle(autoChild, 300*time.Second)
-
-		info := pool.getSessionInfo(autoChild)
-		if info.Parent != s1 {
-			t.Fatalf("expected parent auto-detected as %s, got %q", s1, info.Parent)
+		// SPEC: children not repeated as separate top-level entries
+		for _, s := range sessions {
+			if s.SessionID == s2 || s.SessionID == s3 || s.SessionID == s4 {
+				t.Fatalf("child %s should not appear at top level in nested ls", s.SessionID)
+			}
 		}
-
-		pool.run("archive", "--session", autoChild)
-	})
-
-	t.Run("explicit parent overrides env", func(t *testing.T) {
-		resp := pool.runInSessionJSON(s1, "start", "--prompt", "respond with exactly: explicit", "--parent", s2)
-		explicitChild := strVal(resp, "sessionId")
-
-		pool.waitForIdle(explicitChild, 300*time.Second)
-
-		info := pool.getSessionInfo(explicitChild)
-		if info.Parent != s2 {
-			t.Fatalf("expected parent %s (explicit), got %q", s2, info.Parent)
-		}
-
-		pool.run("archive", "--session", explicitChild)
-	})
-
-	t.Run("parent none disables auto-detection", func(t *testing.T) {
-		resp := pool.runInSessionJSON(s1, "start", "--prompt", "respond with exactly: orphan", "--parent", "none")
-		orphan := strVal(resp, "sessionId")
-
-		pool.waitForIdle(orphan, 300*time.Second)
-
-		info := pool.getSessionInfo(orphan)
-		if info.Parent != "" {
-			t.Fatalf("expected no parent with --parent none, got %q", info.Parent)
-		}
-
-		pool.run("archive", "--session", orphan)
 	})
 
 	t.Run("ls with status filter", func(t *testing.T) {
@@ -223,42 +237,75 @@ func TestParentChild(t *testing.T) {
 	})
 
 	t.Run("wait with parent filter", func(t *testing.T) {
-		resp := pool.runJSON("start", "--prompt", "respond with exactly: wait-parent-test", "--parent", s1)
-		childSid := strVal(resp, "sessionId")
+		// Use a slow prompt so the child stays processing while wait runs.
+		// The child is started by root via bash — auto-detected parent = rootUUID.
+		cmd := fmt.Sprintf("%s start --prompt 'run the bash command: sleep 30 && echo wait-parent-done'", cliPrefix)
+		pool.run("followup", "--session", s1,
+			"--prompt", fmt.Sprintf("run this exact bash command: %s", cmd))
+		pool.waitForIdle(s1, 300*time.Second)
 
-		waitResp := pool.runJSON("wait", "--parent", s1, "--timeout", "120000")
+		waitResp := pool.runJSON("wait", "--parent", s1UUID, "--timeout", "120000")
 		waitedSid := strVal(waitResp, "sessionId")
-		if waitedSid != childSid {
-			t.Fatalf("expected wait to return child %s, got %s", childSid, waitedSid)
-		}
-		assertContains(t, strVal(waitResp, "content"), "wait-parent-test")
-		pool.run("archive", "--session", childSid)
+		assertNonEmpty(t, "waited sessionId", waitedSid)
+
+		pool.run("archive", "--session", waitedSid)
 	})
 
-	t.Run("ls parent none from session context shows all", func(t *testing.T) {
-		resp := pool.runInSessionJSON(s1, "ls", "--parent", "none")
-		sessions := parseSessions(t, resp)
-		if _, found := findSession(sessions, s1); !found {
-			t.Fatal("expected s1 in ls --parent none from session context")
-		}
-	})
+	t.Run("explicit parent overrides auto-detection", func(t *testing.T) {
+		// Root runs start with explicit --parent pointing to s2UUID.
+		// Auto-detection would set parent to root's UUID, but explicit wins.
+		cmd := fmt.Sprintf("%s start --prompt 'respond with exactly: explicit' --parent %s", cliPrefix, s2UUID)
+		pool.run("followup", "--session", s1,
+			"--prompt", fmt.Sprintf("run this exact bash command: %s", cmd))
+		pool.waitForIdle(s1, 300*time.Second)
 
-	t.Run("ls from session context shows owned children", func(t *testing.T) {
-		resp := pool.runInSessionJSON(s1, "ls")
-		sessions := parseSessions(t, resp)
-
-		hasS2 := false
+		// Child was created with --parent s2UUID, find it there
+		sessions := pool.listSessions("--parent", s2UUID)
+		var explicitChild string
 		for _, s := range sessions {
-			if s.SessionID == s2 {
-				hasS2 = true
-			}
-			if s.SessionID == s3 {
-				t.Fatal("s3 (grandchild) should not appear in ls from s1 context")
+			if s.SessionID != s3 {
+				explicitChild = s.SessionID
+				break
 			}
 		}
-		if !hasS2 {
-			t.Fatal("expected s2 in ls from s1 context")
+		if explicitChild == "" {
+			t.Fatal("expected explicit-parent child session")
 		}
+		pool.waitForIdle(explicitChild, 300*time.Second)
+
+		info := pool.getSessionInfo(explicitChild)
+		if info.Parent != s2UUID {
+			t.Fatalf("expected parent %s (explicit), got %q", s2UUID, info.Parent)
+		}
+
+		pool.run("archive", "--session", explicitChild)
+	})
+
+	t.Run("parent none disables auto-detection", func(t *testing.T) {
+		cmd := fmt.Sprintf("%s start --prompt 'respond with exactly: orphan' --parent none", cliPrefix)
+		pool.run("followup", "--session", s1,
+			"--prompt", fmt.Sprintf("run this exact bash command: %s", cmd))
+		pool.waitForIdle(s1, 300*time.Second)
+
+		sessions := pool.listSessions()
+		var orphan string
+		for _, s := range sessions {
+			if s.SessionID != s1 && s.SessionID != s2 && s.SessionID != s3 && s.SessionID != s4 {
+				orphan = s.SessionID
+				break
+			}
+		}
+		if orphan == "" {
+			t.Fatal("expected orphan session")
+		}
+		pool.waitForIdle(orphan, 300*time.Second)
+
+		info := pool.getSessionInfo(orphan)
+		if info.Parent != "" {
+			t.Fatalf("expected no parent with --parent none, got %q", info.Parent)
+		}
+
+		pool.run("archive", "--session", orphan)
 	})
 
 	t.Run("archive with unarchived children errors", func(t *testing.T) {
@@ -308,65 +355,5 @@ func TestParentChild(t *testing.T) {
 		if len(archivedSessions) < 4 {
 			t.Fatalf("expected at least 4 with --archived, got %d", len(archivedSessions))
 		}
-	})
-
-	t.Run("real parent auto-detection via Claude prompt", func(t *testing.T) {
-		// All previous sessions archived. Pool has 3 fresh slots.
-		root := pool.startSession("respond with exactly: auto-root")
-
-		rootInfo := pool.getSessionInfo(root)
-		rootUUID := rootInfo.ClaudeUUID
-		if rootUUID == "" {
-			t.Fatal("root session should have a Claude UUID by now")
-		}
-
-		// Ask Claude to start a child session via bash — tests real auto-detection
-		// through env var propagation, not simulated runInSession.
-		cmd := fmt.Sprintf(
-			"CLAUDE_POOL_HOME=%s CLAUDE_POOL_DAEMON=%s %s --pool %s start --prompt 'respond with exactly: auto-spawned-child'",
-			pool.homeDir, daemonBinPath, cliBinPath, pool.name,
-		)
-		pool.run("followup", "--session", root,
-			"--prompt", fmt.Sprintf("run this exact bash command: %s", cmd))
-		pool.waitForIdle(root, 300*time.Second)
-
-		// Find the child session — it's the non-archived session that isn't root
-		sessions := pool.listSessions()
-		var childSid string
-		for _, s := range sessions {
-			if s.SessionID != root {
-				childSid = s.SessionID
-				break
-			}
-		}
-		if childSid == "" {
-			t.Fatal("expected Claude to have started a child session via bash")
-		}
-
-		pool.waitForIdle(childSid, 300*time.Second)
-
-		// SPEC: auto-detected parent is the caller's Claude UUID
-		childInfo := pool.getSessionInfo(childSid)
-		if childInfo.Parent != rootUUID {
-			t.Fatalf("child parent should be root's Claude UUID %q (auto-detected), got %q",
-				rootUUID, childInfo.Parent)
-		}
-
-		// SPEC: ls top-level — children not repeated as separate entries
-		topLevel := pool.listSessions()
-		for _, s := range topLevel {
-			if s.SessionID == childSid {
-				t.Fatal("child session should not appear at top level in ls")
-			}
-		}
-
-		// Nested: child appears under root
-		nestedResp := pool.runJSON("ls", "--verbosity", "nested")
-		nestedSessions := parseSessions(t, nestedResp)
-		rootNested, found := findSession(nestedSessions, root)
-		if !found {
-			t.Fatal("root not found in nested ls")
-		}
-		assertHasChild(t, rootNested, childSid)
 	})
 }

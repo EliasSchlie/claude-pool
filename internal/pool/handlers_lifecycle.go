@@ -65,7 +65,7 @@ func (m *Manager) handleArchive(id any, req api.Msg) api.Msg {
 
 	if !recursive {
 		for _, other := range m.sessions {
-			if other.ParentID == s.ID && other.Status != StatusArchived {
+			if other.IsChildOf(s) && other.Status != StatusArchived {
 				log.Printf("[archive] session %s: rejected, has unarchived child %s", s.ID, other.ID)
 				m.mu.Unlock()
 				return api.ErrorResponse(id, "session has unarchived children; use recursive: true")

@@ -192,6 +192,11 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 		}
 		log.Printf("[offload] session %s: recycled pid %d into pre-warmed session %s", s.ID, proc.PID(), pw.ID)
 
+		// Clear stale idle signals before starting watchers — the old
+		// session's signals (stop, stop-fallback) must not trigger prompt
+		// delivery in the new session. /clear will produce a fresh
+		// session-clear signal when it completes.
+		m.clearIdleSignals(proc.PID())
 		m.deliverPromptWithSettle(pw, "/clear", 200*time.Millisecond)
 		m.startWatchers(pw, proc)
 	} else {
@@ -225,18 +230,23 @@ func (m *Manager) archiveSessionLocked(s *Session) {
 // by releasing and re-acquiring the lock per descendant.
 // Must be called with m.mu held. May temporarily release m.mu.
 func (m *Manager) archiveDescendants(parentID string) {
-	// Collect all descendants first (recursive)
-	var collectAll func(pid string)
+	// Collect all descendants first (recursive).
+	// Match by both session ID and Claude UUID since auto-detected parents
+	// use Claude UUIDs.
+	var collectAll func(parent *Session)
 	var all []string
-	collectAll = func(pid string) {
+	collectAll = func(parent *Session) {
+		if parent == nil {
+			return
+		}
 		for _, s := range m.sessions {
-			if s.ParentID == pid && s.Status != StatusArchived {
-				collectAll(s.ID)
+			if s.IsChildOf(parent) && s.Status != StatusArchived {
+				collectAll(s)
 				all = append(all, s.ID)
 			}
 		}
 	}
-	collectAll(parentID)
+	collectAll(m.sessions[parentID])
 
 	// Stop any processing descendants first (requires releasing the lock)
 	for _, sid := range all {
@@ -436,13 +446,27 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 				}
 			}
 
-			// Startup signals (session-start, session-clear) are only valid for
-			// Fresh → Idle transitions. If the session is Processing, a startup
-			// signal is stale (arrived after processing was set by start/followup)
-			// and must not cause a false Processing → Idle transition. Exception:
-			// pending work (PendingResume/PendingPrompt) means the signal is from
-			// /resume or /clear completing — process it.
+			// Filter stale signals that belong to a previous session on this slot.
+			//
+			// Recycled fresh slots (went through /clear) are waiting for the
+			// session-start or session-clear signal that fires when /clear
+			// completes. Other triggers (stop, tool, permission) are stale
+			// leftovers from the previous session and must be ignored —
+			// delivering a prompt during /clear loses it.
+			//
+			// Non-recycled fresh slots already completed startup — any signal
+			// is valid (typically "session-start" from the initial spawn, but
+			// could be "stop" if the process completed something internally).
+			//
+			// Processing slots ignore startup signals unless they have pending
+			// work (PendingResume/PendingPrompt), which means the signal is from
+			// /resume or /clear completing.
 			trigger, _ := sig["trigger"].(string)
+			if s.Status == StatusFresh && s.Recycled && trigger != "session-start" && trigger != "session-clear" {
+				log.Printf("[idle-watch] session %s: ignoring stale %s signal (status=fresh+recycled, waiting for clear)", sessionID, trigger)
+				m.mu.Unlock()
+				continue
+			}
 			if s.Status == StatusProcessing && (trigger == "session-start" || trigger == "session-clear") &&
 				s.PendingResume == "" && s.PendingPrompt == "" {
 				log.Printf("[idle-watch] session %s: ignoring stale %s signal (status=%s)", sessionID, trigger, s.Status)

@@ -817,7 +817,7 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 		// --archived, --parent), show all matching sessions without dedup.
 		if callerId == "" && !all && statusFilter == nil && !showArchived {
 			if s.ParentID != "" {
-				if _, hasParent := m.sessions[s.ParentID]; hasParent {
+				if m.findParentSession(s) != nil {
 					continue
 				}
 			}
@@ -831,6 +831,25 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 	}
 
 	return api.Response(id, "sessions", api.Msg{"sessions": results})
+}
+
+// findParentSession finds the parent session of s. Delegates to IsChildOf
+// which matches against both session IDs and Claude UUIDs.
+func (m *Manager) findParentSession(s *Session) *Session {
+	if s.ParentID == "" {
+		return nil
+	}
+	// Fast path: direct lookup by session ID
+	if parent, ok := m.sessions[s.ParentID]; ok {
+		return parent
+	}
+	// Slow path: scan for Claude UUID match
+	for _, other := range m.sessions {
+		if s.IsChildOf(other) {
+			return other
+		}
+	}
+	return nil
 }
 
 // --- Destroy ---
