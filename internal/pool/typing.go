@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/EliasSchlie/claude-pool/internal/api"
+	"github.com/hinshun/vt10x"
 )
 
 const promptChar = "❯"
@@ -22,28 +23,35 @@ func containsBoxDrawing(s string) bool {
 	return false
 }
 
-// parseBufferInput extracts text typed after the ❯ prompt character in
-// terminal output. Searches backwards from the end of the buffer to find
-// the most recent prompt line. Callers should pass only the buffer tail
-// (e.g. 8KB) to avoid processing the full ring buffer.
-//
-// Split on both \n and \r — Claude Code's TUI uses \r for status bar
-// redraws, and without splitting on \r the status bar text gets
-// concatenated with the prompt line causing false positives.
-func parseBufferInput(buf []byte) string {
-	stripped := stripANSI(string(buf))
+// renderBuffer processes raw PTY output through a VT100 terminal emulator
+// to produce the actual rendered screen content. This correctly handles
+// cursor movement, screen clearing, and other escape sequences that
+// Claude Code's TUI uses heavily.
+func renderBuffer(buf []byte, cols, rows int) string {
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows <= 0 {
+		rows = 24
+	}
+	term := vt10x.New(vt10x.WithSize(cols, rows))
+	term.Write(buf)
+	return term.String()
+}
 
-	// Split on any line boundary (\n, \r, or \r\n)
-	lines := strings.FieldsFunc(stripped, func(r rune) bool {
-		return r == '\n' || r == '\r'
-	})
+// parseBufferInput extracts text typed after the ❯ prompt character.
+// The buf is first rendered through a VT100 terminal emulator to resolve
+// cursor movements and produce the actual screen content, then the
+// rendered lines are searched backwards for the prompt.
+func parseBufferInput(buf []byte, cols, rows int) string {
+	rendered := renderBuffer(buf, cols, rows)
+
+	lines := strings.Split(rendered, "\n")
 
 	for i := len(lines) - 1; i >= 0; i-- {
-		line := lines[i]
+		line := strings.TrimRight(lines[i], " ")
 		if idx := strings.LastIndex(line, promptChar); idx >= 0 {
 			input := strings.TrimSpace(line[idx+len(promptChar):])
-			// Reject false positives: TUI artifacts contain box-drawing
-			// chars, status bar text, etc. Real user input is plain text.
 			if containsBoxDrawing(input) {
 				continue
 			}
@@ -93,8 +101,10 @@ func (m *Manager) typingPollLoop() {
 }
 
 type bufferCheck struct {
-	id  string
-	buf []byte
+	id   string
+	buf  []byte
+	cols int
+	rows int
 }
 
 func (m *Manager) pollBufferInput() {
@@ -110,12 +120,21 @@ func (m *Manager) pollBufferInput() {
 		if proc == nil {
 			continue
 		}
-		toCheck = append(toCheck, bufferCheck{id: id, buf: proc.BufferTail(8192)})
+		cols, rows := 80, 24
+		if c, r, err := proc.GetSize(); err == nil {
+			cols, rows = int(c), int(r)
+		}
+		toCheck = append(toCheck, bufferCheck{
+			id:   id,
+			buf:  proc.Buffer(),
+			cols: cols,
+			rows: rows,
+		})
 	}
 	m.mu.Unlock()
 
 	for _, item := range toCheck {
-		input := parseBufferInput(item.buf)
+		input := parseBufferInput(item.buf, item.cols, item.rows)
 
 		m.mu.Lock()
 		s := m.sessions[item.id]
