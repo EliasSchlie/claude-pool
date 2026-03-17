@@ -318,6 +318,8 @@ func (m *Manager) watchProcessDone(sessionID string, proc *ptyPkg.Process) {
 func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 	signalPath := m.paths.IdleSignal(pid)
 	pidMapPath := m.paths.SessionPID(pid)
+	var lastSignalTS float64 // timestamp of last processed signal (avoid re-processing)
+	signalPresent := false   // whether signal file existed on previous tick
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -351,22 +353,36 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 				}
 			}
 
-			// Read and process idle signal atomically under the mutex.
-			// This prevents races with handleAttachInput's clearIdleSignals —
-			// without this, the idle-watch could read a stale signal file,
-			// then handleAttachInput sets Processing + clears the file, then
-			// the idle-watch acquires the mutex and falsely transitions to Idle.
+			// Read signal file under the mutex to prevent races with
+			// clearIdleSignals. Like OC, the daemon never deletes the signal
+			// file — only hooks (idle-signal.sh clear, UserPromptSubmit) do.
+			// Signal presence = idle, signal absence = processing.
 			m.mu.Lock()
 			data, err := os.ReadFile(signalPath)
 			if err != nil {
+				// No signal file. If it was present before, a hook cleared
+				// it (UserPromptSubmit or PostToolUse) → processing started.
+				// This handles attach-pipe Enter, external prompt submission,
+				// and any other path where the pool didn't explicitly set
+				// processing status.
+				if signalPresent {
+					signalPresent = false
+					s = m.sessions[sessionID]
+					if s != nil && s.Status == StatusIdle {
+						log.Printf("[idle-watch] session %s: signal cleared (idle→processing)", sessionID)
+						s.Status = StatusProcessing
+						s.PendingInput = ""
+						m.broadcastStatus(s, StatusIdle)
+					}
+				}
 				m.mu.Unlock()
 				continue
 			}
+			signalPresent = true
 
-			// Check session still exists, is live, AND still owns this PID
-			// BEFORE removing the signal. If the session was transferred to a
-			// different PID (offloaded → restored on another slot), this watcher
-			// is stale — leave the signal for the new PID owner's watcher.
+			// Check session still exists, is live, AND still owns this PID.
+			// If the session was transferred to a different PID (offloaded →
+			// restored on another slot), this watcher is stale.
 			s = m.sessions[sessionID]
 			if s == nil || !s.IsLive() || s.PID != pid {
 				sPID := 0
@@ -378,33 +394,43 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 				return
 			}
 
-			os.Remove(signalPath)
-			log.Printf("[idle-watch] session %s: read signal file (pid=%d): %s", sessionID, pid, strings.TrimSpace(string(data)))
-
-			// Parse signal JSON for cwd and transcript
+			// Check if this is a new signal (by timestamp) to avoid
+			// re-processing the same signal on every tick.
 			var sig map[string]any
-			if err := json.Unmarshal(data, &sig); err == nil {
-				if cwd, ok := sig["cwd"].(string); ok && cwd != "" && s.Cwd != cwd {
-					s.Cwd = cwd
-					m.broadcastEvent(api.Msg{
-						"type": "event", "event": "updated",
-						"sessionId": s.ID, "changes": api.Msg{"cwd": cwd},
-					})
-				}
-				if transcript, ok := sig["transcript"].(string); ok && transcript != "" && s.ClaudeUUID == "" {
-					base := filepath.Base(transcript)
-					if uuid := strings.TrimSuffix(base, ".jsonl"); uuid != base {
-						s.ClaudeUUID = uuid
-					}
+			if err := json.Unmarshal(data, &sig); err != nil {
+				m.mu.Unlock()
+				continue
+			}
+			ts, _ := sig["ts"].(float64)
+			if ts != 0 && ts == lastSignalTS {
+				// Already processed this signal — skip
+				m.mu.Unlock()
+				continue
+			}
+			lastSignalTS = ts
+			log.Printf("[idle-watch] session %s: new signal file (pid=%d): %s", sessionID, pid, strings.TrimSpace(string(data)))
+
+			// Extract cwd and transcript from signal
+			if cwd, ok := sig["cwd"].(string); ok && cwd != "" && s.Cwd != cwd {
+				s.Cwd = cwd
+				m.broadcastEvent(api.Msg{
+					"type": "event", "event": "updated",
+					"sessionId": s.ID, "changes": api.Msg{"cwd": cwd},
+				})
+			}
+			if transcript, ok := sig["transcript"].(string); ok && transcript != "" && s.ClaudeUUID == "" {
+				base := filepath.Base(transcript)
+				if uuid := strings.TrimSuffix(base, ".jsonl"); uuid != base {
+					s.ClaudeUUID = uuid
 				}
 			}
 
 			// Startup signals (session-start, session-clear) are only valid for
 			// Fresh → Idle transitions. If the session is Processing, a startup
-			// signal is stale (arrived after handleAttachInput set Processing)
-			// and must not cause a false Processing → Idle transition.
-			// Exception: if there's pending work (PendingResume/PendingPrompt),
-			// the signal is from /resume or /clear completing — process it.
+			// signal is stale (arrived after processing was set by start/followup)
+			// and must not cause a false Processing → Idle transition. Exception:
+			// pending work (PendingResume/PendingPrompt) means the signal is from
+			// /resume or /clear completing — process it.
 			trigger, _ := sig["trigger"].(string)
 			if s.Status == StatusProcessing && (trigger == "session-start" || trigger == "session-clear") &&
 				s.PendingResume == "" && s.PendingPrompt == "" {
