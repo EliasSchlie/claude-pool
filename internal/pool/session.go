@@ -48,6 +48,9 @@ type Session struct {
 
 	// Internal: pool-owned pre-warmed session (can be claimed by start/pin)
 	PreWarmed bool
+	// Internal: process was recycled via /clear (not freshly spawned).
+	// Used to distinguish "clearing" from "spawning" in health slot states.
+	Recycled bool
 
 	// Internal: pending prompt for queued sessions
 	PendingPrompt string
@@ -59,6 +62,14 @@ type Session struct {
 
 	// Internal: for offloaded/archived metadata persistence
 	Flags string // flags used to spawn this session
+}
+
+// ClearPending cancels all pending work (prompt, force, resume).
+// Used by stop to ensure watchIdleSignal doesn't deliver stale prompts.
+func (s *Session) ClearPending() {
+	s.PendingPrompt = ""
+	s.PendingForce = false
+	s.PendingResume = ""
 }
 
 // IsLive returns true if the session has a live terminal.

@@ -175,6 +175,7 @@ func (m *Manager) handleSet(id any, req api.Msg) api.Msg {
 					"type": "event", "event": "updated",
 					"sessionId": s.ID, "changes": api.Msg{"pinned": false},
 				})
+				m.tryDrainQueue()
 			}
 		case float64:
 			duration := v
@@ -198,13 +199,22 @@ func (m *Manager) handleSet(id any, req api.Msg) api.Msg {
 		}
 	}
 
-	// Metadata
+	// Metadata — route structured fields (name, description) to their
+	// dedicated fields, everything else to Tags. Matches handleSetMetadata
+	// semantics so `set --meta name=foo` and `set-metadata {name: "foo"}`
+	// produce the same result.
 	if metadata, ok := req["metadata"].(map[string]any); ok {
-		if s.Metadata.Tags == nil {
-			s.Metadata.Tags = map[string]string{}
-		}
 		for k, v := range metadata {
-			if sv, ok := v.(string); ok {
+			sv, _ := v.(string)
+			switch k {
+			case "name":
+				s.Metadata.Name = sv
+			case "description":
+				s.Metadata.Description = sv
+			default:
+				if s.Metadata.Tags == nil {
+					s.Metadata.Tags = map[string]string{}
+				}
 				s.Metadata.Tags[k] = sv
 			}
 		}
@@ -338,6 +348,7 @@ func (m *Manager) handleUnpin(id any, req api.Msg) api.Msg {
 		"type": "event", "event": "updated",
 		"sessionId": s.ID, "changes": api.Msg{"pinned": false},
 	})
+	m.tryDrainQueue()
 	m.savePoolState()
 	return api.OkResponse(id)
 }
@@ -488,6 +499,11 @@ func (m *Manager) handleResize(id any, req api.Msg) api.Msg {
 	oldSize := m.poolSize
 	m.poolSize = target
 	log.Printf("[resize] pool size: %d → %d", oldSize, target)
+
+	// SPEC: "Change slot count immediately and update config."
+	if _, err := m.config.Update(map[string]any{"size": target}); err != nil {
+		log.Printf("[resize] config update failed: %v", err)
+	}
 
 	if target > oldSize {
 		log.Printf("[resize] spawning %d new sessions", target-oldSize)
