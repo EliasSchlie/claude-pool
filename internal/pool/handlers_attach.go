@@ -3,7 +3,6 @@ package pool
 import (
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/EliasSchlie/claude-pool/internal/api"
 )
@@ -144,74 +143,11 @@ func (m *Manager) handlePtyResize(id any, req api.Msg) api.Msg {
 	return api.OkResponse(id)
 }
 
-// hasEnter checks if raw bytes contain an Enter keystroke (\r or \n).
-func hasEnter(data []byte) bool {
-	for _, b := range data {
-		if b == '\r' || b == '\n' {
-			return true
-		}
-	}
-	return false
-}
-
-// handleAttachInput detects Enter keystrokes from attach clients to trigger
-// prompt submission. Raw bytes always pass through to the PTY (the attach
-// pipe writes them directly).
-//
-// pendingInput is tracked solely by the buffer poller (typing.go) — this
-// handler only watches for Enter to submit whatever text the buffer poller
-// has already detected.
-//
-// When Enter is detected with pending text, the text is delivered via
-// deliverPrompt (Escape → Ctrl-U → text → Enter with proper timing) to
-// ensure Claude Code's TUI processes the prompt reliably.
+// handleAttachInput is called when raw bytes arrive from an attach client.
+// The bytes have already been written to the PTY by the attach pipe —
+// this just signals the buffer poller to re-check pendingInput.
 func (m *Manager) handleAttachInput(sessionID string, data []byte) {
-	if !hasEnter(data) {
-		// No Enter — just signal the buffer poller to update pendingInput
-		m.triggerBufferPoll()
-		return
-	}
-
-	// Brief delay to let the terminal process the keystroke before reading buffer
-	time.Sleep(50 * time.Millisecond)
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	s := m.sessions[sessionID]
-	if s == nil {
-		return
-	}
-
-	if s.Status != StatusIdle && s.Status != StatusFresh {
-		return
-	}
-
-	// Read pendingInput from the buffer (the source of truth)
-	proc := m.procs[sessionID]
-	if proc == nil {
-		return
-	}
-	prompt := parseBufferInput(proc.BufferTail(8192))
-	if prompt == "" {
-		// Also check s.PendingInput — the buffer poller may have already set it
-		prompt = s.PendingInput
-	}
-	if prompt == "" {
-		return
-	}
-
-	// Clear pendingInput and transition to processing
-	s.PendingInput = ""
-	prev := s.Status
-	s.Status = StatusProcessing
-	s.LastUsedAt = time.Now()
-	m.broadcastStatus(s, prev)
-	m.clearIdleSignals(s.PID)
-	log.Printf("[attach] session %s: prompt submitted via attach (%d chars)", sessionID, len(prompt))
-
-	// Deliver via the reliable prompt mechanism (Escape → Ctrl-U → text → Enter).
-	go m.deliverPromptAsync(sessionID, prompt)
+	m.triggerBufferPoll()
 }
 
 // --- Debug commands ---
