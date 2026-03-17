@@ -89,9 +89,8 @@ func (m *Manager) handleAttach(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "failed to create attach pipe: "+err.Error())
 	}
 
-	sid := s.ID
-	pipe.onInput = func(data []byte) {
-		m.handleAttachInput(sid, data)
+	pipe.onInput = func([]byte) {
+		m.triggerBufferPoll()
 	}
 
 	m.pipes[s.ID] = pipe
@@ -141,13 +140,6 @@ func (m *Manager) handlePtyResize(id any, req api.Msg) api.Msg {
 
 	log.Printf("[pty-resize] session %s: %dx%d", s.ID, int(cols), int(rows))
 	return api.OkResponse(id)
-}
-
-// handleAttachInput is called when raw bytes arrive from an attach client.
-// The bytes have already been written to the PTY by the attach pipe —
-// this just signals the buffer poller to re-check pendingInput.
-func (m *Manager) handleAttachInput(sessionID string, data []byte) {
-	m.triggerBufferPoll()
 }
 
 // --- Debug commands ---
