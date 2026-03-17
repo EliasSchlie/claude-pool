@@ -199,13 +199,22 @@ func (m *Manager) handleSet(id any, req api.Msg) api.Msg {
 		}
 	}
 
-	// Metadata
+	// Metadata — route structured fields (name, description) to their
+	// dedicated fields, everything else to Tags. Matches handleSetMetadata
+	// semantics so `set --meta name=foo` and `set-metadata {name: "foo"}`
+	// produce the same result.
 	if metadata, ok := req["metadata"].(map[string]any); ok {
-		if s.Metadata.Tags == nil {
-			s.Metadata.Tags = map[string]string{}
-		}
 		for k, v := range metadata {
-			if sv, ok := v.(string); ok {
+			sv, _ := v.(string)
+			switch k {
+			case "name":
+				s.Metadata.Name = sv
+			case "description":
+				s.Metadata.Description = sv
+			default:
+				if s.Metadata.Tags == nil {
+					s.Metadata.Tags = map[string]string{}
+				}
 				s.Metadata.Tags[k] = sv
 			}
 		}

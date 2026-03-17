@@ -180,11 +180,11 @@ func (m *Manager) handleHealth(id any) api.Msg {
 // Caller must hold m.mu.
 func (m *Manager) buildHealthResponse(id any) api.Msg {
 	// SPEC: slots — counts by slot state (sum = size).
-	// "crashed" is omitted: crashed processes are recycled immediately
-	// (watchProcessDone → tryReplaceDeadSessions), so the count is always 0.
+	// "crashed" is always 0 in practice (watchProcessDone → tryReplaceDeadSessions
+	// recycles immediately), but the spec requires the key to be present.
 	slots := map[string]float64{
 		"fresh": 0, "spawning": 0, "resuming": 0, "clearing": 0,
-		"idle": 0, "processing": 0,
+		"idle": 0, "processing": 0, "crashed": 0,
 	}
 	// SPEC: sessions — counts by session state (all sessions)
 	sessions := map[string]float64{
@@ -626,10 +626,9 @@ func (m *Manager) handleStop(id any, req api.Msg) api.Msg {
 			return api.ErrorResponse(id, "session is not processing or queued (status: "+s.ExternalStatus()+")")
 		}
 		// Fresh with PendingPrompt = externally "processing" (prompt queued
-		// for delivery on session-start). Cancel the pending prompt.
+		// for delivery on session-start). Cancel all pending work.
 		log.Printf("[stop] session %s: cancelling pending prompt (fresh, %d chars)", s.ID, len(s.PendingPrompt))
-		s.PendingPrompt = ""
-		s.PendingForce = false
+		s.ClearPending()
 		m.broadcastStatus(s, StatusProcessing)
 		m.savePoolState()
 		m.mu.Unlock()

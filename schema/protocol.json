@@ -46,29 +46,6 @@
       "description": "What to include per turn (JSONL only, ignored for buffer). last = user prompt + final assistant response, no tool calls. assistant = user prompt + all assistant text responses, no tool calls. tools = prompts + responses + tool calls/results, no metadata. raw = everything unfiltered."
     },
 
-    "poolState": {
-      "type": "object",
-      "properties": {
-        "size": {
-          "type": "integer",
-          "description": "Current slot count"
-        },
-        "sessions": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/sessionInfo" },
-          "description": "All sessions in the pool"
-        },
-        "queue": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/sessionId" },
-          "description": "Queued session IDs in FIFO order"
-        },
-        "config": { "$ref": "#/$defs/poolConfig" }
-      },
-      "required": ["size", "sessions", "queue", "config"],
-      "description": "Pool state: slots, sessions, queue, config"
-    },
-
     "healthReport": {
       "type": "object",
       "properties": {
@@ -92,7 +69,8 @@
             "resuming": { "type": "number" },
             "clearing": { "type": "number" },
             "idle": { "type": "number" },
-            "processing": { "type": "number" }
+            "processing": { "type": "number" },
+            "crashed": { "type": "number" }
           },
           "description": "Counts by slot state (sum = size)"
         },
@@ -217,7 +195,7 @@
     },
 
     "init": {
-      "description": "Initialize pool. Restores previously live sessions by default. Size optional (falls back to config).",
+      "description": "Initialize pool. Restores previously live sessions by default. Size optional (falls back to config). Returns Pool Object (same as health).",
       "request": {
         "type": "object",
         "properties": {
@@ -239,11 +217,11 @@
       "response": {
         "type": "object",
         "properties": {
-          "type": { "const": "pool" },
+          "type": { "const": "health" },
           "id": { "type": "integer" },
-          "pool": { "$ref": "#/$defs/poolState" }
+          "health": { "$ref": "#/$defs/healthReport" }
         },
-        "required": ["type", "pool"]
+        "required": ["type", "health"]
       }
     },
 
@@ -263,7 +241,13 @@
         "properties": {
           "type": { "const": "pool" },
           "id": { "type": "integer" },
-          "pool": { "$ref": "#/$defs/poolState" }
+          "pool": {
+            "type": "object",
+            "properties": {
+              "size": { "type": "integer" }
+            },
+            "required": ["size"]
+          }
         },
         "required": ["type", "pool"]
       }

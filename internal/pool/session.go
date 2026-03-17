@@ -64,6 +64,14 @@ type Session struct {
 	Flags string // flags used to spawn this session
 }
 
+// ClearPending cancels all pending work (prompt, force, resume).
+// Used by stop to ensure watchIdleSignal doesn't deliver stale prompts.
+func (s *Session) ClearPending() {
+	s.PendingPrompt = ""
+	s.PendingForce = false
+	s.PendingResume = ""
+}
+
 // IsLive returns true if the session has a live terminal.
 func (s *Session) IsLive() bool {
 	switch s.Status {

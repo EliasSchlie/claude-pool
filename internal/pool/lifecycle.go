@@ -618,6 +618,12 @@ func (m *Manager) stopProcessingSession(sid string, timeout time.Duration) {
 	m.awaitDelivery(sid)
 
 	m.mu.Lock()
+	// Clear any pending work — stop means cancel everything.
+	// Without this, watchIdleSignal would deliver PendingPrompt after
+	// Ctrl-C completes, making the session process again.
+	if s := m.sessions[sid]; s != nil {
+		s.ClearPending()
+	}
 	pid := 0
 	if proc := m.procs[sid]; proc != nil {
 		proc.WriteString("\x03")
@@ -729,15 +735,20 @@ func (m *Manager) writeIdleSignal(pid int, trigger string) {
 // then evicting an idle session if needed. Used after unpin/pin-expiry when
 // previously-pinned sessions become evictable. Must be called with m.mu held.
 func (m *Manager) tryDrainQueue() {
-	if len(m.queue) == 0 {
-		return
-	}
-	m.tryDequeue()
-	if len(m.queue) > 0 {
+	for len(m.queue) > 0 {
+		before := len(m.queue)
+		m.tryDequeue()
+		if len(m.queue) == 0 {
+			return
+		}
 		if evicted := m.findEvictableSession(); evicted != nil {
 			log.Printf("[queue] evicting %s to serve queue", evicted.ID)
 			m.offloadSessionLocked(evicted)
 			m.tryDequeue()
+		}
+		// No progress — all remaining sessions are pinned/processing
+		if len(m.queue) >= before {
+			return
 		}
 	}
 }

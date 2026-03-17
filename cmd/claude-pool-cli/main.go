@@ -987,6 +987,9 @@ func doPools(jsonMode bool) error {
 // SPEC: "defaults to that session's Claude Code UUID."
 // Prefers CLAUDE_CODE_SESSION_ID (set by Claude Code for any session) over
 // CLAUDE_POOL_SESSION_ID (set by pool daemon for pool sessions only).
+// NOTE: CLAUDE_CODE_SESSION_ID is not currently propagated by Claude Code to
+// bash command environments. Until it is, pool sessions fall back to the
+// internal pool session ID.
 func callerSessionID() string {
 	if uuid := os.Getenv("CLAUDE_CODE_SESSION_ID"); uuid != "" {
 		return uuid
