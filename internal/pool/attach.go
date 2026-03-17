@@ -20,7 +20,7 @@ type attachPipe struct {
 	listener   net.Listener
 	proc       *ptyPkg.Process
 	sub        chan []byte
-	onInput    func([]byte) // called with raw bytes from client → PTY (for state tracking)
+	onInput    func() // called after raw bytes written to PTY (triggers buffer poll)
 
 	mu      sync.Mutex
 	conns   map[net.Conn]struct{}
@@ -95,12 +95,12 @@ func (ap *attachPipe) acceptLoop() {
 			for {
 				n, err := conn.Read(buf)
 				if n > 0 {
-					if ap.onInput != nil {
-						ap.onInput(buf[:n])
-					}
 					if wErr := ap.proc.Write(buf[:n]); wErr != nil {
 						log.Printf("[attach] session %s: pty write error: %v", ap.sessionID, wErr)
 						break
+					}
+					if ap.onInput != nil {
+						ap.onInput()
 					}
 				}
 				if err != nil {

@@ -89,9 +89,7 @@ func (m *Manager) handleAttach(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "failed to create attach pipe: "+err.Error())
 	}
 
-	pipe.onInput = func([]byte) {
-		m.triggerBufferPoll()
-	}
+	pipe.onInput = func() { m.triggerBufferPoll() }
 
 	m.pipes[s.ID] = pipe
 	log.Printf("[attach] session %s: pipe created at %s", s.ID, pipe.socketPath)
