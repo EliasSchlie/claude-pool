@@ -548,25 +548,32 @@ func (m *Manager) handleWait(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "session not found: "+sessionID)
 	}
 
-	switch s.Status {
-	case StatusOffloaded:
-		m.mu.Unlock()
-		return api.ErrorResponse(id, "session is offloaded; use followup to resume")
-	case StatusArchived:
-		m.mu.Unlock()
-		return api.ErrorResponse(id, "session is archived")
-	case StatusError:
-		m.mu.Unlock()
-		return api.ErrorResponse(id, "session has error")
-	}
-
-	if s.Status == StatusIdle {
+	// captureAndReturn captures output and returns a wait result.
+	// Must be called with m.mu held; releases it before returning.
+	captureAndReturn := func(s *Session) api.Msg {
+		if source == "buffer" && !s.IsLive() {
+			m.mu.Unlock()
+			return api.ErrorResponse(id, "buffer source requires live terminal")
+		}
 		content := m.captureOutput(s, source, turns, detail)
 		m.mu.Unlock()
 		return api.Response(id, "result", api.Msg{
 			"sessionId": s.ID,
 			"content":   content,
 		})
+	}
+
+	switch s.Status {
+	case StatusIdle, StatusOffloaded:
+		// Offloaded: session finished and got evicted before we arrived.
+		// SPEC: JSONL capture works for offloaded sessions.
+		return captureAndReturn(s)
+	case StatusArchived:
+		m.mu.Unlock()
+		return api.ErrorResponse(id, "session is archived")
+	case StatusError:
+		m.mu.Unlock()
+		return api.ErrorResponse(id, "session has error")
 	}
 
 	sid := s.ID
@@ -586,16 +593,8 @@ func (m *Manager) handleWait(id any, req api.Msg) api.Msg {
 				return api.ErrorResponse(id, "session not found")
 			}
 			switch s.Status {
-			case StatusIdle:
-				content := m.captureOutput(s, source, turns, detail)
-				m.mu.Unlock()
-				return api.Response(id, "result", api.Msg{
-					"sessionId": sid,
-					"content":   content,
-				})
-			case StatusOffloaded:
-				m.mu.Unlock()
-				return api.ErrorResponse(id, "session is offloaded; use followup to resume")
+			case StatusIdle, StatusOffloaded:
+				return captureAndReturn(s)
 			case StatusError:
 				m.mu.Unlock()
 				return api.ErrorResponse(id, "session error")
