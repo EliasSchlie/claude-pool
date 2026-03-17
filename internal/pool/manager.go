@@ -42,6 +42,7 @@ type Manager struct {
 	pidToSID         map[int]string
 	pipes            map[string]*attachPipe   // sessionID → attach pipe
 	delivering       map[string]chan struct{} // sessionID → closed when in-flight deliverPrompt completes
+	terms            map[string]*sessionTerm  // sessionID → persistent headless terminal emulator
 	bufferPollSignal chan struct{}            // signals typing poller to re-check immediately
 	queue            []*Session
 	killTokens       int
@@ -61,6 +62,7 @@ func NewManager(p *paths.Pool, cfg *ConfigManager) *Manager {
 		pidToSID:         make(map[int]string),
 		pipes:            make(map[string]*attachPipe),
 		delivering:       make(map[string]chan struct{}),
+		terms:            make(map[string]*sessionTerm),
 		bufferPollSignal: make(chan struct{}, 1),
 		done:             make(chan struct{}),
 		statusNotify:     make(chan struct{}),

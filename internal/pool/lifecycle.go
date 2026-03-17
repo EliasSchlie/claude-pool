@@ -97,6 +97,7 @@ func (m *Manager) spawnSession(s *Session, resume bool) {
 	s.Flags = flags
 	m.procs[s.ID] = proc
 	m.pidToSID[proc.PID()] = s.ID
+	m.startSessionTerm(s.ID, proc)
 	log.Printf("[spawn] session %s: spawned pid=%d", s.ID, proc.PID())
 
 	m.watchProcessDone(s.ID, proc)
@@ -155,7 +156,8 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 
 	proc := m.procs[s.ID]
 
-	// Dissociate process from session (but keep process alive)
+	// Dissociate process from session (but keep process alive).
+	// Keep the terminal emulator — it'll be moved to the pre-warmed session below.
 	delete(m.procs, s.ID)
 	delete(m.pidToSID, s.PID)
 
@@ -183,6 +185,11 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 		m.sessions[pw.ID] = pw
 		m.procs[pw.ID] = proc
 		m.pidToSID[proc.PID()] = pw.ID
+		// Move the terminal emulator to the pre-warmed session (preserves incremental state)
+		if st := m.terms[s.ID]; st != nil {
+			m.terms[pw.ID] = st
+			delete(m.terms, s.ID)
+		}
 		log.Printf("[offload] session %s: recycled pid %d into pre-warmed session %s", s.ID, proc.PID(), pw.ID)
 
 		m.deliverPromptWithSettle(pw, "/clear", 200*time.Millisecond)
@@ -912,6 +919,12 @@ func (m *Manager) transferProcess(from, to *Session) *ptyPkg.Process {
 	if proc == nil {
 		return nil
 	}
+	// Move the persistent terminal emulator (don't recreate — preserves
+	// incremental state that would be lost by re-rendering the full buffer).
+	if st := m.terms[from.ID]; st != nil {
+		m.terms[to.ID] = st
+		delete(m.terms, from.ID)
+	}
 	delete(m.procs, from.ID)
 	delete(m.pidToSID, from.PID)
 	m.procs[to.ID] = proc
@@ -1072,6 +1085,7 @@ func (m *Manager) killSessionLocked(s *Session) {
 		delete(m.pipes, s.ID)
 	}
 
+	m.stopSessionTerm(s.ID)
 	if proc := m.procs[s.ID]; proc != nil {
 		proc.Kill()
 		proc.Close()

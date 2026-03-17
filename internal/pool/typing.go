@@ -3,9 +3,11 @@ package pool
 import (
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/EliasSchlie/claude-pool/internal/api"
+	ptyPkg "github.com/EliasSchlie/claude-pool/internal/pty"
 	"github.com/hinshun/vt10x"
 )
 
@@ -23,29 +25,79 @@ func containsBoxDrawing(s string) bool {
 	return false
 }
 
-// renderBuffer processes raw PTY output through a VT100 terminal emulator
-// to produce the actual rendered screen content. This correctly handles
-// cursor movement, screen clearing, and other escape sequences that
-// Claude Code's TUI uses heavily.
-func renderBuffer(buf []byte, cols, rows int) string {
+// sessionTerm wraps a persistent headless VT100 terminal emulator that
+// receives PTY output incrementally — just like a real terminal. This
+// produces correct rendering for cursor movement, insert, backspace, etc.
+// Re-rendering the full buffer from scratch each poll causes vt10x to
+// produce wrong output for complex cursor sequences.
+type sessionTerm struct {
+	mu   sync.Mutex
+	term vt10x.Terminal
+	sub  chan []byte
+	done chan struct{}
+}
+
+// newSessionTerm creates a persistent terminal emulator for a session's process.
+// It subscribes to PTY output and feeds it incrementally. Caller must call
+// stop() when the process is no longer associated with this session.
+func newSessionTerm(proc *ptyPkg.Process, cols, rows int) *sessionTerm {
 	if cols <= 0 {
 		cols = 80
 	}
 	if rows <= 0 {
 		rows = 24
 	}
-	term := vt10x.New(vt10x.WithSize(cols, rows))
-	term.Write(buf)
-	return term.String()
+	st := &sessionTerm{
+		term: vt10x.New(vt10x.WithSize(cols, rows)),
+		sub:  proc.Subscribe(),
+		done: make(chan struct{}),
+	}
+
+	// Don't feed the existing buffer — it can corrupt vt10x state when
+	// replayed in bulk. Subscribe delivers all NEW output incrementally,
+	// which vt10x processes correctly (just like a real terminal).
+	// By the time we poll for pendingInput, all relevant output will
+	// have arrived through the subscriber.
+
+	// Feed new output incrementally
+	go func() {
+		for {
+			select {
+			case data, ok := <-st.sub:
+				if !ok {
+					return
+				}
+				st.mu.Lock()
+				st.term.Write(data)
+				st.mu.Unlock()
+			case <-st.done:
+				return
+			}
+		}
+	}()
+
+	return st
 }
 
-// parseBufferInput extracts text typed after the ❯ prompt character.
-// The buf is first rendered through a VT100 terminal emulator to resolve
-// cursor movements and produce the actual screen content, then the
-// rendered lines are searched backwards for the prompt.
-func parseBufferInput(buf []byte, cols, rows int) string {
-	rendered := renderBuffer(buf, cols, rows)
+// renderedScreen returns the current terminal screen content.
+func (st *sessionTerm) renderedScreen() string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.term.String()
+}
 
+// stop unsubscribes from PTY output and stops the feed goroutine.
+func (st *sessionTerm) stop(proc *ptyPkg.Process) {
+	close(st.done)
+	if proc != nil {
+		proc.Unsubscribe(st.sub)
+	}
+}
+
+// parseRenderedInput extracts text typed after the ❯ prompt character from
+// rendered terminal screen content. Searches backwards from the end to find
+// the most recent prompt line.
+func parseRenderedInput(rendered string) string {
 	lines := strings.Split(rendered, "\n")
 
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -61,9 +113,25 @@ func parseBufferInput(buf []byte, cols, rows int) string {
 	return ""
 }
 
-// startTypingPoller launches a goroutine that periodically scans PTY buffers
-// of idle sessions to detect text typed after the ❯ prompt. This mirrors
-// Open Cockpit's buffer-based typing detection.
+// parseBufferInput renders raw PTY output through a fresh VT100 terminal
+// emulator and extracts text after the ❯ prompt. Used by unit tests and
+// as fallback when no persistent terminal exists.
+func parseBufferInput(buf []byte, cols, rows int) string {
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows <= 0 {
+		rows = 24
+	}
+	term := vt10x.New(vt10x.WithSize(cols, rows))
+	term.Write(buf)
+	return parseRenderedInput(term.String())
+}
+
+// startTypingPoller launches a goroutine that periodically reads the
+// persistent terminal emulator for each idle session to detect text typed
+// after the ❯ prompt. This mirrors Open Cockpit's buffer-based typing
+// detection.
 //
 // The poller is the sole source of pendingInput — no keystroke tracking.
 // PTY writes (attach, debug input) trigger immediate re-polls via
@@ -100,41 +168,30 @@ func (m *Manager) typingPollLoop() {
 	}
 }
 
-type bufferCheck struct {
-	id   string
-	buf  []byte
-	cols int
-	rows int
+type sessionCheck struct {
+	id       string
+	rendered string
 }
 
 func (m *Manager) pollBufferInput() {
 	m.mu.Lock()
-	var toCheck []bufferCheck
+	var toCheck []sessionCheck
 	for id, s := range m.sessions {
 		// Only poll idle sessions — fresh sessions have startup artifacts
 		// (trust dialog, etc.) that cause false positives.
 		if s.Status != StatusIdle {
 			continue
 		}
-		proc := m.procs[id]
-		if proc == nil {
+		st := m.terms[id]
+		if st == nil {
 			continue
 		}
-		cols, rows := 80, 24
-		if c, r, err := proc.GetSize(); err == nil {
-			cols, rows = int(c), int(r)
-		}
-		toCheck = append(toCheck, bufferCheck{
-			id:   id,
-			buf:  proc.Buffer(),
-			cols: cols,
-			rows: rows,
-		})
+		toCheck = append(toCheck, sessionCheck{id: id, rendered: st.renderedScreen()})
 	}
 	m.mu.Unlock()
 
 	for _, item := range toCheck {
-		input := parseBufferInput(item.buf, item.cols, item.rows)
+		input := parseRenderedInput(item.rendered)
 
 		m.mu.Lock()
 		s := m.sessions[item.id]
@@ -155,5 +212,26 @@ func (m *Manager) pollBufferInput() {
 			})
 		}
 		m.mu.Unlock()
+	}
+}
+
+// startSessionTerm creates and registers a persistent terminal emulator
+// for a session. Must be called with m.mu held.
+func (m *Manager) startSessionTerm(sessionID string, proc *ptyPkg.Process) {
+	cols, rows := 80, 24
+	if c, r, err := proc.GetSize(); err == nil {
+		cols, rows = int(c), int(r)
+	}
+	st := newSessionTerm(proc, cols, rows)
+	m.terms[sessionID] = st
+}
+
+// stopSessionTerm stops and removes a session's terminal emulator.
+// Must be called with m.mu held.
+func (m *Manager) stopSessionTerm(sessionID string) {
+	if st := m.terms[sessionID]; st != nil {
+		proc := m.procs[sessionID]
+		st.stop(proc)
+		delete(m.terms, sessionID)
 	}
 }

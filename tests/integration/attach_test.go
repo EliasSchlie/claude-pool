@@ -323,8 +323,13 @@ func TestAttach(t *testing.T) {
 		// Prevents: keystroke-based tracking reporting raw bytes ("hello" + DEL + DEL)
 		// instead of the terminal's actual state ("hel") after backspace processing.
 		// s1 is idle and pinned, no attach pipe (closed by multi-client test defer).
-		resp := sc.send(Msg{"type": "input", "sessionId": s1, "data": "hello\x7f\x7f"})
-		assertNotError(t, resp)
+		sc.send(Msg{"type": "input", "sessionId": s1, "data": "hello"})
+		p.waitForPendingInput(s1, func(v string) bool { return v == "hello" }, 10*time.Second)
+
+		// Send backspaces separately so TUI renders each redraw
+		sc.send(Msg{"type": "input", "sessionId": s1, "data": "\x7f"})
+		time.Sleep(200 * time.Millisecond)
+		sc.send(Msg{"type": "input", "sessionId": s1, "data": "\x7f"})
 
 		val := p.waitForPendingInput(s1, func(v string) bool { return v == "hel" }, 10*time.Second)
 		if val != "hel" {
@@ -338,13 +343,17 @@ func TestAttach(t *testing.T) {
 
 	t.Run("ctrl-W deletes word from pendingInput via buffer", func(t *testing.T) {
 		// Prevents: keystroke-based tracking not handling Ctrl-W (delete word),
-		// reporting "hello world" instead of "hello " after the terminal processes it.
-		resp := sc.send(Msg{"type": "input", "sessionId": s1, "data": "hello world\x17"})
-		assertNotError(t, resp)
+		// reporting "hello world" instead of "hello" after the terminal processes it.
+		// Claude's TUI Ctrl-W deletes the word AND preceding whitespace.
+		sc.send(Msg{"type": "input", "sessionId": s1, "data": "hello world"})
+		p.waitForPendingInput(s1, func(v string) bool { return v == "hello world" }, 10*time.Second)
 
-		val := p.waitForPendingInput(s1, func(v string) bool { return v == "hello " }, 10*time.Second)
-		if val != "hello " {
-			t.Fatalf("expected pendingInput %q after Ctrl-W, got %q", "hello ", val)
+		// Send Ctrl-W separately so TUI renders the word deletion
+		sc.send(Msg{"type": "input", "sessionId": s1, "data": "\x17"})
+
+		val := p.waitForPendingInput(s1, func(v string) bool { return v == "hello" }, 10*time.Second)
+		if val != "hello" {
+			t.Fatalf("expected pendingInput %q after Ctrl-W, got %q", "hello", val)
 		}
 
 		// Clean up
@@ -356,8 +365,17 @@ func TestAttach(t *testing.T) {
 		// Prevents: keystroke-based tracking appending raw escape sequences
 		// instead of reflecting the terminal's cursor-positioned insert.
 		// Type "hello", move cursor left 3, insert "X" → terminal shows "heXllo"
-		resp := sc.send(Msg{"type": "input", "sessionId": s1, "data": "hello\x1b[D\x1b[D\x1b[DX"})
-		assertNotError(t, resp)
+		sc.send(Msg{"type": "input", "sessionId": s1, "data": "hello"})
+		p.waitForPendingInput(s1, func(v string) bool { return v == "hello" }, 10*time.Second)
+
+		// Send arrow keys with delays so TUI renders each cursor move.
+		// Claude's TUI needs time to process each arrow and output the
+		// cursor-highlight redraw before the next arrow arrives.
+		for i := 0; i < 3; i++ {
+			sc.send(Msg{"type": "input", "sessionId": s1, "data": "\x1b[D"})
+			time.Sleep(500 * time.Millisecond)
+		}
+		sc.send(Msg{"type": "input", "sessionId": s1, "data": "X"})
 
 		val := p.waitForPendingInput(s1, func(v string) bool { return v == "heXllo" }, 10*time.Second)
 		if val != "heXllo" {
