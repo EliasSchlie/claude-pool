@@ -269,28 +269,6 @@ func (p *pool) runJSON(args ...string) Msg {
 	return msg
 }
 
-// runInSession executes a CLI command with CLAUDE_POOL_SESSION_ID set.
-func (p *pool) runInSession(sessionID string, args ...string) cmdResult {
-	p.t.Helper()
-	return p.execCLI([]string{
-		fmt.Sprintf("CLAUDE_POOL_SESSION_ID=%s", sessionID),
-	}, args...)
-}
-
-// runInSessionJSON is runInSession + JSON parsing.
-func (p *pool) runInSessionJSON(sessionID string, args ...string) Msg {
-	p.t.Helper()
-	result := p.runInSession(sessionID, append(args, "--json")...)
-	if result.ExitCode != 0 {
-		p.t.Fatalf("CLI exited %d: stderr=%s stdout=%s", result.ExitCode, result.Stderr, result.Stdout)
-	}
-	var msg Msg
-	if err := json.Unmarshal([]byte(result.Stdout), &msg); err != nil {
-		p.t.Fatalf("parse CLI JSON: %v\nstdout: %s", err, result.Stdout)
-	}
-	return msg
-}
-
 func (p *pool) execCLI(extraEnv []string, args ...string) cmdResult {
 	p.t.Helper()
 	fullArgs := append([]string{"--pool", p.name}, args...)

@@ -983,18 +983,38 @@ func doPools(jsonMode bool) error {
 
 // --- Helpers ---
 
-// callerSessionID returns the caller's session identifier for auto-detection.
+// callerSessionID returns the caller's Claude Code UUID for parent auto-detection.
 // SPEC: "defaults to that session's Claude Code UUID."
-// Prefers CLAUDE_CODE_SESSION_ID (set by Claude Code for any session) over
-// CLAUDE_POOL_SESSION_ID (set by pool daemon for pool sessions only).
-// NOTE: CLAUDE_CODE_SESSION_ID is not currently propagated by Claude Code to
-// bash command environments. Until it is, pool sessions fall back to the
-// internal pool session ID.
+//
+// Uses the PID registry: a PreToolUse Bash hook writes each Claude session's
+// PID → UUID to ~/.claude-pool/pid-registry/. The CLI's process tree is:
+//
+//	Claude process (PID X) → bash shell (PID Y) → claude-pool-cli (this process)
+//
+// So the caller's Claude PID is this process's grandparent.
 func callerSessionID() string {
-	if uuid := os.Getenv("CLAUDE_CODE_SESSION_ID"); uuid != "" {
-		return uuid
+	grandparent, err := parentPID(os.Getppid())
+	if err != nil {
+		return ""
 	}
-	return os.Getenv("CLAUDE_POOL_SESSION_ID")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".claude-pool", "pid-registry", strconv.Itoa(grandparent)))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// parentPID returns the parent PID of the given process.
+func parentPID(pid int) (int, error) {
+	out, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(string(out)))
 }
 
 // --- Output ---

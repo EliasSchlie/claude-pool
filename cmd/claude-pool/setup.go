@@ -19,6 +19,9 @@ var embeddedHooksJSON []byte
 //go:embed embedded/hook-runner.sh
 var embeddedHookRunner []byte
 
+//go:embed embedded/pid-registry.sh
+var embeddedPIDRegistry []byte
+
 const (
 	pluginName = "claude-pool"
 	pluginKey  = "claude-pool@local-tools"
@@ -111,6 +114,7 @@ func doInstall() (bool, error) {
 		"skills/claude-pool/SKILL.md": {skillContent, 0o644},
 		"hooks/hooks.json":            {embeddedHooksJSON, 0o644},
 		"hooks/hook-runner.sh":        {embeddedHookRunner, 0o755},
+		"hooks/pid-registry.sh":       {embeddedPIDRegistry, 0o755},
 	}
 
 	for relPath, f := range files {

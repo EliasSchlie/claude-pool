@@ -166,6 +166,16 @@ func (s *Session) ToMsg(verbosity string) map[string]any {
 	return m
 }
 
+// IsChildOf returns true if this session's parent matches the given session.
+// Matches against both session ID and Claude UUID, since auto-detected parents
+// use Claude UUIDs while explicit parents may use session IDs.
+func (s *Session) IsChildOf(parent *Session) bool {
+	if s.ParentID == "" {
+		return false
+	}
+	return s.ParentID == parent.ID || (parent.ClaudeUUID != "" && s.ParentID == parent.ClaudeUUID)
+}
+
 // ToMsgWithChildren converts a session to a protocol message with recursive children.
 // Verbosity is applied recursively to all children.
 // SPEC: children field only included in nested and full verbosity.
@@ -174,7 +184,7 @@ func (s *Session) ToMsgWithChildren(allSessions map[string]*Session, verbosity s
 	if verbosity == VerbosityNested || verbosity == VerbosityFull {
 		children := make([]any, 0)
 		for _, other := range allSessions {
-			if other.ParentID == s.ID && other.Status != StatusArchived {
+			if other.IsChildOf(s) && other.Status != StatusArchived {
 				children = append(children, other.ToMsgWithChildren(allSessions, verbosity))
 			}
 		}
