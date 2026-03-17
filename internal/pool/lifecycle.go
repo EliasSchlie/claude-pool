@@ -458,6 +458,7 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 
 				prevStatus := s.Status
 				s.Status = StatusIdle
+				s.Recycled = false
 				log.Printf("[idle-watch] session %s: %s → idle (pid=%d)", sessionID, prevStatus, s.PID)
 				m.broadcastStatus(s, prevStatus)
 				m.savePoolState()
