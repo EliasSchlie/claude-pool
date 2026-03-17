@@ -186,10 +186,12 @@ func (m *Manager) buildHealthResponse(id any) api.Msg {
 		"fresh": 0, "spawning": 0, "resuming": 0, "clearing": 0,
 		"idle": 0, "processing": 0, "crashed": 0,
 	}
-	// SPEC: sessions — counts by session state (all sessions)
+	// SPEC: sessions — counts by session state (all sessions).
+	// Pool Object lists queued/idle/processing/offloaded/archived; error is
+	// also a valid session state (Session States table) — include for consistency.
 	sessions := map[string]float64{
 		"queued": 0, "idle": 0, "processing": 0,
-		"offloaded": 0, "archived": 0,
+		"offloaded": 0, "error": 0, "archived": 0,
 	}
 
 	for _, s := range m.sessions {
@@ -520,7 +522,10 @@ func (m *Manager) handleWait(id any, req api.Msg) api.Msg {
 				continue
 			}
 			if s.Status == StatusProcessing || s.Status == StatusQueued || s.Status == StatusFresh {
-				if parentFilter != "" && s.ParentID != parentFilter {
+				// SPEC: "Wait for any busy session with this parent."
+				// When parentFilter="" (no auto-detection, no --parent),
+				// spec says: "waits for any busy session with no parent."
+				if s.ParentID != parentFilter {
 					continue
 				}
 				if busySession == nil || s.CreatedAt.After(busySession.CreatedAt) {
