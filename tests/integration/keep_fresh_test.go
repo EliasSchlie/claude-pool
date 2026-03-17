@@ -79,13 +79,11 @@ func TestKeepFresh(t *testing.T) {
 		info2 := pool.getSessionInfo(sessions[2])
 		assertStatus(t, info2, "idle")
 
-		// Verify health shows 1 fresh slot
-		health := pool.getHealth()
-		slots, _ := health["slots"].(map[string]any)
-		if numVal(slots, "fresh") < 1 {
-			t.Fatalf("expected at least 1 fresh slot, got %v (slots: %v)",
-				numVal(slots, "fresh"), slots)
-		}
+		// Verify health shows 1 fresh slot. The recycled process goes through
+		// clearing → fresh (SPEC: slot states), so wait for the transition.
+		pool.waitForSlotCondition("fresh>=1", func(slots Msg) bool {
+			return numVal(slots, "fresh") >= 1
+		}, 30*time.Second)
 	})
 
 	t.Run("keepFresh respects pins", func(t *testing.T) {
@@ -184,9 +182,12 @@ func TestKeepFresh(t *testing.T) {
 		infoProc := pool.getSessionInfo(proc)
 		assertStatus(t, infoProc, "processing")
 
-		// Cleanup
+		// Cleanup: restore keepFresh before stopping so the session stays idle.
+		// SPEC: "After any session becomes idle, the pool checks whether the
+		// number of fresh slots is below keepFresh." With keepFresh=3 still
+		// active, stop → idle → immediate offload (never catches idle).
+		pool.run("config", "--set", "keepFresh=1")
 		pool.run("stop", "--session", proc)
 		pool.waitForStatus(proc, "idle", 15*time.Second)
-		pool.run("config", "--set", "keepFresh=1")
 	})
 }

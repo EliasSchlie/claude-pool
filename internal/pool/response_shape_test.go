@@ -157,11 +157,21 @@ func TestBuildHealthResponseWithLockHeld(t *testing.T) {
 		if numVal(health, "size") != 2 {
 			t.Errorf("expected size 2, got %v", health["size"])
 		}
-		if _, ok := health["counts"]; !ok {
-			t.Error("missing counts")
+		// SPEC: Pool Object has slots (count object) and sessions (count object)
+		if _, ok := health["slots"]; !ok {
+			t.Error("missing slots")
+		}
+		if _, ok := health["sessions"]; !ok {
+			t.Error("missing sessions")
 		}
 		if _, ok := health["queueDepth"]; !ok {
 			t.Error("missing queueDepth")
+		}
+		if _, ok := health["name"]; !ok {
+			t.Error("missing name")
+		}
+		if _, ok := health["config"]; !ok {
+			t.Error("missing config")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("deadlock: buildHealthResponse blocked while lock held")
@@ -172,8 +182,12 @@ func TestBuildHealthResponseWithLockHeld(t *testing.T) {
 
 func newTestManager(t *testing.T) *Manager {
 	t.Helper()
+	dir := t.TempDir()
+	p := paths.New(dir)
 	return &Manager{
-		paths:    paths.New(t.TempDir()),
+		paths:    p,
+		poolName: "test",
+		config:   NewConfigManager(p.ConfigJSON()),
 		sessions: make(map[string]*Session),
 		procs:    make(map[string]*ptyPkg.Process),
 		pidToSID: make(map[int]string),

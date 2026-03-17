@@ -176,45 +176,64 @@ func (m *Manager) handleHealth(id any) api.Msg {
 	return m.buildHealthResponse(id)
 }
 
-// buildHealthResponse builds the health response. Caller must hold m.mu.
+// buildHealthResponse builds the Pool Object (SPEC: Pool Object table).
+// Caller must hold m.mu.
 func (m *Manager) buildHealthResponse(id any) api.Msg {
-	counts := map[string]float64{}
-	healthSessions := make([]any, 0)
-
-	for _, s := range m.sessions {
-		if s.Status == StatusArchived {
-			continue
-		}
-		status := s.ExternalStatus()
-		counts[status]++
-
-		// Track fresh pre-warmed slots separately for keepFresh monitoring.
-		// Includes both StatusFresh (starting) and PreWarmed+Idle (ready, unclaimed).
-		if s.PreWarmed && (s.Status == StatusFresh || s.Status == StatusIdle) {
-			counts["fresh"]++
-		}
-
-		hs := api.Msg{
-			"sessionId": s.ID,
-			"status":    status,
-		}
-		if s.PID > 0 {
-			hs["pid"] = float64(s.PID)
-			hs["pidAlive"] = isPidAlive(s.PID)
-		} else {
-			hs["pidAlive"] = false
-		}
-		healthSessions = append(healthSessions, hs)
+	// SPEC: slots — counts by slot state (sum = size).
+	// "crashed" is always 0 in practice (watchProcessDone → tryReplaceDeadSessions
+	// recycles immediately), but the spec requires the key to be present.
+	slots := map[string]float64{
+		"fresh": 0, "spawning": 0, "resuming": 0, "clearing": 0,
+		"idle": 0, "processing": 0, "crashed": 0,
+	}
+	// SPEC: sessions — counts by session state (all sessions).
+	// Pool Object lists queued/idle/processing/offloaded/archived; error is
+	// also a valid session state (Session States table) — include for consistency.
+	sessions := map[string]float64{
+		"queued": 0, "idle": 0, "processing": 0,
+		"offloaded": 0, "error": 0, "archived": 0,
 	}
 
-	return api.Response(id, "health", api.Msg{
-		"health": api.Msg{
-			"size":       float64(m.poolSize),
-			"counts":     counts,
-			"queueDepth": float64(len(m.queue)),
-			"sessions":   healthSessions,
-		},
-	})
+	for _, s := range m.sessions {
+		// Count session states (all sessions including archived)
+		sessions[s.ExternalStatus()]++
+
+		// Count slot states (only live sessions occupy slots)
+		if !s.IsLive() {
+			continue
+		}
+		switch {
+		case s.PreWarmed && s.Status == StatusFresh && s.Recycled:
+			slots["clearing"]++
+		case s.PreWarmed && s.Status == StatusFresh:
+			slots["spawning"]++
+		case s.PreWarmed && s.Status == StatusIdle:
+			slots["fresh"]++
+		case s.Status == StatusFresh && s.PendingResume != "":
+			slots["resuming"]++
+		case s.Status == StatusFresh:
+			slots["clearing"]++
+		case s.Status == StatusIdle:
+			slots["idle"]++
+		case s.Status == StatusProcessing:
+			slots["processing"]++
+		}
+	}
+
+	health := api.Msg{
+		"name":       m.poolName,
+		"size":       float64(m.poolSize),
+		"queueDepth": float64(len(m.queue)),
+		"slots":      slots,
+		"sessions":   sessions,
+	}
+	if cfg, err := m.config.Load(); err == nil {
+		health["config"] = configToMsg(cfg)
+	} else {
+		log.Printf("[health] config load failed: %v", err)
+	}
+
+	return api.Response(id, "health", api.Msg{"health": health})
 }
 
 // --- Start ---
@@ -503,7 +522,10 @@ func (m *Manager) handleWait(id any, req api.Msg) api.Msg {
 				continue
 			}
 			if s.Status == StatusProcessing || s.Status == StatusQueued || s.Status == StatusFresh {
-				if parentFilter != "" && s.ParentID != parentFilter {
+				// SPEC: "Wait for any busy session with this parent."
+				// When parentFilter="" (no auto-detection, no --parent),
+				// spec says: "waits for any busy session with no parent."
+				if s.ParentID != parentFilter {
 					continue
 				}
 				if busySession == nil || s.CreatedAt.After(busySession.CreatedAt) {
@@ -609,10 +631,9 @@ func (m *Manager) handleStop(id any, req api.Msg) api.Msg {
 			return api.ErrorResponse(id, "session is not processing or queued (status: "+s.ExternalStatus()+")")
 		}
 		// Fresh with PendingPrompt = externally "processing" (prompt queued
-		// for delivery on session-start). Cancel the pending prompt.
+		// for delivery on session-start). Cancel all pending work.
 		log.Printf("[stop] session %s: cancelling pending prompt (fresh, %d chars)", s.ID, len(s.PendingPrompt))
-		s.PendingPrompt = ""
-		s.PendingForce = false
+		s.ClearPending()
 		m.broadcastStatus(s, StatusProcessing)
 		m.savePoolState()
 		m.mu.Unlock()
@@ -790,14 +811,19 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 			}
 		}
 
-		if tree {
-			if callerId == "" && !all {
-				if s.ParentID != "" {
-					if _, hasParent := m.sessions[s.ParentID]; hasParent {
-						continue
-					}
+		// SPEC: "Only filters the top level — if a session appears as a child
+		// of another session, it's not repeated as a separate entry."
+		// Applied to default ls only. When explicit filters are active (--status,
+		// --archived, --parent), show all matching sessions without dedup.
+		if callerId == "" && !all && statusFilter == nil && !showArchived {
+			if s.ParentID != "" {
+				if _, hasParent := m.sessions[s.ParentID]; hasParent {
+					continue
 				}
 			}
+		}
+
+		if tree {
 			results = append(results, s.ToMsgWithChildren(m.sessions, verbosity))
 		} else {
 			results = append(results, s.ToMsg(verbosity))

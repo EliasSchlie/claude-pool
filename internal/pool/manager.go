@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,9 +26,10 @@ import (
 
 // Manager is the core pool business logic. All state mutations go through its mutex.
 type Manager struct {
-	paths  *paths.Pool
-	config *ConfigManager
-	hub    *api.SubscriberHub
+	paths    *paths.Pool
+	poolName string // Pool name (directory basename), included in health/init responses
+	config   *ConfigManager
+	hub      *api.SubscriberHub
 
 	// connAcceptedAt returns when a connection was accepted by the server.
 	connAcceptedAt func(net.Conn) time.Time
@@ -51,6 +53,7 @@ type Manager struct {
 func NewManager(p *paths.Pool, cfg *ConfigManager) *Manager {
 	return &Manager{
 		paths:        p,
+		poolName:     filepath.Base(p.Root),
 		config:       cfg,
 		hub:          api.NewSubscriberHub(),
 		sessions:     make(map[string]*Session),

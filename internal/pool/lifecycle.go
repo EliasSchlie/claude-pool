@@ -174,9 +174,13 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 		pw := m.newSession("")
 		pw.Status = StatusFresh
 		pw.PreWarmed = true
+		pw.Recycled = true
 		pw.PID = proc.PID()
 		pw.Cwd = s.Cwd
-		// Don't carry over ClaudeUUID — /clear will create a new session
+		// Don't carry over ClaudeUUID — /clear will create a new session.
+		// Remove the stale PID→UUID mapping so the idle signal watcher doesn't
+		// read the old session's UUID before /clear writes the new one.
+		os.Remove(m.paths.SessionPID(proc.PID()))
 		m.sessions[pw.ID] = pw
 		m.procs[pw.ID] = proc
 		m.pidToSID[proc.PID()] = pw.ID
@@ -454,6 +458,7 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 
 				prevStatus := s.Status
 				s.Status = StatusIdle
+				s.Recycled = false
 				log.Printf("[idle-watch] session %s: %s → idle (pid=%d)", sessionID, prevStatus, s.PID)
 				m.broadcastStatus(s, prevStatus)
 				m.savePoolState()
@@ -614,6 +619,12 @@ func (m *Manager) stopProcessingSession(sid string, timeout time.Duration) {
 	m.awaitDelivery(sid)
 
 	m.mu.Lock()
+	// Clear any pending work — stop means cancel everything.
+	// Without this, watchIdleSignal would deliver PendingPrompt after
+	// Ctrl-C completes, making the session process again.
+	if s := m.sessions[sid]; s != nil {
+		s.ClearPending()
+	}
 	pid := 0
 	if proc := m.procs[sid]; proc != nil {
 		proc.WriteString("\x03")
@@ -720,6 +731,28 @@ func (m *Manager) writeIdleSignal(pid int, trigger string) {
 }
 
 // --- Queue management ---
+
+// tryDrainQueue attempts to serve queued requests by trying free slots first,
+// then evicting an idle session if needed. Used after unpin/pin-expiry when
+// previously-pinned sessions become evictable. Must be called with m.mu held.
+func (m *Manager) tryDrainQueue() {
+	for len(m.queue) > 0 {
+		before := len(m.queue)
+		m.tryDequeue()
+		if len(m.queue) == 0 {
+			return
+		}
+		if evicted := m.findEvictableSession(); evicted != nil {
+			log.Printf("[queue] evicting %s to serve queue", evicted.ID)
+			m.offloadSessionLocked(evicted)
+			m.tryDequeue()
+		}
+		// No progress — all remaining sessions are pinned/processing
+		if len(m.queue) >= before {
+			return
+		}
+	}
+}
 
 // tryDequeueWithEviction attempts to dequeue a session by first trying free
 // slots, then evicting an idle session if needed. excludeID prevents evicting
@@ -1105,16 +1138,21 @@ func (m *Manager) expirePins() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	expired := false
 	now := time.Now()
 	for _, s := range m.sessions {
 		if s.Pinned && !s.PinExpiry.IsZero() && now.After(s.PinExpiry) {
 			log.Printf("[pin-expiry] session %s: pin expired", s.ID)
 			s.Pinned = false
+			expired = true
 			m.broadcastEvent(api.Msg{
 				"type": "event", "event": "updated",
 				"sessionId": s.ID, "changes": api.Msg{"pinned": false},
 			})
 		}
+	}
+	if expired {
+		m.tryDrainQueue()
 	}
 }
 
