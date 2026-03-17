@@ -194,6 +194,9 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 
 		m.deliverPromptWithSettle(pw, "/clear", 200*time.Millisecond)
 		m.startWatchers(pw, proc)
+	} else {
+		// Process is nil or exited — can't recycle. Clean up orphaned terminal.
+		m.stopSessionTerm(s.ID)
 	}
 }
 
@@ -306,6 +309,7 @@ func (m *Manager) watchProcessDone(sessionID string, proc *ptyPkg.Process) {
 				pipe.Close()
 				delete(m.pipes, sessionID)
 			}
+			m.stopSessionTerm(sessionID)
 			delete(m.procs, sessionID)
 		}
 

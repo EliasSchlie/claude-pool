@@ -114,8 +114,9 @@ func parseRenderedInput(rendered string) string {
 }
 
 // parseBufferInput renders raw PTY output through a fresh VT100 terminal
-// emulator and extracts text after the ❯ prompt. Used by unit tests and
-// as fallback when no persistent terminal exists.
+// emulator and extracts text after the ❯ prompt. Test-only convenience
+// wrapper — production code uses parseRenderedInput via the persistent
+// sessionTerm.
 func parseBufferInput(buf []byte, cols, rows int) string {
 	if cols <= 0 {
 		cols = 80
