@@ -34,36 +34,36 @@ type Manager struct {
 	// connAcceptedAt returns when a connection was accepted by the server.
 	connAcceptedAt func(net.Conn) time.Time
 
-	mu             sync.Mutex
-	initialized    bool
-	poolSize       int
-	sessions       map[string]*Session
-	procs          map[string]*ptyPkg.Process
-	pidToSID       map[int]string
-	pipes          map[string]*attachPipe   // sessionID → attach pipe
-	attachTyping   map[string][]byte        // sessionID → text typed via attach (for prompt delivery on Enter)
-	delivering     map[string]chan struct{} // sessionID → closed when in-flight deliverPrompt completes
-	queue          []*Session
-	killTokens     int
-	done           chan struct{}
-	statusNotify   chan struct{} // closed on every broadcastStatus; waiters select on it for zero-latency status detection
-	transcriptDirs []string      // override transcript search dirs (for testing; empty = default ~/.claude/projects)
+	mu               sync.Mutex
+	initialized      bool
+	poolSize         int
+	sessions         map[string]*Session
+	procs            map[string]*ptyPkg.Process
+	pidToSID         map[int]string
+	pipes            map[string]*attachPipe   // sessionID → attach pipe
+	delivering       map[string]chan struct{} // sessionID → closed when in-flight deliverPrompt completes
+	bufferPollSignal chan struct{}            // signals typing poller to re-check immediately
+	queue            []*Session
+	killTokens       int
+	done             chan struct{}
+	statusNotify     chan struct{} // closed on every broadcastStatus; waiters select on it for zero-latency status detection
+	transcriptDirs   []string      // override transcript search dirs (for testing; empty = default ~/.claude/projects)
 }
 
 func NewManager(p *paths.Pool, cfg *ConfigManager) *Manager {
 	return &Manager{
-		paths:        p,
-		poolName:     filepath.Base(p.Root),
-		config:       cfg,
-		hub:          api.NewSubscriberHub(),
-		sessions:     make(map[string]*Session),
-		procs:        make(map[string]*ptyPkg.Process),
-		pidToSID:     make(map[int]string),
-		pipes:        make(map[string]*attachPipe),
-		attachTyping: make(map[string][]byte),
-		delivering:   make(map[string]chan struct{}),
-		done:         make(chan struct{}),
-		statusNotify: make(chan struct{}),
+		paths:            p,
+		poolName:         filepath.Base(p.Root),
+		config:           cfg,
+		hub:              api.NewSubscriberHub(),
+		sessions:         make(map[string]*Session),
+		procs:            make(map[string]*ptyPkg.Process),
+		pidToSID:         make(map[int]string),
+		pipes:            make(map[string]*attachPipe),
+		delivering:       make(map[string]chan struct{}),
+		bufferPollSignal: make(chan struct{}, 1),
+		done:             make(chan struct{}),
+		statusNotify:     make(chan struct{}),
 	}
 }
 

@@ -164,7 +164,6 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 	s.PID = 0
 	s.Pinned = false
 	s.PendingInput = ""
-	delete(m.attachTyping, s.ID)
 	m.broadcastStatus(s, prevStatus)
 
 	// Recycle the process: create a pre-warmed session to hold it,
@@ -1054,7 +1053,6 @@ func (m *Manager) killSessionLocked(s *Session) {
 		delete(m.pidToSID, s.PID)
 	}
 
-	delete(m.attachTyping, s.ID)
 	delete(m.sessions, s.ID)
 	m.broadcastStatus(s, prevStatus)
 }

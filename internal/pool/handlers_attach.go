@@ -40,10 +40,11 @@ func (m *Manager) handleInput(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "write error: "+err.Error())
 	}
 
-	// Track pendingInput the same way attach does
-	m.trackInput(s, []byte(data))
-
 	log.Printf("[input] session %s: wrote %d bytes", s.ID, len(data))
+
+	// Signal the buffer poller to re-check pendingInput
+	m.triggerBufferPoll()
+
 	return api.OkResponse(id)
 }
 
@@ -143,64 +144,37 @@ func (m *Manager) handlePtyResize(id any, req api.Msg) api.Msg {
 	return api.OkResponse(id)
 }
 
-// inputClass holds classified raw input bytes.
-type inputClass struct {
-	hasCtrlU  bool
-	hasEnter  bool
-	printable []byte
-}
-
-// classifyInput categorizes raw bytes into control signals and printable text.
-func classifyInput(data []byte) inputClass {
-	var ic inputClass
+// hasEnter checks if raw bytes contain an Enter keystroke (\r or \n).
+func hasEnter(data []byte) bool {
 	for _, b := range data {
-		switch {
-		case b == 0x15: // Ctrl-U
-			ic.hasCtrlU = true
-		case b == '\r' || b == '\n': // Enter
-			ic.hasEnter = true
-		case b >= 0x20 && b != 0x7f: // printable (not DEL)
-			ic.printable = append(ic.printable, b)
+		if b == '\r' || b == '\n' {
+			return true
 		}
 	}
-	return ic
+	return false
 }
 
-// trackInput updates pendingInput based on raw bytes written to a session's PTY.
-// Caller must hold m.mu. Used by handleInput (debug input) and handleAttachInput.
-func (m *Manager) trackInput(s *Session, data []byte) {
-	ic := classifyInput(data)
-
-	switch {
-	case ic.hasCtrlU:
-		if s.PendingInput != "" {
-			s.PendingInput = ""
-			s.LastUsedAt = time.Now()
-			delete(m.attachTyping, s.ID)
-			m.broadcastEvent(api.Msg{
-				"type": "event", "event": "updated",
-				"sessionId": s.ID, "changes": api.Msg{"pendingInput": ""},
-			})
-		}
-	case len(ic.printable) > 0 && (s.Status == StatusIdle || s.Status == StatusFresh):
-		m.attachTyping[s.ID] = append(m.attachTyping[s.ID], ic.printable...)
-		s.PendingInput = string(m.attachTyping[s.ID])
-		s.LastUsedAt = time.Now()
-		m.broadcastEvent(api.Msg{
-			"type": "event", "event": "updated",
-			"sessionId": s.ID, "changes": api.Msg{"pendingInput": s.PendingInput},
-		})
-	}
-}
-
-// handleAttachInput classifies raw bytes from an attach client and manages
-// pendingInput property and state transitions. Raw bytes always pass through
-// to the PTY (the attach pipe writes them directly).
+// handleAttachInput detects Enter keystrokes from attach clients to trigger
+// prompt submission. Raw bytes always pass through to the PTY (the attach
+// pipe writes them directly).
 //
-// When Enter is detected, the accumulated text is delivered via deliverPrompt
-// (Escape → Ctrl-U → text → Enter with proper timing) to ensure Claude Code's
-// TUI processes the prompt reliably.
+// pendingInput is tracked solely by the buffer poller (typing.go) — this
+// handler only watches for Enter to submit whatever text the buffer poller
+// has already detected.
+//
+// When Enter is detected with pending text, the text is delivered via
+// deliverPrompt (Escape → Ctrl-U → text → Enter with proper timing) to
+// ensure Claude Code's TUI processes the prompt reliably.
 func (m *Manager) handleAttachInput(sessionID string, data []byte) {
+	if !hasEnter(data) {
+		// No Enter — just signal the buffer poller to update pendingInput
+		m.triggerBufferPoll()
+		return
+	}
+
+	// Brief delay to let the terminal process the keystroke before reading buffer
+	time.Sleep(50 * time.Millisecond)
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -209,52 +183,35 @@ func (m *Manager) handleAttachInput(sessionID string, data []byte) {
 		return
 	}
 
-	ic := classifyInput(data)
-
-	switch {
-	case ic.hasCtrlU && s.PendingInput != "":
-		s.PendingInput = ""
-		s.LastUsedAt = time.Now()
-		delete(m.attachTyping, sessionID)
-		m.broadcastEvent(api.Msg{
-			"type": "event", "event": "updated",
-			"sessionId": s.ID, "changes": api.Msg{"pendingInput": ""},
-		})
-
-	case ic.hasEnter && (s.PendingInput != "" || ((s.Status == StatusIdle || s.Status == StatusFresh) && len(ic.printable) > 0)):
-		// Submit prompt
-		buf := m.attachTyping[sessionID]
-		buf = append(buf, ic.printable...)
-		prompt := string(buf)
-		delete(m.attachTyping, sessionID)
-
-		if prompt == "" {
-			return
-		}
-
-		// Clear pendingInput and transition to processing
-		s.PendingInput = ""
-		prev := s.Status
-		s.Status = StatusProcessing
-		s.LastUsedAt = time.Now()
-		m.broadcastStatus(s, prev)
-		m.clearIdleSignals(s.PID)
-		log.Printf("[attach] session %s: prompt submitted via attach (%d chars)", sessionID, len(prompt))
-
-		// Also deliver via the reliable prompt mechanism (Escape → Ctrl-U → text → Enter).
-		// Raw bytes reach the PTY too, but Claude's TUI may not reliably process
-		// raw input without the Escape/Ctrl-U reset sequence.
-		go m.deliverPromptAsync(sessionID, prompt)
-
-	case len(ic.printable) > 0 && (s.Status == StatusIdle || s.Status == StatusFresh):
-		m.attachTyping[sessionID] = append(m.attachTyping[sessionID], ic.printable...)
-		s.PendingInput = string(m.attachTyping[sessionID])
-		s.LastUsedAt = time.Now()
-		m.broadcastEvent(api.Msg{
-			"type": "event", "event": "updated",
-			"sessionId": s.ID, "changes": api.Msg{"pendingInput": s.PendingInput},
-		})
+	if s.Status != StatusIdle && s.Status != StatusFresh {
+		return
 	}
+
+	// Read pendingInput from the buffer (the source of truth)
+	proc := m.procs[sessionID]
+	if proc == nil {
+		return
+	}
+	prompt := parseBufferInput(proc.BufferTail(8192))
+	if prompt == "" {
+		// Also check s.PendingInput — the buffer poller may have already set it
+		prompt = s.PendingInput
+	}
+	if prompt == "" {
+		return
+	}
+
+	// Clear pendingInput and transition to processing
+	s.PendingInput = ""
+	prev := s.Status
+	s.Status = StatusProcessing
+	s.LastUsedAt = time.Now()
+	m.broadcastStatus(s, prev)
+	m.clearIdleSignals(s.PID)
+	log.Printf("[attach] session %s: prompt submitted via attach (%d chars)", sessionID, len(prompt))
+
+	// Deliver via the reliable prompt mechanism (Escape → Ctrl-U → text → Enter).
+	go m.deliverPromptAsync(sessionID, prompt)
 }
 
 // --- Debug commands ---

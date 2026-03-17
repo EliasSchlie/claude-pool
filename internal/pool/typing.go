@@ -54,13 +54,24 @@ func parseBufferInput(buf []byte) string {
 }
 
 // startTypingPoller launches a goroutine that periodically scans PTY buffers
-// of idle sessions (without an attach pipe) to detect text typed after the ❯
-// prompt. This mirrors Open Cockpit's buffer-based typing detection.
+// of idle sessions to detect text typed after the ❯ prompt. This mirrors
+// Open Cockpit's buffer-based typing detection.
 //
-// Sessions with an active attach pipe are skipped — the attach handler
-// provides lower-latency keystroke-by-keystroke tracking.
+// The poller is the sole source of pendingInput — no keystroke tracking.
+// PTY writes (attach, debug input) trigger immediate re-polls via
+// triggerBufferPoll so detection latency stays low.
 func (m *Manager) startTypingPoller() {
 	go m.typingPollLoop()
+}
+
+// triggerBufferPoll signals that a PTY write occurred and the buffer should
+// be re-checked soon. Called after any raw write (attach input, debug input).
+func (m *Manager) triggerBufferPoll() {
+	select {
+	case m.bufferPollSignal <- struct{}{}:
+	default:
+		// Already signaled, poll will run soon
+	}
 }
 
 func (m *Manager) typingPollLoop() {
@@ -72,6 +83,10 @@ func (m *Manager) typingPollLoop() {
 		case <-m.done:
 			return
 		case <-ticker.C:
+			m.pollBufferInput()
+		case <-m.bufferPollSignal:
+			// Brief delay to let the terminal process the input
+			time.Sleep(50 * time.Millisecond)
 			m.pollBufferInput()
 		}
 	}
@@ -88,7 +103,7 @@ func (m *Manager) pollBufferInput() {
 	for id, s := range m.sessions {
 		// Only poll idle sessions — fresh sessions have startup artifacts
 		// (trust dialog, etc.) that cause false positives.
-		if s.Status != StatusIdle || m.pipes[id] != nil {
+		if s.Status != StatusIdle {
 			continue
 		}
 		proc := m.procs[id]
@@ -104,7 +119,7 @@ func (m *Manager) pollBufferInput() {
 
 		m.mu.Lock()
 		s := m.sessions[item.id]
-		if s == nil || s.Status != StatusIdle || m.pipes[item.id] != nil {
+		if s == nil || s.Status != StatusIdle {
 			m.mu.Unlock()
 			continue
 		}
