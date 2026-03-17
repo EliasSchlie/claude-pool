@@ -10,6 +10,12 @@ import (
 	"time"
 )
 
+// Sync hook scripts from hooks/ (source of truth) to embedded/ (for go:embed).
+// Run `go generate ./cmd/claude-pool/` after editing hooks/.
+//go:generate cp ../../hooks/hooks.json embedded/hooks.json
+//go:generate cp ../../hooks/hook-runner.sh embedded/hook-runner.sh
+//go:generate cp ../../hooks/pid-registry.sh embedded/pid-registry.sh
+
 //go:embed embedded/skill.md
 var embeddedSkill embed.FS
 

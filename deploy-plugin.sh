@@ -5,4 +5,8 @@
 set -euo pipefail
 SCRIPT_DIR=$(dirname "$(realpath "$0")")
 cd "$SCRIPT_DIR"
+
+# Sync hook scripts to embedded/ (source of truth is hooks/)
+go generate ./cmd/claude-pool/
+
 go run ./cmd/claude-pool install
