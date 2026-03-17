@@ -3,9 +3,12 @@ package pool
 import (
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/EliasSchlie/claude-pool/internal/api"
+	ptyPkg "github.com/EliasSchlie/claude-pool/internal/pty"
+	"github.com/hinshun/vt10x"
 )
 
 const promptChar = "❯"
@@ -22,28 +25,85 @@ func containsBoxDrawing(s string) bool {
 	return false
 }
 
-// parseBufferInput extracts text typed after the ❯ prompt character in
-// terminal output. Searches backwards from the end of the buffer to find
-// the most recent prompt line. Callers should pass only the buffer tail
-// (e.g. 8KB) to avoid processing the full ring buffer.
-//
-// Split on both \n and \r — Claude Code's TUI uses \r for status bar
-// redraws, and without splitting on \r the status bar text gets
-// concatenated with the prompt line causing false positives.
-func parseBufferInput(buf []byte) string {
-	stripped := stripANSI(string(buf))
+// sessionTerm wraps a persistent headless VT100 terminal emulator that
+// receives PTY output incrementally — just like a real terminal. This
+// produces correct rendering for cursor movement, insert, backspace, etc.
+// Re-rendering the full buffer from scratch each poll causes vt10x to
+// produce wrong output for complex cursor sequences.
+type sessionTerm struct {
+	mu   sync.Mutex
+	term vt10x.Terminal
+	sub  chan []byte
+	done chan struct{}
+}
 
-	// Split on any line boundary (\n, \r, or \r\n)
-	lines := strings.FieldsFunc(stripped, func(r rune) bool {
-		return r == '\n' || r == '\r'
-	})
+// newSessionTerm creates a persistent terminal emulator for a session's process.
+// It subscribes to PTY output and feeds it incrementally. Caller must call
+// stop() when the process is no longer associated with this session.
+func newSessionTerm(proc *ptyPkg.Process, cols, rows int) *sessionTerm {
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows <= 0 {
+		rows = 24
+	}
+	st := &sessionTerm{
+		term: vt10x.New(vt10x.WithSize(cols, rows)),
+		sub:  proc.Subscribe(),
+		done: make(chan struct{}),
+	}
+
+	// Don't feed the existing buffer — it can corrupt vt10x state when
+	// replayed in bulk. Subscribe delivers all NEW output incrementally,
+	// which vt10x processes correctly (just like a real terminal).
+	// By the time we poll for pendingInput, all relevant output will
+	// have arrived through the subscriber.
+
+	// Feed new output incrementally
+	go func() {
+		for {
+			select {
+			case data, ok := <-st.sub:
+				if !ok {
+					return
+				}
+				st.mu.Lock()
+				st.term.Write(data)
+				st.mu.Unlock()
+			case <-st.done:
+				return
+			}
+		}
+	}()
+
+	return st
+}
+
+// renderedScreen returns the current terminal screen content.
+func (st *sessionTerm) renderedScreen() string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.term.String()
+}
+
+// stop unsubscribes from PTY output and stops the feed goroutine.
+func (st *sessionTerm) stop(proc *ptyPkg.Process) {
+	close(st.done)
+	if proc != nil {
+		proc.Unsubscribe(st.sub)
+	}
+}
+
+// parseRenderedInput extracts text typed after the ❯ prompt character from
+// rendered terminal screen content. Searches backwards from the end to find
+// the most recent prompt line.
+func parseRenderedInput(rendered string) string {
+	lines := strings.Split(rendered, "\n")
 
 	for i := len(lines) - 1; i >= 0; i-- {
-		line := lines[i]
+		line := strings.TrimRight(lines[i], " ")
 		if idx := strings.LastIndex(line, promptChar); idx >= 0 {
 			input := strings.TrimSpace(line[idx+len(promptChar):])
-			// Reject false positives: TUI artifacts contain box-drawing
-			// chars, status bar text, etc. Real user input is plain text.
 			if containsBoxDrawing(input) {
 				continue
 			}
@@ -53,14 +113,42 @@ func parseBufferInput(buf []byte) string {
 	return ""
 }
 
-// startTypingPoller launches a goroutine that periodically scans PTY buffers
-// of idle sessions (without an attach pipe) to detect text typed after the ❯
-// prompt. This mirrors Open Cockpit's buffer-based typing detection.
+// parseBufferInput renders raw PTY output through a fresh VT100 terminal
+// emulator and extracts text after the ❯ prompt. Test-only convenience
+// wrapper — production code uses parseRenderedInput via the persistent
+// sessionTerm.
+func parseBufferInput(buf []byte, cols, rows int) string {
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows <= 0 {
+		rows = 24
+	}
+	term := vt10x.New(vt10x.WithSize(cols, rows))
+	term.Write(buf)
+	return parseRenderedInput(term.String())
+}
+
+// startTypingPoller launches a goroutine that periodically reads the
+// persistent terminal emulator for each idle session to detect text typed
+// after the ❯ prompt. This mirrors Open Cockpit's buffer-based typing
+// detection.
 //
-// Sessions with an active attach pipe are skipped — the attach handler
-// provides lower-latency keystroke-by-keystroke tracking.
+// The poller is the sole source of pendingInput — no keystroke tracking.
+// PTY writes (attach, debug input) trigger immediate re-polls via
+// triggerBufferPoll so detection latency stays low.
 func (m *Manager) startTypingPoller() {
 	go m.typingPollLoop()
+}
+
+// triggerBufferPoll signals that a PTY write occurred and the buffer should
+// be re-checked soon. Called after any raw write (attach input, debug input).
+func (m *Manager) triggerBufferPoll() {
+	select {
+	case m.bufferPollSignal <- struct{}{}:
+	default:
+		// Already signaled, poll will run soon
+	}
 }
 
 func (m *Manager) typingPollLoop() {
@@ -73,38 +161,42 @@ func (m *Manager) typingPollLoop() {
 			return
 		case <-ticker.C:
 			m.pollBufferInput()
+		case <-m.bufferPollSignal:
+			// Brief delay to let the terminal process the input
+			time.Sleep(50 * time.Millisecond)
+			m.pollBufferInput()
 		}
 	}
 }
 
-type bufferCheck struct {
-	id  string
-	buf []byte
+type sessionCheck struct {
+	id       string
+	rendered string
 }
 
 func (m *Manager) pollBufferInput() {
 	m.mu.Lock()
-	var toCheck []bufferCheck
+	var toCheck []sessionCheck
 	for id, s := range m.sessions {
 		// Only poll idle sessions — fresh sessions have startup artifacts
 		// (trust dialog, etc.) that cause false positives.
-		if s.Status != StatusIdle || m.pipes[id] != nil {
+		if s.Status != StatusIdle {
 			continue
 		}
-		proc := m.procs[id]
-		if proc == nil {
+		st := m.terms[id]
+		if st == nil {
 			continue
 		}
-		toCheck = append(toCheck, bufferCheck{id: id, buf: proc.BufferTail(8192)})
+		toCheck = append(toCheck, sessionCheck{id: id, rendered: st.renderedScreen()})
 	}
 	m.mu.Unlock()
 
 	for _, item := range toCheck {
-		input := parseBufferInput(item.buf)
+		input := parseRenderedInput(item.rendered)
 
 		m.mu.Lock()
 		s := m.sessions[item.id]
-		if s == nil || s.Status != StatusIdle || m.pipes[item.id] != nil {
+		if s == nil || s.Status != StatusIdle {
 			m.mu.Unlock()
 			continue
 		}
@@ -121,5 +213,26 @@ func (m *Manager) pollBufferInput() {
 			})
 		}
 		m.mu.Unlock()
+	}
+}
+
+// startSessionTerm creates and registers a persistent terminal emulator
+// for a session. Must be called with m.mu held.
+func (m *Manager) startSessionTerm(sessionID string, proc *ptyPkg.Process) {
+	cols, rows := 80, 24
+	if c, r, err := proc.GetSize(); err == nil {
+		cols, rows = int(c), int(r)
+	}
+	st := newSessionTerm(proc, cols, rows)
+	m.terms[sessionID] = st
+}
+
+// stopSessionTerm stops and removes a session's terminal emulator.
+// Must be called with m.mu held.
+func (m *Manager) stopSessionTerm(sessionID string) {
+	if st := m.terms[sessionID]; st != nil {
+		proc := m.procs[sessionID]
+		st.stop(proc)
+		delete(m.terms, sessionID)
 	}
 }
