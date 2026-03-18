@@ -266,10 +266,7 @@ func filterTools(entries []transcriptEntry) string {
 		if typ != "user" && typ != "assistant" {
 			continue
 		}
-		stripped := stripEntryMetadata(e.data)
-		if out, err := json.Marshal(stripped); err == nil {
-			lines = append(lines, string(out))
-		}
+		lines = append(lines, marshalEntry(e, true, false))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -298,10 +295,7 @@ func filterAssistantDetail(entries []transcriptEntry, lastOnly bool) string {
 	for _, t := range turns {
 		// User prompt — strip metadata for clean output.
 		if len(t) > 0 && isUserPrompt(t[0].data) {
-			stripped := stripEntryMetadata(t[0].data)
-			if out, err := json.Marshal(stripped); err == nil {
-				lines = append(lines, string(out))
-			}
+			lines = append(lines, marshalEntry(t[0], true, false))
 		}
 
 		if lastOnly {
@@ -309,7 +303,7 @@ func filterAssistantDetail(entries []transcriptEntry, lastOnly bool) string {
 			for i := len(t) - 1; i >= 0; i-- {
 				typ, _ := t[i].data["type"].(string)
 				if typ == "assistant" && hasTextContent(t[i].data) {
-					lines = append(lines, stripAndMarshal(t[i]))
+					lines = append(lines, marshalEntry(t[i], true, true))
 					break
 				}
 			}
@@ -318,7 +312,7 @@ func filterAssistantDetail(entries []transcriptEntry, lastOnly bool) string {
 			for _, e := range t {
 				typ, _ := e.data["type"].(string)
 				if typ == "assistant" && hasTextContent(e.data) {
-					lines = append(lines, stripAndMarshal(e))
+					lines = append(lines, marshalEntry(e, true, true))
 				}
 			}
 		}
@@ -361,27 +355,19 @@ func stripEntryMetadata(entry map[string]any) map[string]any {
 	return result
 }
 
-// marshalOrRaw serializes an entry, stripping tool_use blocks if present.
-// Uses the raw line when the entry is unmodified.
-func marshalOrRaw(e transcriptEntry) string {
-	filtered := removeToolUseBlocks(e.data)
-	if filtered == nil {
-		return e.raw // no tool_use blocks — use original line
+// marshalEntry serializes an entry with optional metadata stripping and tool_use removal.
+// Falls back to the raw JSONL line on marshal error.
+func marshalEntry(e transcriptEntry, stripMeta, stripToolUse bool) string {
+	data := e.data
+	if stripMeta {
+		data = stripEntryMetadata(data)
 	}
-	if out, err := json.Marshal(filtered); err == nil {
-		return string(out)
+	if stripToolUse {
+		if filtered := removeToolUseBlocks(data); filtered != nil {
+			data = filtered
+		}
 	}
-	return e.raw
-}
-
-// stripAndMarshal strips metadata and tool_use blocks from an entry.
-func stripAndMarshal(e transcriptEntry) string {
-	stripped := stripEntryMetadata(e.data)
-	filtered := removeToolUseBlocks(stripped)
-	if filtered != nil {
-		stripped = filtered
-	}
-	if out, err := json.Marshal(stripped); err == nil {
+	if out, err := json.Marshal(data); err == nil {
 		return string(out)
 	}
 	return e.raw
