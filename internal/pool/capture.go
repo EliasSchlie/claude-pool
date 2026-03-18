@@ -84,14 +84,16 @@ func findTurnStart(lines []string, turns int) int {
 	return 0 // fewer turns than requested — return everything
 }
 
-// captureBuffer returns ANSI-stripped terminal output for the requested turns.
+// captureBuffer returns rendered terminal screen content for the requested turns.
+// Uses the persistent vt10x terminal emulator (same one used for typing detection)
+// to produce a clean snapshot — like what you'd see if you attached to the session.
 // Turn boundaries are determined from the JSONL transcript.
 func (m *Manager) captureBuffer(s *Session, turns int) string {
-	proc := m.procs[s.ID]
-	if proc == nil {
+	st := m.terms[s.ID]
+	if st == nil {
 		return ""
 	}
-	buf := stripANSI(string(proc.Buffer()))
+	buf := st.renderedScreen()
 	if buf == "" || turns == 0 {
 		return buf
 	}
