@@ -363,9 +363,7 @@ func marshalEntry(e transcriptEntry, stripMeta, stripToolUse bool) string {
 		data = stripEntryMetadata(data)
 	}
 	if stripToolUse {
-		if filtered := removeToolUseBlocks(data); filtered != nil {
-			data = filtered
-		}
+		data = removeToolUseBlocks(data)
 	}
 	if out, err := json.Marshal(data); err == nil {
 		return string(out)
@@ -374,11 +372,11 @@ func marshalEntry(e transcriptEntry, stripMeta, stripToolUse bool) string {
 }
 
 // removeToolUseBlocks returns a copy of the entry with tool_use content blocks removed.
-// Returns nil if no tool_use blocks are present (caller can use the raw line).
+// Returns the input unchanged if no tool_use blocks are present.
 func removeToolUseBlocks(entry map[string]any) map[string]any {
 	msg, _ := entry["message"].(map[string]any)
 	if msg == nil {
-		return nil
+		return entry
 	}
 	content, _ := msg["content"].([]any)
 
@@ -393,7 +391,7 @@ func removeToolUseBlocks(entry map[string]any) map[string]any {
 		filtered = append(filtered, c)
 	}
 	if len(filtered) == len(content) {
-		return nil // nothing removed
+		return entry // nothing removed
 	}
 
 	// Copy entry and message with filtered content.
