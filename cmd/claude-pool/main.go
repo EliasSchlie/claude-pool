@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -69,11 +70,15 @@ func main() {
 		}
 	}
 
-	poolDir := flag.String("pool-dir", "", "Pool directory (required)")
+	defaultPoolDir := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		defaultPoolDir = filepath.Join(home, ".claude-pool", "default")
+	}
+	poolDir := flag.String("pool-dir", defaultPoolDir, "Pool directory (default: ~/.claude-pool/default/)")
 	flag.Parse()
 
 	if *poolDir == "" {
-		fmt.Fprintln(os.Stderr, "error: --pool-dir is required")
+		fmt.Fprintln(os.Stderr, "error: --pool-dir is required (could not determine home directory)")
 		os.Exit(1)
 	}
 
