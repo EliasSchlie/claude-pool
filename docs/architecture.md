@@ -34,7 +34,7 @@ Listens on `~/.claude-pool/<name>/api.sock`. Accepts newline-delimited JSON. Rou
 When a client requests `attach`, creates a temporary Unix socket for raw PTY I/O. The pipe closes when the session is offloaded or dies. Multiple clients can attach to the same session simultaneously (broadcast).
 
 ### Session Discovery
-Detects session state (idle, processing) by reading Claude Code's signal files and JSONL transcripts. Process death is detected here — session transitions to offloaded, slot gets recycled. Caches results for performance.
+Detects session state (idle, processing) by monitoring screen content above the prompt separator. Content changing = processing, content stable 3s = idle, PTY silent 3s = idle fallback. Process death is detected here — session transitions to offloaded, slot gets recycled.
 
 ### Reconciliation Loop
 Runs every 30s. Recycles error slots, kills orphaned processes, maintains pool health.
@@ -92,12 +92,17 @@ Full protocol support including subscribe (persistent event stream) works over t
 
 ## Hooks
 
-Hooks tell the pool daemon when sessions change state (idle, processing, etc.). Two-layer design: a global hook-runner installed once, and pool-local scripts deployed on every `init`.
+Hooks handle session lifecycle signals and PID tracking. Two hooks remain after the idle detection refactor (screen content monitoring replaced most hooks):
+
+- **SessionStart** — writes idle signal file on session start/clear (lifecycle tracking)
+- **PreToolUse (Bash)** — maps Claude PID → session UUID for parent auto-detection
+
+Two-layer design: a global hook-runner installed once, and pool-local scripts deployed on every `init`.
 
 ### Global install (`claude-pool install`)
 
 - Writes `~/.claude-pool/hook-runner.sh` — a thin entry point that delegates to pool-local scripts
-- Registers hook entries in `~/.claude/settings.json` for all relevant events (SessionStart, PreToolUse, PermissionRequest, PostToolUse, UserPromptSubmit)
+- Registers hook entries in `~/.claude/settings.json` for SessionStart and PreToolUse
 - Installs the Claude Code skill to `~/.claude/skills/claude-pool/SKILL.md`
 - Run once per machine. `claude-pool uninstall` reverses everything.
 
@@ -105,7 +110,8 @@ Hooks tell the pool daemon when sessions change state (idle, processing, etc.). 
 
 - Each `init` deploys hook scripts (`common.sh`, `idle-signal.sh`, `session-pid-map.sh`) to `<pool-dir>/hooks/`
 - The global hook-runner checks `$CLAUDE_POOL_DIR` (set by the daemon on pool sessions) and delegates to the pool's scripts. Non-pool sessions exit silently.
-- Scripts write to signal files in the pool directory for idle detection and PID tracking
+- `idle-signal.sh` writes signal files on session start/clear for the fresh→idle transition
+- `session-pid-map.sh` maps Claude process PIDs to session IDs
 
 ### Why two layers
 

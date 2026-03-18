@@ -33,7 +33,8 @@ These files require **explicit user permission** before any modification:
 - `hooks/` — Plugin hooks (SessionStart lifecycle signals + PreToolUse PID registry)
 - `cmd/claude-pool/` — Daemon entry point + install/uninstall commands
 - `cmd/claude-pool-cli/` — CLI entry point (thin router, resolves pool from registry)
-- `internal/` — Daemon packages (pool, pty, api, attach, discovery, paths, hookfiles)
+- `internal/pool/` — Pool manager, handlers split by domain: `handlers.go` (helpers), `handlers_session.go` (start/followup/wait/stop/capture), `handlers_pool.go` (init/health/config/destroy), `handlers_query.go` (info/ls/subscribe), `handlers_lifecycle.go` (archive/pin/set/resize), `handlers_attach.go` (attach/debug)
+- `internal/` — Other packages: pty, api, attach, discovery, paths, hookfiles
 - `tests/integration/` — Integration tests (real Claude sessions, `--model haiku`)
 - `tests/manual/` — Manual testing directory (own `.claude/` hooks, independent per worktree)
 - `schema/` — JSON Schema (`protocol.json` — must match SPEC.md, validated by tests)

@@ -1,0 +1,475 @@
+package pool
+
+import (
+	"log"
+	"time"
+
+	"github.com/EliasSchlie/claude-pool/internal/api"
+)
+
+// --- Start ---
+
+func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
+	prompt, _ := req["prompt"].(string)
+	parentID := parentFromReq(req)
+
+	m.mu.Lock()
+
+	if !m.initialized {
+		m.mu.Unlock()
+		return api.ErrorResponse(id, "pool not initialized")
+	}
+
+	s := m.newSession(parentID)
+	s.PendingPrompt = prompt
+	if _, hasMetadata := req["metadata"]; hasMetadata {
+		s.Metadata = metadataFromMap(req)
+	}
+	m.sessions[s.ID] = s
+	log.Printf("[start] created session %s (parent=%s, prompt=%d chars, name=%q)", s.ID, parentID, len(prompt), s.Metadata.Name)
+
+	// Promptless start: claim a slot and leave the session idle (SPEC).
+	// If the slot is still starting (fresh), block until ready so the
+	// caller gets an idle session with a discovered ClaudeUUID.
+	if prompt == "" {
+		m.mu.Unlock()
+		return m.handleStartPromptless(id, s)
+	}
+
+	// Try to claim a fresh/idle slot
+	if fresh := m.findFreshSlot(); fresh != nil {
+		log.Printf("[start] session %s taking over slot from %s (status=%s, pid=%d)", s.ID, fresh.ID, fresh.Status, fresh.PID)
+		proc := m.transferProcess(fresh, s)
+		wasFresh := fresh.Status == StatusFresh
+		delete(m.sessions, fresh.ID)
+
+		if wasFresh {
+			// Process not ready yet — queue prompt for delivery when
+			// SessionStart hook signals readiness
+			log.Printf("[start] session %s: slot still starting, queuing prompt for delivery on ready", s.ID)
+			s.Status = StatusFresh
+			s.PendingPrompt = prompt
+			s.PendingForce = true
+		} else {
+			log.Printf("[start] session %s: slot ready, delivering prompt immediately", s.ID)
+			s.Status = StatusProcessing
+			s.LastUsedAt = time.Now()
+			s.PendingPrompt = ""
+			m.deliverPrompt(s, prompt)
+		}
+		// Only clear stale signals for idle slots (signal already consumed).
+		// For fresh slots, the session-start signal hasn't fired yet —
+		// clearing it would race with the hook and lose the signal.
+		if !wasFresh {
+			m.clearIdleSignals(s.PID)
+		}
+		m.startWatchers(s, proc)
+		m.broadcastEvent(api.Msg{
+			"type": "event", "event": "created",
+			"sessionId": s.ID, "status": s.ExternalStatus(), "parent": s.ParentID,
+		})
+		m.savePoolState()
+		m.mu.Unlock()
+		return api.Response(id, "started", api.Msg{
+			"sessionId": s.ID,
+			"status":    s.ExternalStatus(),
+		})
+	}
+
+	// No fresh slot available — queue the request, then try to fill from
+	// available slots. Only evict if all slots are occupied.
+	log.Printf("[start] session %s: no fresh slots, queuing (queue depth=%d)", s.ID, len(m.queue)+1)
+	s.Status = StatusQueued
+	m.queue = append(m.queue, s)
+	m.broadcastEvent(api.Msg{
+		"type": "event", "event": "created",
+		"sessionId": s.ID, "status": s.ExternalStatus(), "parent": s.ParentID,
+	})
+
+	m.tryDequeueWithEviction(s, "")
+	m.savePoolState()
+
+	resp := api.Response(id, "started", api.Msg{
+		"sessionId": s.ID,
+		"status":    s.ExternalStatus(),
+	})
+	m.mu.Unlock()
+	return resp
+}
+
+// handleStartPromptless creates a session without a prompt — claims a slot and
+// leaves it idle. Blocks until the session is ready if the slot was still starting.
+// Must be called WITHOUT m.mu held.
+func (m *Manager) handleStartPromptless(id any, s *Session) api.Msg {
+	m.mu.Lock()
+
+	if fresh := m.findFreshSlot(); fresh != nil {
+		proc := m.transferProcess(fresh, s)
+		wasFresh := fresh.Status == StatusFresh
+		delete(m.sessions, fresh.ID)
+
+		if wasFresh {
+			s.Status = StatusFresh
+		} else {
+			s.Status = StatusIdle
+			m.clearIdleSignals(s.PID)
+		}
+		m.startWatchers(s, proc)
+		m.broadcastEvent(api.Msg{
+			"type": "event", "event": "created",
+			"sessionId": s.ID, "status": s.ExternalStatus(), "parent": s.ParentID,
+		})
+		m.savePoolState()
+
+		if wasFresh {
+			sid := s.ID
+			m.mu.Unlock()
+			return m.waitForSessionReady(id, sid, 60*time.Second)
+		}
+		m.mu.Unlock()
+		return api.Response(id, "started", api.Msg{
+			"sessionId": s.ID,
+			"status":    StatusIdle,
+		})
+	}
+
+	// No free slot — queue without prompt
+	s.Status = StatusQueued
+	m.queue = append(m.queue, s)
+	m.broadcastEvent(api.Msg{
+		"type": "event", "event": "created",
+		"sessionId": s.ID, "status": s.ExternalStatus(), "parent": s.ParentID,
+	})
+	m.tryDequeueWithEviction(s, "")
+	m.savePoolState()
+
+	// If dequeued into a slot (status changed from queued), wait for ready
+	if s.Status != StatusQueued {
+		sid := s.ID
+		m.mu.Unlock()
+		return m.waitForSessionReady(id, sid, 60*time.Second)
+	}
+
+	// Still queued — return immediately with queued status
+	m.mu.Unlock()
+	return api.Response(id, "started", api.Msg{
+		"sessionId": s.ID,
+		"status":    s.ExternalStatus(),
+	})
+}
+
+// --- Followup ---
+
+func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
+	sessionID, _ := req["sessionId"].(string)
+	prompt, _ := req["prompt"].(string)
+	force, _ := req["force"].(bool)
+
+	if sessionID == "" || prompt == "" {
+		return api.ErrorResponse(id, "sessionId and prompt are required")
+	}
+
+	m.mu.Lock()
+
+	s := m.resolveSession(sessionID)
+	if s == nil {
+		m.mu.Unlock()
+		log.Printf("[followup] session not found: %s", sessionID)
+		return api.ErrorResponse(id, "session not found: "+sessionID)
+	}
+
+	log.Printf("[followup] session %s: status=%s force=%v prompt=%d chars", s.ID, s.Status, force, len(prompt))
+
+	switch s.Status {
+	case StatusFresh:
+		log.Printf("[followup] session %s: fresh, queuing prompt and waiting for ready", s.ID)
+		s.PendingPrompt = prompt
+		s.PendingForce = true
+		sid := s.ID
+		m.mu.Unlock()
+		return m.waitForSessionReady(id, sid, 60*time.Second)
+
+	case StatusIdle:
+		log.Printf("[followup] session %s: idle → processing, delivering prompt", s.ID)
+		s.Status = StatusProcessing
+		s.LastUsedAt = time.Now()
+		m.deliverPrompt(s, prompt)
+		m.broadcastStatus(s, StatusIdle)
+		m.savePoolState()
+		m.mu.Unlock()
+		return api.Response(id, "started", api.Msg{
+			"sessionId": s.ID,
+			"status":    s.ExternalStatus(),
+		})
+
+	case StatusOffloaded, StatusError:
+		log.Printf("[followup] session %s: %s → queued for respawn", s.ID, s.Status)
+		s.PendingPrompt = prompt
+		prevStatus := s.Status
+		s.Status = StatusQueued
+		m.queue = append(m.queue, s)
+		m.broadcastStatus(s, prevStatus)
+		m.tryDequeueWithEviction(s, s.ID)
+		m.savePoolState()
+		m.mu.Unlock()
+		return api.Response(id, "started", api.Msg{
+			"sessionId": s.ID,
+			"status":    s.ExternalStatus(),
+		})
+
+	case StatusProcessing:
+		if !force {
+			m.mu.Unlock()
+			return api.ErrorResponse(id, "session is processing; use force: true to override")
+		}
+		log.Printf("[followup] session %s: force-interrupting %s, sending Ctrl-C (pid=%d)", s.ID, s.Status, s.PID)
+		s.LastUsedAt = time.Now()
+		sid := s.ID
+		m.savePoolState()
+		m.mu.Unlock()
+
+		// Stop then deliver: Ctrl-C → wait for idle → deliver new prompt.
+		m.stopProcessingSession(sid, 30*time.Second)
+
+		m.mu.Lock()
+		s = m.sessions[sid]
+		if s == nil || !s.IsLive() {
+			m.mu.Unlock()
+			return api.ErrorResponse(id, "session died during force followup")
+		}
+		s.Status = StatusProcessing
+		s.LastUsedAt = time.Now()
+		m.deliverPrompt(s, prompt)
+		m.broadcastStatus(s, StatusIdle)
+		m.mu.Unlock()
+
+		return api.Response(id, "started", api.Msg{
+			"sessionId": sid,
+			"status":    StatusProcessing,
+		})
+
+	case StatusQueued:
+		if !force {
+			m.mu.Unlock()
+			return api.ErrorResponse(id, "session is queued; use force: true to replace prompt")
+		}
+		s.PendingPrompt = prompt
+		m.mu.Unlock()
+		return api.Response(id, "started", api.Msg{
+			"sessionId": s.ID,
+			"status":    s.ExternalStatus(),
+		})
+
+	case StatusArchived:
+		m.mu.Unlock()
+		return api.ErrorResponse(id, "session is archived; unarchive first")
+
+	default:
+		m.mu.Unlock()
+		return api.ErrorResponse(id, "cannot followup in state: "+s.ExternalStatus())
+	}
+}
+
+// --- Wait ---
+
+func (m *Manager) handleWait(id any, req api.Msg) api.Msg {
+	sessionID, _ := req["sessionId"].(string)
+	parentFilter := parentFromReq(req)
+	timeoutMs := 300000.0
+	if t, ok := req["timeout"].(float64); ok {
+		timeoutMs = t
+	}
+	source, turns, detail := parseCaptureParams(req)
+
+	timeout := time.Duration(timeoutMs) * time.Millisecond
+
+	m.mu.Lock()
+
+	if sessionID == "" {
+		// Find the most recently created busy session matching the filter
+		var busySession *Session
+		for _, s := range m.sessions {
+			if s.PreWarmed {
+				continue
+			}
+			if s.Status == StatusProcessing || s.Status == StatusQueued || s.Status == StatusFresh {
+				// SPEC: "Wait for any busy session with this parent."
+				// When parentFilter="" (no auto-detection, no --parent),
+				// spec says: "waits for any busy session with no parent."
+				if s.ParentID != parentFilter {
+					continue
+				}
+				if busySession == nil || s.CreatedAt.After(busySession.CreatedAt) {
+					busySession = s
+				}
+			}
+		}
+		if busySession == nil {
+			m.mu.Unlock()
+			log.Printf("[wait] no busy sessions found")
+			return api.ErrorResponse(id, "no busy sessions")
+		}
+		sessionID = busySession.ID
+		log.Printf("[wait] no sessionId specified, selected most recent busy session %s (status=%s)", sessionID, busySession.Status)
+	}
+
+	s := m.resolveSession(sessionID)
+	if s == nil {
+		m.mu.Unlock()
+		return api.ErrorResponse(id, "session not found: "+sessionID)
+	}
+
+	// captureAndReturn captures output and returns a wait result.
+	// Must be called with m.mu held; releases it before returning.
+	captureAndReturn := func(s *Session) api.Msg {
+		if source == "buffer" && !s.IsLive() {
+			m.mu.Unlock()
+			return api.ErrorResponse(id, "buffer source requires live terminal")
+		}
+		content := m.captureOutput(s, source, turns, detail)
+		m.mu.Unlock()
+		return api.Response(id, "result", api.Msg{
+			"sessionId": s.ID,
+			"content":   content,
+		})
+	}
+
+	switch s.Status {
+	case StatusIdle, StatusOffloaded:
+		// Offloaded: session finished and got evicted before we arrived.
+		// SPEC: JSONL capture works for offloaded sessions.
+		return captureAndReturn(s)
+	case StatusArchived:
+		m.mu.Unlock()
+		return api.ErrorResponse(id, "session is archived")
+	case StatusError:
+		m.mu.Unlock()
+		return api.ErrorResponse(id, "session has error")
+	}
+
+	sid := s.ID
+	ch := m.statusNotify
+	m.mu.Unlock()
+
+	deadline := time.After(timeout)
+	for {
+		select {
+		case <-deadline:
+			return api.ErrorResponse(id, "timeout")
+		case <-ch:
+			m.mu.Lock()
+			s := m.sessions[sid]
+			if s == nil {
+				m.mu.Unlock()
+				return api.ErrorResponse(id, "session not found")
+			}
+			switch s.Status {
+			case StatusIdle, StatusOffloaded:
+				return captureAndReturn(s)
+			case StatusError:
+				m.mu.Unlock()
+				return api.ErrorResponse(id, "session error")
+			}
+			ch = m.statusNotify
+			m.mu.Unlock()
+		}
+	}
+}
+
+// --- Stop ---
+
+func (m *Manager) handleStop(id any, req api.Msg) api.Msg {
+	sessionID, _ := req["sessionId"].(string)
+	if sessionID == "" {
+		return api.ErrorResponse(id, "sessionId is required")
+	}
+
+	m.mu.Lock()
+	s := m.resolveSession(sessionID)
+	if s == nil {
+		m.mu.Unlock()
+		log.Printf("[stop] session not found: %s", sessionID)
+		return api.ErrorResponse(id, "session not found: "+sessionID)
+	}
+
+	log.Printf("[stop] session %s: status=%s pid=%d", s.ID, s.Status, s.PID)
+
+	switch s.Status {
+	case StatusFresh:
+		if s.PendingPrompt == "" {
+			m.mu.Unlock()
+			return api.ErrorResponse(id, "session is not processing or queued (status: "+s.ExternalStatus()+")")
+		}
+		// Fresh with PendingPrompt = externally "processing" (prompt queued
+		// for delivery on session-start). Cancel all pending work.
+		log.Printf("[stop] session %s: cancelling pending prompt (fresh, %d chars)", s.ID, len(s.PendingPrompt))
+		s.ClearPending()
+		m.broadcastStatus(s, StatusProcessing)
+		m.savePoolState()
+		m.mu.Unlock()
+		return api.OkResponse(id)
+
+	case StatusIdle:
+		m.mu.Unlock()
+		return api.ErrorResponse(id, "session is not processing or queued (status: "+s.ExternalStatus()+")")
+
+	case StatusQueued:
+		log.Printf("[stop] session %s: removing from queue", s.ID)
+		m.removeFromQueue(s)
+		if s.PID > 0 {
+			s.Status = StatusOffloaded
+		} else {
+			delete(m.sessions, s.ID)
+		}
+		m.savePoolState()
+		m.mu.Unlock()
+		return api.OkResponse(id)
+
+	case StatusProcessing:
+		log.Printf("[stop] session %s: sending Ctrl-C to pid %d", s.ID, s.PID)
+		sid := s.ID
+		m.mu.Unlock()
+
+		// Ctrl-C → wait for idle. PTY silence detection will write the
+		// idle signal once the spinner stops (~3s).
+		m.stopProcessingSession(sid, 30*time.Second)
+		return api.OkResponse(id)
+
+	default:
+		m.mu.Unlock()
+		return api.ErrorResponse(id, "cannot stop session in state: "+s.ExternalStatus())
+	}
+}
+
+// --- Capture ---
+
+func (m *Manager) handleCapture(id any, req api.Msg) api.Msg {
+	sessionID, _ := req["sessionId"].(string)
+	if sessionID == "" {
+		return api.ErrorResponse(id, "sessionId is required")
+	}
+
+	source, turns, detail := parseCaptureParams(req)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s := m.resolveSession(sessionID)
+	if s == nil {
+		return api.ErrorResponse(id, "session not found: "+sessionID)
+	}
+
+	if s.Status == StatusQueued {
+		return api.ErrorResponse(id, "session is queued (no output yet)")
+	}
+
+	if source == "buffer" && !s.IsLive() {
+		return api.ErrorResponse(id, "buffer source requires live terminal")
+	}
+
+	content := m.captureOutput(s, source, turns, detail)
+	return api.Response(id, "result", api.Msg{
+		"sessionId": s.ID,
+		"content":   content,
+	})
+}
