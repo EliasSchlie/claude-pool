@@ -498,23 +498,10 @@ func doStart(c *conn, args []string, jsonMode bool) error {
 	}
 
 	if block {
-		sessionID, _ := resp["sessionId"].(string)
-		// Print session ID immediately so the caller has it while waiting
-		fmt.Fprintf(os.Stderr, "Session %s (waiting for completion...)\n", sessionID)
-		waitMsg := map[string]any{
-			"type":      "wait",
-			"sessionId": sessionID,
-			"timeout":   300000,
-		}
-		for k, v := range outputFlags {
-			waitMsg[k] = v
-		}
-		resp, err = c.send(waitMsg)
-		if err != nil {
-			return err
-		}
-		if err := checkError(resp); err != nil {
-			return err
+		var err2 error
+		resp, err2 = blockWait(c, resp, outputFlags)
+		if err2 != nil {
+			return err2
 		}
 	}
 
@@ -578,26 +565,38 @@ func doFollowup(c *conn, args []string, jsonMode bool) error {
 	}
 
 	if block {
-		sessionID, _ := resp["sessionId"].(string)
-		fmt.Fprintf(os.Stderr, "Session %s (waiting for completion...)\n", sessionID)
-		waitMsg := map[string]any{
-			"type":      "wait",
-			"sessionId": sessionID,
-			"timeout":   300000,
-		}
-		for k, v := range outputFlags {
-			waitMsg[k] = v
-		}
-		resp, err = c.send(waitMsg)
-		if err != nil {
-			return err
-		}
-		if err := checkError(resp); err != nil {
-			return err
+		var err2 error
+		resp, err2 = blockWait(c, resp, outputFlags)
+		if err2 != nil {
+			return err2
 		}
 	}
 
 	return printResp(resp, jsonMode)
+}
+
+// blockWait prints the session ID to stderr immediately, then sends a wait
+// command and blocks until the session completes. Used by --block in both
+// doStart and doFollowup.
+func blockWait(c *conn, startResp map[string]any, outputFlags map[string]any) (map[string]any, error) {
+	sessionID, _ := startResp["sessionId"].(string)
+	fmt.Fprintf(os.Stderr, "Session %s (waiting for completion...)\n", sessionID)
+	waitMsg := map[string]any{
+		"type":      "wait",
+		"sessionId": sessionID,
+		"timeout":   300000,
+	}
+	for k, v := range outputFlags {
+		waitMsg[k] = v
+	}
+	resp, err := c.send(waitMsg)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkError(resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 func doWait(c *conn, args []string, jsonMode bool) error {
