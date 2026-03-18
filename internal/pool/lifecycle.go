@@ -193,9 +193,8 @@ func (m *Manager) offloadSessionLocked(s *Session) {
 		log.Printf("[offload] session %s: recycled pid %d into pre-warmed session %s", s.ID, proc.PID(), pw.ID)
 
 		// Clear stale idle signals before starting watchers — the old
-		// session's signals (stop, stop-fallback) must not trigger prompt
-		// delivery in the new session. /clear will produce a fresh
-		// session-clear signal when it completes.
+		// session's signals must not trigger prompt delivery in the new
+		// session. /clear will produce a fresh session-clear signal.
 		m.clearIdleSignals(proc.PID())
 		m.deliverPromptWithSettle(pw, "/clear", 200*time.Millisecond)
 		m.startWatchers(pw, proc)
@@ -340,7 +339,6 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 	signalPath := m.paths.IdleSignal(pid)
 	pidMapPath := m.paths.SessionPID(pid)
 	var lastSignalTS float64 // timestamp of last processed signal (avoid re-processing)
-	signalPresent := false   // whether signal file existed on previous tick
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -374,32 +372,17 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 				}
 			}
 
-			// Read signal file under the mutex to prevent races with
-			// clearIdleSignals. Like OC, the daemon never deletes the signal
-			// file — only hooks (idle-signal.sh clear, UserPromptSubmit) do.
-			// Signal presence = idle, signal absence = processing.
+			// Read signal file. Only SessionStart hooks write signals now;
+			// processing↔idle detection is handled by content monitoring.
 			m.mu.Lock()
 			data, err := os.ReadFile(signalPath)
 			if err != nil {
-				// No signal file. If it was present before, a hook cleared
-				// it (UserPromptSubmit or PostToolUse) → processing started.
-				// This handles attach-pipe Enter, external prompt submission,
-				// and any other path where the pool didn't explicitly set
-				// processing status.
-				if signalPresent {
-					signalPresent = false
-					s = m.sessions[sessionID]
-					if s != nil && s.Status == StatusIdle {
-						log.Printf("[idle-watch] session %s: signal cleared (idle→processing)", sessionID)
-						s.Status = StatusProcessing
-						s.PendingInput = ""
-						m.broadcastStatus(s, StatusIdle)
-					}
-				}
+				// No signal file — cleared by clearIdleSignals during recycling
+				// or externally. Idle→processing detection is handled by the
+				// spinner check in pollBufferInput, not here.
 				m.mu.Unlock()
 				continue
 			}
-			signalPresent = true
 
 			// Check session still exists, is live, AND still owns this PID.
 			// If the session was transferred to a different PID (offloaded →
@@ -446,105 +429,75 @@ func (m *Manager) watchIdleSignal(sessionID string, pid int) {
 				}
 			}
 
-			// Filter stale signals that belong to a previous session on this slot.
-			//
-			// Recycled fresh slots (went through /clear) are waiting for the
-			// session-start or session-clear signal that fires when /clear
-			// completes. Other triggers (stop, tool, permission) are stale
-			// leftovers from the previous session and must be ignored —
-			// delivering a prompt during /clear loses it.
-			//
-			// Non-recycled fresh slots already completed startup — any signal
-			// is valid (typically "session-start" from the initial spawn, but
-			// could be "stop" if the process completed something internally).
-			//
-			// Processing slots ignore startup signals unless they have pending
-			// work (PendingResume/PendingPrompt), which means the signal is from
-			// /resume or /clear completing.
+			// watchIdleSignal only handles startup signals (session-start,
+			// session-clear). Processing→idle is handled by content monitoring
+			// in pollBufferInput, which calls transitionToIdle directly.
 			trigger, _ := sig["trigger"].(string)
-			if s.Status == StatusFresh && s.Recycled && trigger != "session-start" && trigger != "session-clear" {
-				log.Printf("[idle-watch] session %s: ignoring stale %s signal (status=fresh+recycled, waiting for clear)", sessionID, trigger)
-				m.mu.Unlock()
-				continue
-			}
-			if s.Status == StatusProcessing && (trigger == "session-start" || trigger == "session-clear") &&
-				s.PendingResume == "" && s.PendingPrompt == "" {
-				log.Printf("[idle-watch] session %s: ignoring stale %s signal (status=%s)", sessionID, trigger, s.Status)
+			if trigger != "session-start" && trigger != "session-clear" {
 				m.mu.Unlock()
 				continue
 			}
 
 			if s.Status == StatusFresh || s.Status == StatusProcessing {
-				// Use a longer settle delay after session-start/session-clear
-				// triggers — Claude's TUI needs time to finish rendering its
-				// startup/clear output before it can accept typed input.
-				settleDelay := 200 * time.Millisecond
-				if trigger == "session-start" || trigger == "session-clear" {
-					settleDelay = 2 * time.Second
-				}
-
-				// Stage 1: deliver /resume if pending (before any prompt).
-				// After /resume completes, another idle signal fires and we
-				// proceed to PendingPrompt delivery.
-				if s.PendingResume != "" {
-					uuid := s.PendingResume
-					s.PendingResume = ""
-					prevStatus := s.Status
-					s.Status = StatusProcessing
-					log.Printf("[idle-watch] session %s: delivering /resume %s", sessionID, uuid)
-					m.broadcastStatus(s, prevStatus)
-					m.deliverPromptWithSettle(s, "/resume "+uuid, settleDelay)
-					m.mu.Unlock()
-					continue
-				}
-
-				// Stage 2: deliver any pending prompt — avoids a transient
-				// idle state that confuses wait-without-sessionId.
-				if s.PendingPrompt != "" {
-					prompt := s.PendingPrompt
-					prevStatus := s.Status
-					s.PendingPrompt = ""
-					s.PendingForce = false
-					s.Status = StatusProcessing
-					s.LastUsedAt = time.Now()
-					log.Printf("[idle-watch] session %s: idle signal received, delivering pending prompt (%d chars)", sessionID, len(prompt))
-					m.broadcastStatus(s, prevStatus)
-					// Register delivery under the lock so awaitDelivery
-					// can't miss it between unlock and goroutine start.
-					m.deliverPromptWithSettle(s, prompt, settleDelay)
-					m.mu.Unlock()
-					continue
-				}
-
-				prevStatus := s.Status
-				s.Status = StatusIdle
-				s.Recycled = false
-				log.Printf("[idle-watch] session %s: %s → idle (pid=%d)", sessionID, prevStatus, s.PID)
-				m.broadcastStatus(s, prevStatus)
-				m.savePoolState()
-
-				// Check if a queued session can claim this slot
-				m.serveQueueFromSlot(s)
-
-				// If queue still has entries, try to free a slot via eviction.
-				// This handles the case where a queued session was waiting for
-				// a slot being /cleared — now that it's idle, it's evictable.
-				if len(m.queue) > 0 {
-					if evicted := m.findEvictableSession(); evicted != nil {
-						log.Printf("[idle-watch] session %s: evicting %s to serve queue (depth=%d)", sessionID, evicted.ID, len(m.queue))
-						m.offloadSessionLocked(evicted)
-						m.tryDequeue()
-					}
-				}
-
-				// Maintain fresh slot target (SPEC: Fresh Slot Maintenance)
-				m.maintainFreshSlots()
-			} else {
-				log.Printf("[idle-watch] session %s: consumed stale signal (status=%s)", sessionID, s.Status)
+				m.transitionToIdle(s)
 			}
 			m.mu.Unlock()
 		}
 	}
+}
+
+// transitionToIdle handles the processing → idle transition for a session.
+// Delivers pending prompts, serves the queue, and maintains fresh slots.
+// Must be called with m.mu held. May release and re-acquire the lock
+// for prompt delivery.
+func (m *Manager) transitionToIdle(s *Session) {
+	// Deliver pending resume first
+	if s.PendingResume != "" {
+		uuid := s.PendingResume
+		s.PendingResume = ""
+		prevStatus := s.Status
+		s.Status = StatusProcessing
+
+		log.Printf("[idle] session %s: delivering /resume %s", s.ID, uuid)
+		m.broadcastStatus(s, prevStatus)
+		m.deliverPromptWithSettle(s, "/resume "+uuid, 200*time.Millisecond)
+		return
+	}
+
+	// Deliver pending prompt
+	if s.PendingPrompt != "" {
+		prompt := s.PendingPrompt
+		prevStatus := s.Status
+		s.PendingPrompt = ""
+		s.PendingForce = false
+		s.Status = StatusProcessing
+
+		s.LastUsedAt = time.Now()
+		log.Printf("[idle] session %s: delivering pending prompt (%d chars)", s.ID, len(prompt))
+		m.broadcastStatus(s, prevStatus)
+		m.deliverPromptWithSettle(s, prompt, 200*time.Millisecond)
+		return
+	}
+
+	// No pending work — mark idle
+	prevStatus := s.Status
+	s.Status = StatusIdle
+	s.Recycled = false
+	log.Printf("[idle] session %s: %s → idle (pid=%d)", s.ID, prevStatus, s.PID)
+	m.broadcastStatus(s, prevStatus)
+	m.savePoolState()
+
+	m.serveQueueFromSlot(s)
+
+	if len(m.queue) > 0 {
+		if evicted := m.findEvictableSession(); evicted != nil {
+			log.Printf("[idle] session %s: evicting %s to serve queue (depth=%d)", s.ID, evicted.ID, len(m.queue))
+			m.offloadSessionLocked(evicted)
+			m.tryDequeue()
+		}
+	}
+
+	m.maintainFreshSlots()
 }
 
 // --- Prompt delivery ---
@@ -672,9 +625,7 @@ func (m *Manager) deliverPromptAsync(sessionID, prompt string) {
 // Used by handleStop, handleArchive, and handleFollowup (force) to stop a
 // processing session before further action. Must be called WITHOUT m.mu held.
 //
-// The Stop hook writes an idle signal with a ~7s deferred verification.
-// If the signal doesn't arrive (transcript size changed during interruption
-// processing), a synthetic signal is written as fallback.
+// PTY silence detection (3s) will write the idle signal once the spinner stops.
 func (m *Manager) stopProcessingSession(sid string, timeout time.Duration) {
 	m.awaitDelivery(sid)
 
@@ -685,31 +636,12 @@ func (m *Manager) stopProcessingSession(sid string, timeout time.Duration) {
 	if s := m.sessions[sid]; s != nil {
 		s.ClearPending()
 	}
-	pid := 0
 	if proc := m.procs[sid]; proc != nil {
 		proc.WriteString("\x03")
-		pid = proc.PID()
 	}
 	m.mu.Unlock()
 
-	// Wait for idle (Stop hook's deferred signal, ~7s).
-	// Use a shorter initial wait, then fall back to synthetic signal.
-	m.waitForSessionIdle(sid, 15*time.Second)
-
-	// If still not idle, write a synthetic signal as fallback.
-	// The Stop hook's transcript-size verification can fail if Claude
-	// wrote output after the Ctrl-C interruption.
-	m.mu.Lock()
-	s := m.sessions[sid]
-	if s != nil && s.Status == StatusProcessing && pid > 0 {
-		log.Printf("[stop] session %s: Stop hook signal not received after 15s, writing synthetic idle signal (pid=%d)", sid, pid)
-		m.mu.Unlock()
-		m.writeIdleSignal(pid, "stop-fallback")
-		// Wait for watchIdleSignal to consume the synthetic signal
-		m.waitForSessionIdle(sid, timeout-15*time.Second)
-	} else {
-		m.mu.Unlock()
-	}
+	m.waitForSessionIdle(sid, timeout)
 }
 
 // waitForSessionIdle waits until a session reaches StatusIdle.
@@ -769,24 +701,6 @@ func (m *Manager) waitForSessionReady(id any, sid string, timeout time.Duration)
 		case <-ch:
 			m.mu.Lock()
 		}
-	}
-}
-
-// writeIdleSignal writes a synthetic idle signal for cases where no hook fires
-// (e.g., after Ctrl-C when the Stop hook's transcript verification fails).
-func (m *Manager) writeIdleSignal(pid int, trigger string) {
-	signalPath := m.paths.IdleSignal(pid)
-	signal := map[string]any{
-		"cwd":        m.paths.Root,
-		"session_id": "",
-		"transcript": "",
-		"ts":         time.Now().Unix(),
-		"trigger":    trigger,
-	}
-	data, _ := json.Marshal(signal)
-	log.Printf("[idle-signal] writing synthetic idle signal for pid %d (trigger=%s)", pid, trigger)
-	if err := os.WriteFile(signalPath, append(data, '\n'), 0600); err != nil {
-		log.Printf("[idle-signal] error writing signal for pid %d: %v", pid, err)
 	}
 }
 
@@ -976,8 +890,6 @@ func (m *Manager) startWatchers(s *Session, proc *ptyPkg.Process) {
 
 // clearIdleSignals removes stale idle signal files for a PID. Called before
 // starting watchers for a transferred process to prevent immediate false triggers.
-// Does NOT remove .pending files — those are coordination files for the Stop
-// hook's background verification process (see idle-signal.sh).
 func (m *Manager) clearIdleSignals(pid int) {
 	os.Remove(m.paths.IdleSignal(pid))
 }
