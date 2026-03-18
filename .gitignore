@@ -1,6 +1,7 @@
 node_modules/
 .wt/
 .run/
+bin/
 *.sock
 /claude-pool
 /claude-pool-cli
