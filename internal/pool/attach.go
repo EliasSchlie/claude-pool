@@ -74,7 +74,9 @@ func (ap *attachPipe) acceptLoop() {
 
 		// Replay buffered output before joining the broadcast.
 		// This gives the client the current screen state (like tmux/screen).
-		replay := ap.proc.Buffer()
+		// SanitizeReplay trims any partial escape sequence at the ring buffer
+		// wrap point and prepends an SGR reset to avoid inherited attributes.
+		replay := ptyPkg.SanitizeReplay(ap.proc.Buffer())
 		if len(replay) > 0 {
 			if _, err := conn.Write(replay); err != nil {
 				log.Printf("[attach] session %s: replay write error: %v", ap.sessionID, err)
