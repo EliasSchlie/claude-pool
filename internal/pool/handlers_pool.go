@@ -88,9 +88,12 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 		m.sessions[s.ID] = s
 		sl := m.slots[restored]
 		m.bindSession(sl, s)
-		s.Status = StatusProcessing // will transition when spawn completes
-		log.Printf("[init] restoring live session %s into slot %d (claude=%s resume=%v)", s.ID, sl.Index, s.ClaudeUUID, s.ClaudeUUID != "")
-		m.spawnSlot(sl, s.ClaudeUUID)
+		s.Status = StatusProcessing
+		if s.ClaudeUUID != "" {
+			s.PendingResume = s.ClaudeUUID
+		}
+		log.Printf("[init] restoring live session %s into slot %d (resume=%v)", s.ID, sl.Index, s.PendingResume != "")
+		m.spawnSlot(sl)
 		restored++
 	}
 
@@ -106,8 +109,11 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 		sl := m.slots[restored]
 		m.bindSession(sl, s)
 		s.Status = StatusProcessing
-		log.Printf("[init] restoring offloaded session %s into slot %d (claude=%s resume=%v)", s.ID, sl.Index, s.ClaudeUUID, s.ClaudeUUID != "")
-		m.spawnSlot(sl, s.ClaudeUUID)
+		if s.ClaudeUUID != "" {
+			s.PendingResume = s.ClaudeUUID
+		}
+		log.Printf("[init] restoring offloaded session %s into slot %d (resume=%v)", s.ID, sl.Index, s.PendingResume != "")
+		m.spawnSlot(sl)
 		restored++
 	}
 
@@ -118,7 +124,7 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 	if remaining > 0 {
 		log.Printf("[init] spawning %d fresh slots", remaining)
 		sl := m.slots[restored]
-		m.spawnSlot(sl, "")
+		m.spawnSlot(sl)
 
 		if remaining > 1 {
 			m.mu.Unlock()
@@ -145,7 +151,7 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 		}
 
 		for i := restored + 1; i < size; i++ {
-			m.spawnSlot(m.slots[i], "")
+			m.spawnSlot(m.slots[i])
 		}
 	}
 

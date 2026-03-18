@@ -482,7 +482,7 @@ func (m *Manager) handleResize(id any, req api.Msg) api.Msg {
 		for i := oldSize; i < target; i++ {
 			sl := &Slot{Index: i, State: SlotCrashed}
 			m.slots = append(m.slots, sl)
-			m.spawnSlot(sl, "")
+			m.spawnSlot(sl)
 		}
 	} else if target < oldSize {
 		log.Printf("[resize] shrinking: adding %d kill tokens", oldSize-target)

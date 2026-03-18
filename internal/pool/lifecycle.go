@@ -51,9 +51,9 @@ func (m *Manager) resolveSession(sessionID string) *Session {
 
 // --- Slot lifecycle ---
 
-// spawnSlot starts a Claude process in a slot. The slot transitions to
-// spawning → fresh when the process is ready.
-func (m *Manager) spawnSlot(sl *Slot, resume string) {
+// spawnSlot starts a Claude process in a slot. Always spawns fresh —
+// session restoration is handled by delivering /resume after the slot is ready.
+func (m *Manager) spawnSlot(sl *Slot) {
 	cfg, err := m.config.Load()
 	if err != nil {
 		log.Printf("[spawn] slot %d: config load error (using defaults): %v", sl.Index, err)
@@ -63,14 +63,13 @@ func (m *Manager) spawnSlot(sl *Slot, resume string) {
 	if cwd == "" {
 		cwd = m.paths.Root
 	}
-	log.Printf("[spawn] slot %d: resume=%q flags=%q cwd=%s", sl.Index, resume, flags, cwd)
+	log.Printf("[spawn] slot %d: flags=%q cwd=%s", sl.Index, flags, cwd)
 
 	sl.State = SlotSpawning
 
 	env := map[string]string{
 		"CLAUDE_POOL_DIR": m.paths.Root,
 	}
-	// Set session ID env var if a session is bound
 	if sl.SessionID != "" {
 		env["CLAUDE_POOL_SESSION_ID"] = sl.SessionID
 	}
@@ -79,9 +78,6 @@ func (m *Manager) spawnSlot(sl *Slot, resume string) {
 		Flags: flags,
 		Cwd:   cwd,
 		Env:   env,
-	}
-	if resume != "" {
-		opts.Resume = resume
 	}
 
 	proc, err := ptyPkg.Spawn(opts)
@@ -862,7 +858,7 @@ func (m *Manager) tryReplaceDeadSlots() {
 	for _, sl := range m.slots {
 		if sl.State == SlotCrashed {
 			log.Printf("[replace] respawning slot %d", sl.Index)
-			m.spawnSlot(sl, "")
+			m.spawnSlot(sl)
 			respawned = true
 		}
 	}

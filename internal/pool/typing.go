@@ -169,7 +169,7 @@ func (m *Manager) pollBufferInput() {
 			continue
 		}
 		switch sl.State {
-		case SlotIdle, SlotProcessing, SlotClearing, SlotResuming:
+		case SlotIdle, SlotProcessing, SlotClearing, SlotResuming, SlotSpawning:
 			toPoll = append(toPoll, slotPoll{slotIdx: sl.Index, rendered: sl.Term.renderedScreen()})
 		}
 	}
@@ -231,7 +231,7 @@ func (m *Manager) pollBufferInput() {
 				})
 			}
 
-		case SlotProcessing, SlotClearing, SlotResuming:
+		case SlotProcessing, SlotClearing, SlotResuming, SlotSpawning:
 			ptySilent := sl.Term.outputSilentFor() >= idleThreshold
 			shouldTransition := (contentStable || ptySilent) && sl.Term.lastIdleTransitionAt != sl.Term.contentChangedAt
 

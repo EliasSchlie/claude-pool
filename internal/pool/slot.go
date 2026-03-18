@@ -45,7 +45,7 @@ func (sl *Slot) IsOccupied() bool {
 // IsLive returns true if the slot has an active process.
 func (sl *Slot) IsLive() bool {
 	switch sl.State {
-	case SlotFresh, SlotClearing, SlotResuming, SlotIdle, SlotProcessing:
+	case SlotSpawning, SlotFresh, SlotClearing, SlotResuming, SlotIdle, SlotProcessing:
 		return true
 	}
 	return false
