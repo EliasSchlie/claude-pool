@@ -659,10 +659,8 @@ func (m *Manager) handleStop(id any, req api.Msg) api.Msg {
 		sid := s.ID
 		m.mu.Unlock()
 
-		// Ctrl-C → wait for idle. The Stop hook fires asynchronously but
-		// its deferred signal may not arrive if the transcript size changes
-		// during interruption processing. stopProcessingSession handles
-		// the full wait with a timeout fallback.
+		// Ctrl-C → wait for idle. PTY silence detection will write the
+		// idle signal once the spinner stops (~3s).
 		m.stopProcessingSession(sid, 30*time.Second)
 		return api.OkResponse(id)
 

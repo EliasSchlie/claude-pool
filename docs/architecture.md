@@ -97,7 +97,7 @@ Hooks tell the pool daemon when sessions change state (idle, processing, etc.). 
 ### Global install (`claude-pool install`)
 
 - Writes `~/.claude-pool/hook-runner.sh` — a thin entry point that delegates to pool-local scripts
-- Registers hook entries in `~/.claude/settings.json` for all relevant events (SessionStart, Stop, PreToolUse, PermissionRequest, PostToolUse, UserPromptSubmit)
+- Registers hook entries in `~/.claude/settings.json` for all relevant events (SessionStart, PreToolUse, PermissionRequest, PostToolUse, UserPromptSubmit)
 - Installs the Claude Code skill to `~/.claude/skills/claude-pool/SKILL.md`
 - Run once per machine. `claude-pool uninstall` reverses everything.
 

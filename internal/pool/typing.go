@@ -31,10 +31,16 @@ func containsBoxDrawing(s string) bool {
 // Re-rendering the full buffer from scratch each poll causes vt10x to
 // produce wrong output for complex cursor sequences.
 type sessionTerm struct {
-	mu   sync.Mutex
-	term vt10x.Terminal
-	sub  chan []byte
-	done chan struct{}
+	mu             sync.Mutex
+	term           vt10x.Terminal
+	sub            chan []byte
+	done           chan struct{}
+	lastOutputTime time.Time // updated on every PTY data chunk
+
+	// Screen change tracking for idle detection. Updated by pollBufferInput.
+	lastContentAbovePrompt string
+	contentChangedAt       time.Time
+	lastIdleTransitionAt   time.Time // prevents duplicate idle transitions for same stable period
 }
 
 // newSessionTerm creates a persistent terminal emulator for a session's process.
@@ -69,6 +75,7 @@ func newSessionTerm(proc *ptyPkg.Process, cols, rows int) *sessionTerm {
 				}
 				st.mu.Lock()
 				st.term.Write(data)
+				st.lastOutputTime = time.Now()
 				st.mu.Unlock()
 			case <-st.done:
 				return
@@ -84,6 +91,16 @@ func (st *sessionTerm) renderedScreen() string {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.term.String()
+}
+
+// outputSilentFor returns how long since the last PTY output was received.
+func (st *sessionTerm) outputSilentFor() time.Duration {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.lastOutputTime.IsZero() {
+		return 0
+	}
+	return time.Since(st.lastOutputTime)
 }
 
 // stop unsubscribes from PTY output and stops the feed goroutine.
@@ -169,51 +186,113 @@ func (m *Manager) typingPollLoop() {
 	}
 }
 
-type sessionCheck struct {
+type sessionPoll struct {
 	id       string
 	rendered string
 }
 
 func (m *Manager) pollBufferInput() {
 	m.mu.Lock()
-	var toCheck []sessionCheck
+	var toPoll []sessionPoll
 	for id, s := range m.sessions {
-		// Only poll idle sessions — fresh sessions have startup artifacts
-		// (trust dialog, etc.) that cause false positives.
-		if s.Status != StatusIdle {
+		if s.Status != StatusIdle && s.Status != StatusProcessing {
 			continue
 		}
 		st := m.terms[id]
 		if st == nil {
 			continue
 		}
-		toCheck = append(toCheck, sessionCheck{id: id, rendered: st.renderedScreen()})
+		toPoll = append(toPoll, sessionPoll{id: id, rendered: st.renderedScreen()})
 	}
 	m.mu.Unlock()
 
-	for _, item := range toCheck {
+	const idleThreshold = 3 * time.Second
+
+	for _, item := range toPoll {
+		content := contentAbovePrompt(item.rendered)
 		input := parseRenderedInput(item.rendered)
 
 		m.mu.Lock()
 		s := m.sessions[item.id]
-		if s == nil || s.Status != StatusIdle {
+		st := m.terms[item.id]
+		if s == nil || st == nil {
 			m.mu.Unlock()
 			continue
 		}
-		if s.PendingInput != input {
-			prev := s.PendingInput
-			s.PendingInput = input
-			if input != "" || prev != "" {
-				s.LastUsedAt = time.Now()
+
+		// Track whether the content area changed since last poll
+		now := time.Now()
+		if content != st.lastContentAbovePrompt {
+			st.lastContentAbovePrompt = content
+			st.contentChangedAt = now
+		}
+
+		contentStable := !st.contentChangedAt.IsZero() && now.Sub(st.contentChangedAt) >= idleThreshold
+
+		if s.Status == StatusIdle {
+			// Content changing → processing started
+			if !contentStable && !st.contentChangedAt.IsZero() {
+				log.Printf("[typing] session %s: content changing (idle→processing)", s.ID)
+				s.Status = StatusProcessing
+				s.PendingInput = ""
+				m.broadcastStatus(s, StatusIdle)
+				m.mu.Unlock()
+				continue
 			}
-			log.Printf("[typing] session %s: pendingInput %q → %q (buffer poll)", item.id, prev, input)
-			m.broadcastEvent(api.Msg{
-				"type": "event", "event": "updated",
-				"sessionId": s.ID, "changes": api.Msg{"pendingInput": s.PendingInput},
-			})
+
+			// Pending input detection
+			if s.PendingInput != input {
+				prev := s.PendingInput
+				s.PendingInput = input
+				if input != "" || prev != "" {
+					s.LastUsedAt = time.Now()
+				}
+				log.Printf("[typing] session %s: pendingInput %q → %q", item.id, prev, input)
+				m.broadcastEvent(api.Msg{
+					"type": "event", "event": "updated",
+					"sessionId": s.ID, "changes": api.Msg{"pendingInput": s.PendingInput},
+				})
+			}
+		} else if s.Status == StatusProcessing {
+			// Content stable for 3s OR PTY silent for 3s → idle.
+			// Content comparison is the primary signal. PTY silence is the
+			// fallback for when processing produces no visible output change
+			// (e.g., no-op response, output only in prompt area).
+			ptySilent := st.outputSilentFor() >= idleThreshold
+			shouldTransition := (contentStable || ptySilent) && st.lastIdleTransitionAt != st.contentChangedAt
+
+			if shouldTransition {
+				st.lastIdleTransitionAt = st.contentChangedAt
+				reason := "content stable"
+				if !contentStable {
+					reason = "PTY silent"
+				}
+				log.Printf("[typing] session %s: %s for %s (processing→idle)", s.ID, reason, now.Sub(st.contentChangedAt).Round(time.Second))
+				m.transitionToIdle(s)
+			}
 		}
 		m.mu.Unlock()
 	}
+}
+
+// contentAbovePrompt returns the screen content above the first ───
+// separator line (Claude Code's TUI divider above the prompt area).
+// Changes in this area indicate processing; user typing only affects
+// the prompt area below.
+func contentAbovePrompt(rendered string) string {
+	lines := strings.Split(rendered, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if containsBoxDrawing(lines[i]) {
+			// Find the upper separator (there are two — skip the lower one)
+			for j := i - 1; j >= 0; j-- {
+				if containsBoxDrawing(lines[j]) {
+					return strings.Join(lines[:j], "\n")
+				}
+			}
+			return strings.Join(lines[:i], "\n")
+		}
+	}
+	return rendered
 }
 
 // startSessionTerm creates and registers a persistent terminal emulator
