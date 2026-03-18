@@ -499,6 +499,8 @@ func doStart(c *conn, args []string, jsonMode bool) error {
 
 	if block {
 		sessionID, _ := resp["sessionId"].(string)
+		// Print session ID immediately so the caller has it while waiting
+		fmt.Fprintf(os.Stderr, "Session %s (waiting for completion...)\n", sessionID)
 		waitMsg := map[string]any{
 			"type":      "wait",
 			"sessionId": sessionID,
@@ -577,6 +579,7 @@ func doFollowup(c *conn, args []string, jsonMode bool) error {
 
 	if block {
 		sessionID, _ := resp["sessionId"].(string)
+		fmt.Fprintf(os.Stderr, "Session %s (waiting for completion...)\n", sessionID)
 		waitMsg := map[string]any{
 			"type":      "wait",
 			"sessionId": sessionID,
