@@ -5,3 +5,8 @@ bin/
 *.sock
 /claude-pool
 /claude-pool-cli
+
+# Generated from hooks/ by `make generate` — do not edit directly
+cmd/claude-pool/embedded/hooks.json
+cmd/claude-pool/embedded/hook-runner.sh
+cmd/claude-pool/embedded/pid-registry.sh
