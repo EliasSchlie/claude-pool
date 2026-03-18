@@ -41,14 +41,16 @@ A turn starts at a user prompt (a `type: "user"` entry where `message.content` c
 
 | Value | Entries included | Content filtering |
 |-------|-----------------|-------------------|
-| `"last"` | User prompts + final assistant entry with text, per turn. | Exclude tool_use blocks. Exclude tool_result user entries. |
-| `"assistant"` | User prompts + all assistant entries that contain text. | Exclude tool_use blocks. Exclude tool_result user entries. |
-| `"tools"` | All user entries (prompts + tool results) + all assistant entries. | Keep all content blocks. Strip metadata fields (see below). |
+| `"last"` | User prompts + final assistant entry with text, per turn. | Exclude tool_use blocks. Exclude tool_result user entries. Strip metadata (see below). |
+| `"assistant"` | User prompts + all assistant entries that contain text. | Exclude tool_use blocks. Exclude tool_result user entries. Strip metadata (see below). |
+| `"tools"` | All user entries (prompts + tool results) + all assistant entries. | Keep all content blocks. Strip metadata (see below). |
 | `"raw"` | All entries unfiltered (including progress, system, etc.). | No filtering. |
 
-### Metadata stripping (`detail: "tools"`)
+### Metadata stripping (`detail: "last"`, `"assistant"`, `"tools"`)
 
-**Stripped from all entries:** `parentUuid`, `isSidechain`, `version`, `gitBranch`, `requestId`, `uuid`, `timestamp`, `cwd`, `sessionId`, `userType`
+All detail levels except `"raw"` strip metadata fields.
+
+**Stripped from all entries:** `parentUuid`, `isSidechain`, `version`, `gitBranch`, `requestId`, `uuid`, `timestamp`, `cwd`, `sessionId`, `userType`, `entrypoint`, `permissionMode`, `promptId`
 
 **Stripped from `message` objects:** `model`, `id`, `usage`, `stop_reason`, `stop_sequence`
 

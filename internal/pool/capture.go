@@ -266,10 +266,7 @@ func filterTools(entries []transcriptEntry) string {
 		if typ != "user" && typ != "assistant" {
 			continue
 		}
-		stripped := stripEntryMetadata(e.data)
-		if out, err := json.Marshal(stripped); err == nil {
-			lines = append(lines, string(out))
-		}
+		lines = append(lines, marshalEntry(e, true, false))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -296,9 +293,9 @@ func filterAssistantDetail(entries []transcriptEntry, lastOnly bool) string {
 
 	lines := make([]string, 0, len(entries))
 	for _, t := range turns {
-		// User prompt (first entry in turn) — use raw line to avoid re-serialization.
+		// User prompt — strip metadata for clean output.
 		if len(t) > 0 && isUserPrompt(t[0].data) {
-			lines = append(lines, t[0].raw)
+			lines = append(lines, marshalEntry(t[0], true, false))
 		}
 
 		if lastOnly {
@@ -306,7 +303,7 @@ func filterAssistantDetail(entries []transcriptEntry, lastOnly bool) string {
 			for i := len(t) - 1; i >= 0; i-- {
 				typ, _ := t[i].data["type"].(string)
 				if typ == "assistant" && hasTextContent(t[i].data) {
-					lines = append(lines, marshalOrRaw(t[i]))
+					lines = append(lines, marshalEntry(t[i], true, true))
 					break
 				}
 			}
@@ -315,7 +312,7 @@ func filterAssistantDetail(entries []transcriptEntry, lastOnly bool) string {
 			for _, e := range t {
 				typ, _ := e.data["type"].(string)
 				if typ == "assistant" && hasTextContent(e.data) {
-					lines = append(lines, marshalOrRaw(e))
+					lines = append(lines, marshalEntry(e, true, true))
 				}
 			}
 		}
@@ -329,7 +326,8 @@ func filterAssistantDetail(entries []transcriptEntry, lastOnly bool) string {
 var entryMetadataFields = map[string]bool{
 	"parentUuid": true, "isSidechain": true, "version": true, "gitBranch": true,
 	"requestId": true, "uuid": true, "timestamp": true, "cwd": true,
-	"sessionId": true, "userType": true,
+	"sessionId": true, "userType": true, "entrypoint": true,
+	"permissionMode": true, "promptId": true,
 }
 
 // Fields stripped from message objects for detail="tools".
@@ -357,25 +355,28 @@ func stripEntryMetadata(entry map[string]any) map[string]any {
 	return result
 }
 
-// marshalOrRaw serializes an entry, stripping tool_use blocks if present.
-// Uses the raw line when the entry is unmodified.
-func marshalOrRaw(e transcriptEntry) string {
-	filtered := removeToolUseBlocks(e.data)
-	if filtered == nil {
-		return e.raw // no tool_use blocks — use original line
+// marshalEntry serializes an entry with optional metadata stripping and tool_use removal.
+// Falls back to the raw JSONL line on marshal error.
+func marshalEntry(e transcriptEntry, stripMeta, stripToolUse bool) string {
+	data := e.data
+	if stripMeta {
+		data = stripEntryMetadata(data)
 	}
-	if out, err := json.Marshal(filtered); err == nil {
+	if stripToolUse {
+		data = removeToolUseBlocks(data)
+	}
+	if out, err := json.Marshal(data); err == nil {
 		return string(out)
 	}
 	return e.raw
 }
 
 // removeToolUseBlocks returns a copy of the entry with tool_use content blocks removed.
-// Returns nil if no tool_use blocks are present (caller can use the raw line).
+// Returns the input unchanged if no tool_use blocks are present.
 func removeToolUseBlocks(entry map[string]any) map[string]any {
 	msg, _ := entry["message"].(map[string]any)
 	if msg == nil {
-		return nil
+		return entry
 	}
 	content, _ := msg["content"].([]any)
 
@@ -390,7 +391,7 @@ func removeToolUseBlocks(entry map[string]any) map[string]any {
 		filtered = append(filtered, c)
 	}
 	if len(filtered) == len(content) {
-		return nil // nothing removed
+		return entry // nothing removed
 	}
 
 	// Copy entry and message with filtered content.
