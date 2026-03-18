@@ -78,7 +78,7 @@ Two complementary systems detect slot state transitions:
    - Content above prompt changing → slot processing
    - Content stable 1s → slot idle (calls `transitionSlotToIdle()`)
    - PTY silent 1s → slot idle (fallback)
-   - Pending input detection → surfaced to session via `slot.PendingInput`
+   - Pending input detection → surfaced to session via `session.PendingInput`
 
 2. **Hook signal watcher** (`lifecycle.go` → `watchIdleSignal`):
    - Handles `session-start`/`session-clear` triggers only (spawning/clearing → ready)

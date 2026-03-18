@@ -142,6 +142,7 @@ func (m *Manager) sessionFromMap(sm map[string]any) *Session {
 		Flags:      strVal(sm, "flags"),
 		Pinned:     boolVal(sm, "pinned"),
 		Metadata:   metadataFromMap(sm),
+		SlotIndex:  -1, // not loaded until bindSession
 	}
 
 	if t := strVal(sm, "createdAt"); t != "" {

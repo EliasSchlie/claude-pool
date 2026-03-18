@@ -228,6 +228,9 @@ func configToMsg(cfg Config) api.Msg {
 	if cfg.Flags != "" {
 		m["flags"] = cfg.Flags
 	}
+	if cfg.Dir != "" {
+		m["dir"] = cfg.Dir
+	}
 	return m
 }
 

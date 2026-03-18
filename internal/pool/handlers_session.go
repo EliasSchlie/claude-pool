@@ -403,7 +403,19 @@ func (m *Manager) handleStop(id any, req api.Msg) api.Msg {
 	case StatusQueued:
 		log.Printf("[stop] session %s: removing from queue", s.ID)
 		m.removeFromQueue(s)
-		s.Status = StatusOffloaded
+		if s.ClaudeUUID != "" {
+			// Previously loaded session re-queued via followup — keep as offloaded
+			s.Status = StatusOffloaded
+			s.ClearPending()
+			m.broadcastStatus(s, StatusQueued)
+		} else {
+			// Never-loaded session — nothing to resume, delete it
+			log.Printf("[stop] session %s: deleting never-loaded queued session", s.ID)
+			delete(m.sessions, s.ID)
+			m.broadcastEvent(api.Msg{
+				"type": "event", "event": "deleted", "sessionId": s.ID,
+			})
+		}
 		m.savePoolState()
 		m.mu.Unlock()
 		return api.OkResponse(id)

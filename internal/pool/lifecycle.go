@@ -440,9 +440,13 @@ func (m *Manager) transitionSlotToIdle(sl *Slot) {
 		log.Printf("[idle] slot %d: clearing → fresh (pid=%d)", sl.Index, sl.PID())
 		sl.State = SlotFresh
 
-		// Serve queued sessions from this fresh slot
-		m.serveQueueFromSlot(sl)
-		return
+		// If a session was pre-bound during clearing (via findFreshSlot),
+		// fall through to deliver its pending resume/prompt.
+		if !sl.IsOccupied() {
+			m.serveQueueFromSlot(sl)
+			return
+		}
+		// Fall through to handle the pre-bound session's pending work
 	}
 
 	s := m.sessions[sl.SessionID]
@@ -489,6 +493,15 @@ func (m *Manager) transitionSlotToIdle(sl *Slot) {
 	log.Printf("[idle] slot %d session %s: %s → idle (pid=%d)", sl.Index, s.ID, prevStatus, sl.PID())
 	m.broadcastStatus(s, prevStatus)
 	m.savePoolState()
+
+	// Consume pending kill tokens (deferred resize-down).
+	// This may kill the current slot, so bail out if the session was evicted.
+	if m.killTokens > 0 {
+		m.tryKillTokens()
+		if s.Status != StatusIdle {
+			return // this session was evicted by kill tokens
+		}
+	}
 
 	// Try to serve queue from this slot or evict to free one
 	if len(m.queue) > 0 {

@@ -95,7 +95,7 @@ Full protocol support including subscribe (persistent event stream) works over t
 - Offloaded sessions stored as `meta.json` (JSONL transcripts are the persistent record).
 - Default flags: `--dangerously-skip-permissions`.
 - Pending input detection: polls slot terminal buffer for un-submitted text, surfaced to hosted session.
-- Lock discipline: hold mutex only for in-memory state mutations. Never across I/O, process spawning, or network calls.
+- Lock discipline: single mutex guards all state. Held across some I/O and process spawning for simplicity at the expected scale (single user, small pools).
 - Slot states are internal — consumers never see them (invariant #5). Slot errors are recycled automatically.
 - Clear workflow: `clearSlot()` runs `/clear` → `/update-plugins` → `/clear` via `ClearQueue`. Each step delivered when previous completes (1s idle threshold).
 
