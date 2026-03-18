@@ -15,7 +15,6 @@ func (m *Manager) handleConfig(id any, req api.Msg) api.Msg {
 		if err != nil {
 			return api.ErrorResponse(id, "config update failed: "+err.Error())
 		}
-		// If keepFresh was updated, trigger fresh slot maintenance
 		if _, ok := setMap["keepFresh"]; ok {
 			m.mu.Lock()
 			if m.initialized {
@@ -59,20 +58,25 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 	m.initialized = true
 	m.poolSize = size
 
-	// Deploy hook scripts to pool directory — each pool owns its own hooks
 	if err := m.deployHooks(); err != nil {
 		m.initialized = false
 		log.Printf("[init] %v", err)
 		return api.ErrorResponse(id, err.Error())
 	}
 
-	// Try to restore sessions from pool.json (unless noRestore)
+	// Create slots
+	m.slots = make([]*Slot, size)
+	for i := 0; i < size; i++ {
+		m.slots[i] = &Slot{Index: i, State: SlotCrashed}
+	}
+
+	// Try to restore sessions from pool.json
 	var liveSessions, offloadedSessions []*Session
 	if !noRestore {
 		liveSessions, offloadedSessions = m.loadPoolState()
 	}
 
-	// Restore live sessions into slots first
+	// Restore live sessions into slots
 	restored := 0
 	log.Printf("[init] restoring state: %d live, %d offloaded sessions from pool.json", len(liveSessions), len(offloadedSessions))
 	for _, s := range liveSessions {
@@ -83,9 +87,11 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 			continue
 		}
 		m.sessions[s.ID] = s
-		s.Status = StatusFresh
-		log.Printf("[init] restoring live session %s (claude=%s resume=%v)", s.ID, s.ClaudeUUID, s.ClaudeUUID != "")
-		m.spawnSession(s, s.ClaudeUUID != "")
+		sl := m.slots[restored]
+		m.bindSession(sl, s)
+		s.Status = StatusProcessing // will transition when spawn completes
+		log.Printf("[init] restoring live session %s into slot %d (claude=%s resume=%v)", s.ID, sl.Index, s.ClaudeUUID, s.ClaudeUUID != "")
+		m.spawnSlot(sl, s.ClaudeUUID)
 		restored++
 	}
 
@@ -98,51 +104,55 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 			continue
 		}
 		m.sessions[s.ID] = s
-		s.Status = StatusFresh
-		log.Printf("[init] restoring offloaded session %s (claude=%s resume=%v)", s.ID, s.ClaudeUUID, s.ClaudeUUID != "")
-		m.spawnSession(s, s.ClaudeUUID != "")
+		sl := m.slots[restored]
+		m.bindSession(sl, s)
+		s.Status = StatusProcessing
+		log.Printf("[init] restoring offloaded session %s into slot %d (claude=%s resume=%v)", s.ID, sl.Index, s.ClaudeUUID, s.ClaudeUUID != "")
+		m.spawnSlot(sl, s.ClaudeUUID)
 		restored++
 	}
 
-	// Fill remaining slots with fresh pre-warmed sessions.
+	// Fill remaining slots with fresh processes.
 	// Spawn the first one and wait for it to become idle before spawning the
-	// rest. This ensures the workspace trust prompt (if shown) is accepted
-	// and cached before concurrent sessions start — Claude's TUI trust
-	// prompt doesn't reliably process Enter when multiple PTYs race.
-	fresh := size - restored
-	if fresh > 0 {
-		log.Printf("[init] spawning %d fresh pre-warmed sessions", fresh)
-		s := m.newSession("")
-		s.Status = StatusFresh
-		s.PreWarmed = true
-		m.sessions[s.ID] = s
-		m.spawnSession(s, false)
+	// rest — ensures workspace trust prompt is accepted and cached.
+	remaining := size - restored
+	if remaining > 0 {
+		log.Printf("[init] spawning %d fresh slots", remaining)
+		sl := m.slots[restored]
+		m.spawnSlot(sl, "")
 
-		if fresh > 1 {
-			// Wait for first session to become idle (trust accepted) before
-			// spawning the rest. Release lock for the wait.
-			sid := s.ID
+		if remaining > 1 {
 			m.mu.Unlock()
-			m.waitForSessionIdle(sid, 60*time.Second)
+			// Wait for first slot to become ready
+			deadline := time.After(60 * time.Second)
+			for {
+				m.mu.Lock()
+				if sl.State == SlotFresh || sl.State == SlotIdle {
+					m.mu.Unlock()
+					break
+				}
+				ch := m.statusNotify
+				m.mu.Unlock()
+				select {
+				case <-deadline:
+					break
+				case <-ch:
+				}
+			}
 			m.mu.Lock()
-			log.Printf("[init] first session ready, spawning %d more", fresh-1)
+			log.Printf("[init] first slot ready, spawning %d more", remaining-1)
 		}
 
-		for i := 1; i < fresh; i++ {
-			s := m.newSession("")
-			s.Status = StatusFresh
-			s.PreWarmed = true
-			m.sessions[s.ID] = s
-			m.spawnSession(s, false)
+		for i := restored + 1; i < size; i++ {
+			m.spawnSlot(m.slots[i], "")
 		}
 	}
 
-	log.Printf("[init] pool initialized: %d sessions total", restored+fresh)
+	log.Printf("[init] pool initialized: %d slots", size)
 	m.savePoolState()
 	m.startTypingPoller()
 	m.startMaintenanceLoop()
 
-	// SPEC: "Pool state after initialization (same as health)."
 	return m.buildHealthResponse(id)
 }
 
@@ -159,45 +169,35 @@ func (m *Manager) handleHealth(id any) api.Msg {
 	return m.buildHealthResponse(id)
 }
 
-// buildHealthResponse builds the Pool Object (SPEC: Pool Object table).
-// Caller must hold m.mu.
 func (m *Manager) buildHealthResponse(id any) api.Msg {
-	// SPEC: slots — counts by slot state (sum = size).
-	// "crashed" is always 0 in practice (watchProcessDone → tryReplaceDeadSessions
-	// recycles immediately), but the spec requires the key to be present.
 	slots := map[string]float64{
 		"fresh": 0, "spawning": 0, "resuming": 0, "clearing": 0,
 		"idle": 0, "processing": 0, "crashed": 0,
 	}
-	// SPEC: sessions — counts by session state (all sessions).
-	// Pool Object lists queued/idle/processing/offloaded/archived; error is
-	// also a valid session state (Session States table) — include for consistency.
 	sessions := map[string]float64{
 		"queued": 0, "idle": 0, "processing": 0,
 		"offloaded": 0, "error": 0, "archived": 0,
 	}
 
-	for _, s := range m.sessions {
-		// Count session states (all sessions including archived)
-		sessions[s.ExternalStatus()]++
+	// Count slot states directly
+	for _, sl := range m.slots {
+		slots[sl.State]++
+	}
 
-		// Count slot states (only live sessions occupy slots)
-		if slotState := s.SlotState(); slotState != "" {
-			slots[slotState]++
-		}
+	// Count session states
+	for _, s := range m.sessions {
+		sessions[s.ExternalStatus()]++
 	}
 
 	health := api.Msg{
 		"name":       m.poolName,
-		"size":       float64(m.poolSize),
+		"size":       float64(len(m.slots)),
 		"queueDepth": float64(len(m.queue)),
 		"slots":      slots,
 		"sessions":   sessions,
 	}
 	if cfg, err := m.config.Load(); err == nil {
 		health["config"] = configToMsg(cfg)
-	} else {
-		log.Printf("[health] config load failed: %v", err)
 	}
 
 	return api.Response(id, "health", api.Msg{"health": health})
@@ -213,24 +213,27 @@ func (m *Manager) handleDestroy(id any, req api.Msg) api.Msg {
 
 	m.mu.Lock()
 
-	log.Printf("[destroy] destroying pool: killing %d processes", len(m.procs))
-	for sid, pipe := range m.pipes {
-		pipe.Close()
-		delete(m.pipes, sid)
-	}
-	for sid, proc := range m.procs {
-		log.Printf("[destroy] killing session %s (pid=%d)", sid, proc.PID())
-		proc.Kill()
-		proc.Close()
-		delete(m.procs, sid)
-		if s := m.sessions[sid]; s != nil {
-			delete(m.pidToSID, s.PID)
+	log.Printf("[destroy] destroying pool: killing %d slots", len(m.slots))
+	for _, sl := range m.slots {
+		if sl.Pipe != nil {
+			sl.Pipe.Close()
+			sl.Pipe = nil
+		}
+		if sl.Process != nil {
+			log.Printf("[destroy] killing slot %d (pid=%d session=%s)", sl.Index, sl.PID(), sl.SessionID)
+			sl.Process.Kill()
+			sl.Process.Close()
+			sl.Process = nil
+		}
+		if s := m.sessions[sl.SessionID]; s != nil {
 			if s.IsLive() {
 				s.Status = StatusOffloaded
 			}
-			s.PID = 0
+			s.SlotIndex = -1
 			s.PendingInput = ""
 		}
+		sl.SessionID = ""
+		sl.State = SlotCrashed
 	}
 
 	m.savePoolState()

@@ -29,21 +29,18 @@ func (m *Manager) handleInput(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "session has no live terminal (status: "+s.Status+")")
 	}
 
-	proc := m.procs[s.ID]
-	if proc == nil {
+	sl := m.slotForSession(s)
+	if sl == nil || sl.Process == nil {
 		return api.ErrorResponse(id, "no process for session")
 	}
 
-	if err := proc.WriteString(data); err != nil {
+	if err := sl.Process.WriteString(data); err != nil {
 		log.Printf("[input] session %s: write error: %v", s.ID, err)
 		return api.ErrorResponse(id, "write error: "+err.Error())
 	}
 
 	log.Printf("[input] session %s: wrote %d bytes", s.ID, len(data))
-
-	// Signal the buffer poller to re-check pendingInput
 	m.triggerBufferPoll()
-
 	return api.OkResponse(id)
 }
 
@@ -67,23 +64,23 @@ func (m *Manager) handleAttach(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "session is not live (status: "+s.Status+")")
 	}
 
-	proc := m.procs[s.ID]
-	if proc == nil {
+	sl := m.slotForSession(s)
+	if sl == nil || sl.Process == nil {
 		return api.ErrorResponse(id, "no process for session")
 	}
 
 	// Reuse existing pipe if still open
-	if pipe, ok := m.pipes[s.ID]; ok {
-		log.Printf("[attach] session %s: reusing existing pipe at %s", s.ID, pipe.socketPath)
-		resp := api.Msg{"socketPath": pipe.socketPath}
-		if cols, rows, err := proc.GetSize(); err == nil {
+	if sl.Pipe != nil {
+		log.Printf("[attach] session %s: reusing existing pipe at %s", s.ID, sl.Pipe.socketPath)
+		resp := api.Msg{"socketPath": sl.Pipe.socketPath}
+		if cols, rows, err := sl.Process.GetSize(); err == nil {
 			resp["cols"] = float64(cols)
 			resp["rows"] = float64(rows)
 		}
 		return api.Response(id, "attached", resp)
 	}
 
-	pipe, err := newAttachPipe(s.ID, m.paths.Root, proc)
+	pipe, err := newAttachPipe(s.ID, m.paths.Root, sl.Process)
 	if err != nil {
 		log.Printf("[attach] session %s: failed to create pipe: %v", s.ID, err)
 		return api.ErrorResponse(id, "failed to create attach pipe: "+err.Error())
@@ -91,10 +88,10 @@ func (m *Manager) handleAttach(id any, req api.Msg) api.Msg {
 
 	pipe.onInput = func() { m.triggerBufferPoll() }
 
-	m.pipes[s.ID] = pipe
+	sl.Pipe = pipe
 	log.Printf("[attach] session %s: pipe created at %s", s.ID, pipe.socketPath)
 	resp := api.Msg{"socketPath": pipe.socketPath}
-	if cols, rows, err := proc.GetSize(); err == nil {
+	if cols, rows, err := sl.Process.GetSize(); err == nil {
 		resp["cols"] = float64(cols)
 		resp["rows"] = float64(rows)
 	}
@@ -126,12 +123,12 @@ func (m *Manager) handlePtyResize(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "session is not live (status: "+s.ExternalStatus()+")")
 	}
 
-	proc := m.procs[s.ID]
-	if proc == nil {
+	sl := m.slotForSession(s)
+	if sl == nil || sl.Process == nil {
 		return api.ErrorResponse(id, "no process for session")
 	}
 
-	if err := proc.SetSize(uint16(cols), uint16(rows)); err != nil {
+	if err := sl.Process.SetSize(uint16(cols), uint16(rows)); err != nil {
 		log.Printf("[pty-resize] session %s: error: %v", s.ID, err)
 		return api.ErrorResponse(id, "resize failed: "+err.Error())
 	}
@@ -142,31 +139,31 @@ func (m *Manager) handlePtyResize(id any, req api.Msg) api.Msg {
 
 // --- Debug commands ---
 
-// handleDebugSlots shows slot states and slot↔session mappings.
 func (m *Manager) handleDebugSlots(id any) api.Msg {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	slots := make([]any, 0)
-	for sid, proc := range m.procs {
-		s := m.sessions[sid]
+	result := make([]any, 0, len(m.slots))
+	for _, sl := range m.slots {
 		slot := api.Msg{
-			"sessionId": sid,
-			"pid":       float64(proc.PID()),
-			"pidAlive":  isPidAlive(proc.PID()),
+			"index":     float64(sl.Index),
+			"state":     sl.State,
+			"sessionId": sl.SessionID,
 		}
-		if s != nil {
-			slot["status"] = s.Status
-			slot["slotState"] = s.SlotState()
+		if sl.Process != nil {
+			slot["pid"] = float64(sl.PID())
+			slot["pidAlive"] = isPidAlive(sl.PID())
+		}
+		if s := m.sessions[sl.SessionID]; s != nil {
 			slot["claudeUUID"] = s.ClaudeUUID
+			slot["sessionStatus"] = s.Status
 		}
-		slots = append(slots, slot)
+		result = append(result, slot)
 	}
 
-	return api.Response(id, "debug-slots", api.Msg{"slots": slots})
+	return api.Response(id, "debug-slots", api.Msg{"slots": result})
 }
 
-// handleDebugCapture captures raw terminal buffer from a slot by index.
 func (m *Manager) handleDebugCapture(id any, req api.Msg) api.Msg {
 	slotIdx, ok := req["slot"].(float64)
 	if !ok {
@@ -178,22 +175,22 @@ func (m *Manager) handleDebugCapture(id any, req api.Msg) api.Msg {
 	defer m.mu.Unlock()
 
 	idx := int(slotIdx)
-	i := 0
-	for _, proc := range m.procs {
-		if i == idx {
-			content := string(proc.Buffer())
-			if !raw {
-				content = stripANSI(content)
-			}
-			return api.Response(id, "result", api.Msg{"content": content})
-		}
-		i++
+	if idx < 0 || idx >= len(m.slots) {
+		return api.ErrorResponse(id, fmt.Sprintf("slot %d not found", idx))
 	}
 
-	return api.ErrorResponse(id, fmt.Sprintf("slot %d not found", idx))
+	sl := m.slots[idx]
+	if sl.Process == nil {
+		return api.ErrorResponse(id, fmt.Sprintf("slot %d has no process", idx))
+	}
+
+	content := string(sl.Process.Buffer())
+	if !raw {
+		content = stripANSI(content)
+	}
+	return api.Response(id, "result", api.Msg{"content": content})
 }
 
-// handleDebugLogs tails the daemon log.
 func (m *Manager) handleDebugLogs(id any, req api.Msg) api.Msg {
 	return api.Response(id, "result", api.Msg{
 		"content": "logs are written to daemon stderr (use --follow with process output)",

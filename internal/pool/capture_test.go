@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/EliasSchlie/claude-pool/internal/paths"
-	ptyPkg "github.com/EliasSchlie/claude-pool/internal/pty"
 )
 
 // --- Test helpers ---
@@ -189,9 +188,6 @@ func setupFakeTranscript(t *testing.T, uuid, transcript string) (*Manager, *Sess
 	m := &Manager{
 		paths:          paths.New(t.TempDir()),
 		sessions:       make(map[string]*Session),
-		procs:          make(map[string]*ptyPkg.Process),
-		pidToSID:       make(map[int]string),
-		pipes:          make(map[string]*attachPipe),
 		done:           make(chan struct{}),
 		transcriptDirs: []string{filepath.Dir(projectDir)},
 	}

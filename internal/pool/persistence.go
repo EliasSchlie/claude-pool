@@ -109,7 +109,7 @@ func (m *Manager) loadPoolState() (live, offloaded []*Session) {
 		}
 
 		switch status {
-		case StatusIdle, StatusProcessing, StatusFresh:
+		case StatusIdle, StatusProcessing, "fresh":
 			live = append(live, s)
 		case StatusOffloaded:
 			offloaded = append(offloaded, s)

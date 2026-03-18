@@ -89,10 +89,11 @@ func findTurnStart(lines []string, turns int) int {
 // to produce a clean snapshot — like what you'd see if you attached to the session.
 // Turn boundaries are determined from the JSONL transcript.
 func (m *Manager) captureBuffer(s *Session, turns int) string {
-	st := m.terms[s.ID]
-	if st == nil {
+	sl := m.slotForSession(s)
+	if sl == nil || sl.Term == nil {
 		return ""
 	}
+	st := sl.Term
 	buf := st.renderedScreen()
 	if buf == "" || turns == 0 {
 		return buf

@@ -21,7 +21,6 @@ import (
 
 	"github.com/EliasSchlie/claude-pool/internal/api"
 	"github.com/EliasSchlie/claude-pool/internal/paths"
-	ptyPkg "github.com/EliasSchlie/claude-pool/internal/pty"
 )
 
 // Manager is the core pool business logic. All state mutations go through its mutex.
@@ -37,13 +36,9 @@ type Manager struct {
 	mu               sync.Mutex
 	initialized      bool
 	poolSize         int
-	sessions         map[string]*Session
-	procs            map[string]*ptyPkg.Process
-	pidToSID         map[int]string
-	pipes            map[string]*attachPipe   // sessionID → attach pipe
-	delivering       map[string]chan struct{} // sessionID → closed when in-flight deliverPrompt completes
-	terms            map[string]*sessionTerm  // sessionID → persistent headless terminal emulator
-	bufferPollSignal chan struct{}            // signals typing poller to re-check immediately
+	slots            []*Slot             // indexed by slot index, len = pool size
+	sessions         map[string]*Session // all sessions (loaded + offloaded + archived)
+	bufferPollSignal chan struct{}       // signals typing poller to re-check immediately
 	queue            []*Session
 	killTokens       int
 	done             chan struct{}
@@ -58,11 +53,6 @@ func NewManager(p *paths.Pool, cfg *ConfigManager) *Manager {
 		config:           cfg,
 		hub:              api.NewSubscriberHub(),
 		sessions:         make(map[string]*Session),
-		procs:            make(map[string]*ptyPkg.Process),
-		pidToSID:         make(map[int]string),
-		pipes:            make(map[string]*attachPipe),
-		delivering:       make(map[string]chan struct{}),
-		terms:            make(map[string]*sessionTerm),
 		bufferPollSignal: make(chan struct{}, 1),
 		done:             make(chan struct{}),
 		statusNotify:     make(chan struct{}),
@@ -89,13 +79,15 @@ func (m *Manager) HandleDisconnect(conn net.Conn) {
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, pipe := range m.pipes {
-		pipe.Close()
-	}
-	for sid, proc := range m.procs {
-		log.Printf("[shutdown] killing session %s (PID %d)", sid, proc.PID())
-		proc.Kill()
-		proc.Close()
+	for _, sl := range m.slots {
+		if sl.Pipe != nil {
+			sl.Pipe.Close()
+		}
+		if sl.Process != nil {
+			log.Printf("[shutdown] killing slot %d (PID %d, session=%s)", sl.Index, sl.PID(), sl.SessionID)
+			sl.Process.Kill()
+			sl.Process.Close()
+		}
 	}
 }
 
@@ -168,21 +160,83 @@ func (m *Manager) Handle(conn net.Conn, req api.Msg) api.Msg {
 	}
 }
 
+// --- Slot helpers ---
+
+// slotForSession returns the slot hosting a session, or nil.
+// Must be called with m.mu held.
+func (m *Manager) slotForSession(s *Session) *Slot {
+	if s.SlotIndex < 0 || s.SlotIndex >= len(m.slots) {
+		return nil
+	}
+	sl := m.slots[s.SlotIndex]
+	if sl.SessionID != s.ID {
+		return nil
+	}
+	return sl
+}
+
+// slotBySessionID returns the slot hosting a session by ID, or nil.
+// Must be called with m.mu held.
+func (m *Manager) slotBySessionID(sessionID string) *Slot {
+	for _, sl := range m.slots {
+		if sl.SessionID == sessionID {
+			return sl
+		}
+	}
+	return nil
+}
+
+// sessionPID returns the PID for a session (via its slot), or 0.
+// Must be called with m.mu held.
+func (m *Manager) sessionPID(sessionID string) int {
+	if sl := m.slotBySessionID(sessionID); sl != nil {
+		return sl.PID()
+	}
+	return 0
+}
+
+// pidLookup returns a function that looks up PIDs for sessions.
+// Must be called with m.mu held. The returned function also requires m.mu.
+func (m *Manager) pidLookup() func(string) int {
+	return func(sid string) int {
+		return m.sessionPID(sid)
+	}
+}
+
+// findFreshSlot returns a fresh slot (ready for use), or nil.
+// Prefers idle-state fresh slots over spawning-state ones.
+// Must be called with m.mu held.
+func (m *Manager) findFreshSlot() *Slot {
+	var candidate *Slot
+	for _, sl := range m.slots {
+		if sl.State == SlotFresh && !sl.IsOccupied() {
+			return sl // best case — immediately ready
+		}
+		// Clearing slots will become fresh soon — less preferred but acceptable
+		if sl.State == SlotClearing && candidate == nil {
+			candidate = sl
+		}
+	}
+	return candidate
+}
+
+// findSlotByPID returns the slot with the given process PID, or nil.
+func (m *Manager) findSlotByPID(pid int) *Slot {
+	for _, sl := range m.slots {
+		if sl.Process != nil && sl.Process.PID() == pid {
+			return sl
+		}
+	}
+	return nil
+}
+
 // --- Broadcasting ---
 
 func (m *Manager) broadcastStatus(s *Session, prevStatus string) {
-	// Wake internal waiters (handleWait, waitForSessionReady) on every
-	// status change — even suppressed ones (e.g. fresh).
+	// Wake internal waiters on every status change
 	close(m.statusNotify)
 	m.statusNotify = make(chan struct{})
 
-	if s.Status == StatusFresh {
-		return // Don't broadcast internal fresh state to external subscribers
-	}
-	// Don't expose "fresh" as a prevStatus to external consumers
-	if prevStatus == StatusFresh {
-		prevStatus = StatusIdle
-	}
 	m.hub.Broadcast(api.Msg{
 		"type":       "event",
 		"event":      "status",

@@ -31,8 +31,8 @@ func (m *Manager) handleOffload(id any, req api.Msg) api.Msg {
 	if s.Pinned {
 		log.Printf("[offload] session %s: auto-unpinning before offload", s.ID)
 	}
-	log.Printf("[offload] session %s: offloading (pid=%d claude=%s)", s.ID, s.PID, s.ClaudeUUID)
-	m.offloadSessionLocked(s)
+	log.Printf("[offload] session %s: offloading (slot=%d claude=%s)", s.ID, s.SlotIndex, s.ClaudeUUID)
+	m.offloadSession(s)
 	m.savePoolState()
 	return api.OkResponse(id)
 }
@@ -75,8 +75,6 @@ func (m *Manager) handleArchive(id any, req api.Msg) api.Msg {
 		m.archiveDescendants(s.ID)
 	}
 
-	// Re-fetch: archiveDescendants releases and re-acquires the lock,
-	// so the session's status may have changed.
 	s = m.sessions[s.ID]
 	if s == nil {
 		m.mu.Unlock()
@@ -87,10 +85,8 @@ func (m *Manager) handleArchive(id any, req api.Msg) api.Msg {
 		return api.OkResponse(id)
 	}
 
-	// If processing, stop first (Ctrl-C → wait for idle) before offloading.
-	// /clear only works on an idle Claude — can't send it while processing.
 	if s.Status == StatusProcessing {
-		log.Printf("[archive] session %s: stopping processing session (pid=%d)", s.ID, s.PID)
+		log.Printf("[archive] session %s: stopping processing session", s.ID)
 		sid := s.ID
 		m.mu.Unlock()
 		m.stopProcessingSession(sid, 30*time.Second)
@@ -125,7 +121,6 @@ func (m *Manager) handleUnarchive(id any, req api.Msg) api.Msg {
 	}
 
 	if s.Status != StatusArchived {
-		log.Printf("[unarchive] session %s: rejected, status=%s (need archived)", s.ID, s.Status)
 		return api.ErrorResponse(id, "only archived sessions can be unarchived")
 	}
 
@@ -138,7 +133,7 @@ func (m *Manager) handleUnarchive(id any, req api.Msg) api.Msg {
 	return api.OkResponse(id)
 }
 
-// --- Set (unified priority/pinned/metadata) ---
+// --- Set ---
 
 func (m *Manager) handleSet(id any, req api.Msg) api.Msg {
 	sessionID, _ := req["sessionId"].(string)
@@ -154,7 +149,6 @@ func (m *Manager) handleSet(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "session not found: "+sessionID)
 	}
 
-	// Priority
 	if priority, ok := req["priority"].(float64); ok {
 		log.Printf("[set] session %s: priority %.1f → %.1f", s.ID, s.Priority, priority)
 		s.Priority = priority
@@ -164,7 +158,6 @@ func (m *Manager) handleSet(id any, req api.Msg) api.Msg {
 		})
 	}
 
-	// Pinned
 	if pinned, ok := req["pinned"]; ok {
 		switch v := pinned.(type) {
 		case bool:
@@ -183,7 +176,6 @@ func (m *Manager) handleSet(id any, req api.Msg) api.Msg {
 			s.Pinned = true
 			s.PinExpiry = time.Now().Add(time.Duration(duration) * time.Second)
 
-			// If offloaded, queue for loading
 			if s.Status == StatusOffloaded || s.Status == StatusError {
 				prevStatus := s.Status
 				s.Status = StatusQueued
@@ -199,10 +191,6 @@ func (m *Manager) handleSet(id any, req api.Msg) api.Msg {
 		}
 	}
 
-	// Metadata — route structured fields (name, description) to their
-	// dedicated fields, everything else to Tags. Matches handleSetMetadata
-	// semantics so `set --meta name=foo` and `set-metadata {name: "foo"}`
-	// produce the same result.
 	if metadata, ok := req["metadata"].(map[string]any); ok {
 		for k, v := range metadata {
 			sv, _ := v.(string)
@@ -249,29 +237,22 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 		m.sessions[s.ID] = s
 		log.Printf("[pin] creating new pinned session %s (parent=%s duration=%.0fs)", s.ID, parentID, duration)
 
-		// Try to find a fresh slot, evicting if necessary
+		// Try to find a fresh slot
 		if m.findFreshSlot() == nil {
 			if evicted := m.findEvictableSession(); evicted != nil {
 				log.Printf("[pin] session %s: evicting idle session %s to free slot", s.ID, evicted.ID)
-				m.offloadSessionLocked(evicted)
+				m.offloadSession(evicted)
 			}
 		}
-		if fresh := m.findFreshSlot(); fresh != nil {
-			log.Printf("[pin] session %s: taking over slot from %s (status=%s pid=%d)", s.ID, fresh.ID, fresh.Status, fresh.PID)
-			proc := m.transferProcess(fresh, s)
-			if fresh.Status == StatusIdle {
+		if sl := m.findFreshSlot(); sl != nil {
+			log.Printf("[pin] session %s: taking slot %d (state=%s pid=%d)", s.ID, sl.Index, sl.State, sl.PID())
+			m.bindSession(sl, s)
+			if sl.State == SlotFresh {
 				s.Status = StatusIdle
+				sl.State = SlotIdle
 			} else {
-				s.Status = StatusFresh
+				s.Status = StatusProcessing
 			}
-			if proc != nil {
-				// Only clear for idle slots — fresh slots' signals haven't fired yet
-				if fresh.Status == StatusIdle {
-					m.clearIdleSignals(s.PID)
-				}
-				m.startWatchers(s, proc)
-			}
-			delete(m.sessions, fresh.ID)
 		} else {
 			log.Printf("[pin] session %s: no slots available, queuing at front", s.ID)
 			s.Status = StatusQueued
@@ -400,8 +381,6 @@ func (m *Manager) handleSetMetadata(id any, req api.Msg) api.Msg {
 
 	changes := map[string]any{}
 
-	// Merge semantics: only update fields that are present in the request.
-	// Explicit null clears the field. Wrong types are rejected.
 	if v, ok := metaRaw["name"]; ok {
 		if v == nil {
 			s.Metadata.Name = ""
@@ -444,7 +423,6 @@ func (m *Manager) handleSetMetadata(id any, req api.Msg) api.Msg {
 		} else {
 			return api.ErrorResponse(id, "metadata.tags must be an object or null")
 		}
-		// Report current tags state in changes (copy to avoid aliasing)
 		if len(s.Metadata.Tags) > 0 {
 			tagsCopy := make(map[string]string, len(s.Metadata.Tags))
 			for k, v := range s.Metadata.Tags {
@@ -487,30 +465,25 @@ func (m *Manager) handleResize(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "size must be >= 1")
 	}
 
-	// Reset kill tokens — resize is absolute ("to size N"), so any pending
-	// evictions from a prior shrink are superseded by the new target.
 	if m.killTokens > 0 {
 		log.Printf("[resize] clearing %d kill tokens from prior shrink", m.killTokens)
 		m.killTokens = 0
 	}
 
-	oldSize := m.poolSize
+	oldSize := len(m.slots)
 	m.poolSize = target
 	log.Printf("[resize] pool size: %d → %d", oldSize, target)
 
-	// SPEC: "Change slot count immediately and update config."
 	if _, err := m.config.Update(map[string]any{"size": target}); err != nil {
 		log.Printf("[resize] config update failed: %v", err)
 	}
 
 	if target > oldSize {
-		log.Printf("[resize] spawning %d new sessions", target-oldSize)
+		log.Printf("[resize] adding %d new slots", target-oldSize)
 		for i := oldSize; i < target; i++ {
-			s := m.newSession("")
-			s.Status = StatusFresh
-			s.PreWarmed = true
-			m.sessions[s.ID] = s
-			m.spawnSession(s, false)
+			sl := &Slot{Index: i, State: SlotCrashed}
+			m.slots = append(m.slots, sl)
+			m.spawnSlot(sl, "")
 		}
 	} else if target < oldSize {
 		log.Printf("[resize] shrinking: adding %d kill tokens", oldSize-target)
@@ -525,7 +498,7 @@ func (m *Manager) handleResize(id any, req api.Msg) api.Msg {
 
 	return api.Response(id, "pool", api.Msg{
 		"pool": api.Msg{
-			"size": float64(m.poolSize),
+			"size": float64(len(m.slots)),
 		},
 	})
 }

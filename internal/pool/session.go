@@ -9,7 +9,6 @@ import (
 // Session states.
 const (
 	StatusQueued     = "queued"
-	StatusFresh      = "fresh" // Pre-warmed, not yet idle (startup in progress)
 	StatusIdle       = "idle"
 	StatusProcessing = "processing"
 	StatusOffloaded  = "offloaded"
@@ -29,7 +28,8 @@ type SessionMetadata struct {
 	Tags        map[string]string `json:"tags,omitempty"`
 }
 
-// Session represents a managed Claude Code session.
+// Session represents a managed Claude Code session — pure identity and lifecycle.
+// Process ownership lives on the Slot.
 type Session struct {
 	ID           string
 	ClaudeUUID   string
@@ -42,15 +42,11 @@ type Session struct {
 	Cwd          string
 	CreatedAt    time.Time
 	LastUsedAt   time.Time // updated on prompt delivery, used for LRU eviction
-	PID          int
-	PendingInput string // Un-submitted text detected on prompt line (attach pipe or buffer poll)
+	PendingInput string    // surfaced from slot-level detection
 	Metadata     SessionMetadata
 
-	// Internal: pool-owned pre-warmed session (can be claimed by start/pin)
-	PreWarmed bool
-	// Internal: process was recycled via /clear (not freshly spawned).
-	// Used to distinguish "clearing" from "spawning" in health slot states.
-	Recycled bool
+	// SlotIndex is the index of the slot hosting this session (-1 when not loaded).
+	SlotIndex int
 
 	// Internal: pending prompt for queued sessions
 	PendingPrompt string
@@ -65,20 +61,21 @@ type Session struct {
 }
 
 // ClearPending cancels all pending work (prompt, force, resume).
-// Used by stop to ensure watchIdleSignal doesn't deliver stale prompts.
+// Used by stop to ensure idle transitions don't deliver stale prompts.
 func (s *Session) ClearPending() {
 	s.PendingPrompt = ""
 	s.PendingForce = false
 	s.PendingResume = ""
 }
 
-// IsLive returns true if the session has a live terminal.
+// IsLoaded returns true if the session is loaded in a slot.
+func (s *Session) IsLoaded() bool {
+	return s.SlotIndex >= 0
+}
+
+// IsLive returns true if the session is loaded and active.
 func (s *Session) IsLive() bool {
-	switch s.Status {
-	case StatusFresh, StatusIdle, StatusProcessing:
-		return true
-	}
-	return false
+	return s.Status == StatusIdle || s.Status == StatusProcessing
 }
 
 // IsBusy returns true if the session is processing or queued.
@@ -86,46 +83,19 @@ func (s *Session) IsBusy() bool {
 	return s.Status == StatusProcessing || s.Status == StatusQueued
 }
 
-// ExternalStatus returns the API-visible status. Fresh is internal —
-// externally exposed as idle (or processing if a prompt is pending).
+// ExternalStatus returns the API-visible status.
 func (s *Session) ExternalStatus() string {
-	if s.Status == StatusFresh {
-		if s.PendingPrompt != "" {
-			return StatusProcessing
-		}
-		return StatusIdle
-	}
 	return s.Status
 }
 
-// SlotState returns the SPEC slot state for a live session.
-// Returns "" if the session doesn't occupy a slot.
-// SPEC: Slot States table — fresh, spawning, resuming, clearing, idle, processing, crashed.
-func (s *Session) SlotState() string {
-	if !s.IsLive() {
-		return ""
-	}
-	switch {
-	case s.PreWarmed && s.Status == StatusFresh && s.Recycled:
-		return "clearing"
-	case s.PreWarmed && s.Status == StatusFresh:
-		return "spawning"
-	case s.PreWarmed && s.Status == StatusIdle:
-		return "fresh"
-	case s.Status == StatusFresh && s.PendingResume != "":
-		return "resuming"
-	case s.Status == StatusFresh:
-		return "clearing"
-	case s.Status == StatusIdle:
-		return "idle"
-	case s.Status == StatusProcessing:
-		return "processing"
-	default:
-		return ""
-	}
+// PID returns the process ID via the slot, or 0 if not loaded.
+// This is a convenience for logging/API — process ownership is on the Slot.
+func (s *Session) PID() int {
+	// Callers that need the PID should go through the slot directly.
+	// This method exists for backward compat in persistence/API code.
+	return 0 // will be replaced by slot lookup in handlers
 }
 
-// ToMsg converts a session to a protocol message.
 // Verbosity levels for session serialization (SPEC: Session Object table).
 const (
 	VerbosityFlat   = "flat"
@@ -134,22 +104,16 @@ const (
 )
 
 // ToMsg converts a session to a protocol message at the given verbosity level.
-//
-// Verbosity controls which fields are included (SPEC lines 29-47):
-//   - flat:   sessionId, status, + priority/pinned/pendingInput only if non-default
-//   - nested: same as flat + children
-//   - full:   all fields always
-func (s *Session) ToMsg(verbosity string) map[string]any {
+func (s *Session) ToMsg(verbosity string, slotPID int) map[string]any {
 	m := map[string]any{
 		"sessionId": s.ID,
 		"status":    s.ExternalStatus(),
 	}
 
 	if verbosity == VerbosityFull {
-		// Full: always include all fields
 		m["priority"] = s.Priority
 		m["pinned"] = s.Pinned
-		if s.IsLive() {
+		if s.IsLoaded() {
 			m["pendingInput"] = s.PendingInput
 		}
 		m["parent"] = s.ParentID
@@ -161,8 +125,8 @@ func (s *Session) ToMsg(verbosity string) map[string]any {
 		}
 		m["spawnCwd"] = s.SpawnCwd
 		m["createdAt"] = s.CreatedAt.UTC().Format(time.RFC3339)
-		if s.PID != 0 {
-			m["pid"] = float64(s.PID)
+		if slotPID != 0 {
+			m["pid"] = float64(slotPID)
 		} else {
 			m["pid"] = nil
 		}
@@ -178,14 +142,13 @@ func (s *Session) ToMsg(verbosity string) map[string]any {
 		}
 		m["metadata"] = meta
 	} else {
-		// Flat/nested: only ✓* fields when non-default
 		if s.Priority != 0 {
 			m["priority"] = s.Priority
 		}
 		if s.Pinned {
 			m["pinned"] = s.Pinned
 		}
-		if s.IsLive() && s.PendingInput != "" {
+		if s.IsLoaded() && s.PendingInput != "" {
 			m["pendingInput"] = s.PendingInput
 		}
 	}
@@ -194,8 +157,6 @@ func (s *Session) ToMsg(verbosity string) map[string]any {
 }
 
 // IsChildOf returns true if this session's parent matches the given session.
-// Matches against both session ID and Claude UUID, since auto-detected parents
-// use Claude UUIDs while explicit parents may use session IDs.
 func (s *Session) IsChildOf(parent *Session) bool {
 	if s.ParentID == "" {
 		return false
@@ -204,15 +165,13 @@ func (s *Session) IsChildOf(parent *Session) bool {
 }
 
 // ToMsgWithChildren converts a session to a protocol message with recursive children.
-// Verbosity is applied recursively to all children.
-// SPEC: children field only included in nested and full verbosity.
-func (s *Session) ToMsgWithChildren(allSessions map[string]*Session, verbosity string) map[string]any {
-	m := s.ToMsg(verbosity)
+func (s *Session) ToMsgWithChildren(allSessions map[string]*Session, verbosity string, pidLookup func(string) int) map[string]any {
+	m := s.ToMsg(verbosity, pidLookup(s.ID))
 	if verbosity == VerbosityNested || verbosity == VerbosityFull {
 		children := make([]any, 0)
 		for _, other := range allSessions {
 			if other.IsChildOf(s) && other.Status != StatusArchived {
-				children = append(children, other.ToMsgWithChildren(allSessions, verbosity))
+				children = append(children, other.ToMsgWithChildren(allSessions, verbosity, pidLookup))
 			}
 		}
 		m["children"] = children

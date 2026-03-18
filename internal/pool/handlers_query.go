@@ -24,13 +24,15 @@ func (m *Manager) handleInfo(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "session not found: "+sessionID)
 	}
 
-	if s.Cwd == "" && s.IsLive() && s.PID > 0 {
-		if cwd := getCwd(s.PID); cwd != "" {
-			s.Cwd = cwd
+	if s.Cwd == "" && s.IsLoaded() {
+		if sl := m.slotForSession(s); sl != nil {
+			if cwd := getCwd(sl.PID()); cwd != "" {
+				s.Cwd = cwd
+			}
 		}
 	}
 
-	msg := s.ToMsgWithChildren(m.sessions, verbosityFromReq(req, VerbosityFull))
+	msg := s.ToMsgWithChildren(m.sessions, verbosityFromReq(req, VerbosityFull), m.pidLookup())
 	return api.Response(id, "session", api.Msg{"session": msg})
 }
 
@@ -61,13 +63,9 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "pool not initialized")
 	}
 
+	pidFn := m.pidLookup()
 	results := make([]any, 0)
 	for _, s := range m.sessions {
-		// Pre-warmed sessions are slot infrastructure, not user sessions.
-		// Sessions don't exist until start creates them (SPEC invariant #5).
-		if s.PreWarmed {
-			continue
-		}
 		if s.Status == StatusArchived && !showArchived {
 			continue
 		}
@@ -81,10 +79,7 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 			}
 		}
 
-		// SPEC: "Only filters the top level — if a session appears as a child
-		// of another session, it's not repeated as a separate entry."
-		// Applied to default ls only. When explicit filters are active (--status,
-		// --archived, --parent), show all matching sessions without dedup.
+		// SPEC: dedup children from top-level listing
 		if callerId == "" && !all && statusFilter == nil && !showArchived {
 			if s.ParentID != "" {
 				if m.findParentSession(s) != nil {
@@ -94,26 +89,22 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 		}
 
 		if tree {
-			results = append(results, s.ToMsgWithChildren(m.sessions, verbosity))
+			results = append(results, s.ToMsgWithChildren(m.sessions, verbosity, pidFn))
 		} else {
-			results = append(results, s.ToMsg(verbosity))
+			results = append(results, s.ToMsg(verbosity, pidFn(s.ID)))
 		}
 	}
 
 	return api.Response(id, "sessions", api.Msg{"sessions": results})
 }
 
-// findParentSession finds the parent session of s. Delegates to IsChildOf
-// which matches against both session IDs and Claude UUIDs.
 func (m *Manager) findParentSession(s *Session) *Session {
 	if s.ParentID == "" {
 		return nil
 	}
-	// Fast path: direct lookup by session ID
 	if parent, ok := m.sessions[s.ParentID]; ok {
 		return parent
 	}
-	// Slow path: scan for Claude UUID match
 	for _, other := range m.sessions {
 		if s.IsChildOf(other) {
 			return other
