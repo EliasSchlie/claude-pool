@@ -536,6 +536,38 @@ func TestCaptureOutputIsJSONL(t *testing.T) {
 	}
 }
 
+// === Metadata stripping for last/assistant ===
+
+func TestCaptureDetailLastStripsMetadata(t *testing.T) {
+	m, s := setupFakeTranscript(t, "last-strips-meta", twoTurnTranscript(t))
+	result := m.captureOutput(s, "jsonl", 1, "last")
+
+	mustNotContain(t, "result", result, "stop_reason")
+	mustNotContain(t, "result", result, "input_tokens")
+	mustNotContain(t, "result", result, "requestId")
+	mustNotContain(t, "result", result, "parentUuid")
+	mustNotContain(t, "result", result, "isSidechain")
+	mustNotContain(t, "result", result, "sessionId")
+
+	// Content should still be present
+	mustContain(t, "result", result, "3+3")
+	mustContain(t, "result", result, "6")
+}
+
+func TestCaptureDetailAssistantStripsMetadata(t *testing.T) {
+	m, s := setupFakeTranscript(t, "asst-strips-meta", multiAssistantTranscript(t))
+	result := m.captureOutput(s, "jsonl", 1, "assistant")
+
+	mustNotContain(t, "result", result, "stop_reason")
+	mustNotContain(t, "result", result, "input_tokens")
+	mustNotContain(t, "result", result, "parentUuid")
+	mustNotContain(t, "result", result, "sessionId")
+
+	// Content should still be present
+	mustContain(t, "result", result, "let me look at the logs")
+	mustContain(t, "result", result, "connection error")
+}
+
 // === Edge cases ===
 
 func TestCaptureEmptyTranscript(t *testing.T) {

@@ -296,9 +296,12 @@ func filterAssistantDetail(entries []transcriptEntry, lastOnly bool) string {
 
 	lines := make([]string, 0, len(entries))
 	for _, t := range turns {
-		// User prompt (first entry in turn) — use raw line to avoid re-serialization.
+		// User prompt — strip metadata for clean output.
 		if len(t) > 0 && isUserPrompt(t[0].data) {
-			lines = append(lines, t[0].raw)
+			stripped := stripEntryMetadata(t[0].data)
+			if out, err := json.Marshal(stripped); err == nil {
+				lines = append(lines, string(out))
+			}
 		}
 
 		if lastOnly {
@@ -306,7 +309,7 @@ func filterAssistantDetail(entries []transcriptEntry, lastOnly bool) string {
 			for i := len(t) - 1; i >= 0; i-- {
 				typ, _ := t[i].data["type"].(string)
 				if typ == "assistant" && hasTextContent(t[i].data) {
-					lines = append(lines, marshalOrRaw(t[i]))
+					lines = append(lines, stripAndMarshal(t[i]))
 					break
 				}
 			}
@@ -315,7 +318,7 @@ func filterAssistantDetail(entries []transcriptEntry, lastOnly bool) string {
 			for _, e := range t {
 				typ, _ := e.data["type"].(string)
 				if typ == "assistant" && hasTextContent(e.data) {
-					lines = append(lines, marshalOrRaw(e))
+					lines = append(lines, stripAndMarshal(e))
 				}
 			}
 		}
@@ -329,7 +332,8 @@ func filterAssistantDetail(entries []transcriptEntry, lastOnly bool) string {
 var entryMetadataFields = map[string]bool{
 	"parentUuid": true, "isSidechain": true, "version": true, "gitBranch": true,
 	"requestId": true, "uuid": true, "timestamp": true, "cwd": true,
-	"sessionId": true, "userType": true,
+	"sessionId": true, "userType": true, "entrypoint": true,
+	"permissionMode": true, "promptId": true,
 }
 
 // Fields stripped from message objects for detail="tools".
@@ -365,6 +369,19 @@ func marshalOrRaw(e transcriptEntry) string {
 		return e.raw // no tool_use blocks — use original line
 	}
 	if out, err := json.Marshal(filtered); err == nil {
+		return string(out)
+	}
+	return e.raw
+}
+
+// stripAndMarshal strips metadata and tool_use blocks from an entry.
+func stripAndMarshal(e transcriptEntry) string {
+	stripped := stripEntryMetadata(e.data)
+	filtered := removeToolUseBlocks(stripped)
+	if filtered != nil {
+		stripped = filtered
+	}
+	if out, err := json.Marshal(stripped); err == nil {
 		return string(out)
 	}
 	return e.raw
