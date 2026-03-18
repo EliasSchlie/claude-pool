@@ -78,24 +78,6 @@ func (s *Session) IsLive() bool {
 	return s.Status == StatusIdle || s.Status == StatusProcessing
 }
 
-// IsBusy returns true if the session is processing or queued.
-func (s *Session) IsBusy() bool {
-	return s.Status == StatusProcessing || s.Status == StatusQueued
-}
-
-// ExternalStatus returns the API-visible status.
-func (s *Session) ExternalStatus() string {
-	return s.Status
-}
-
-// PID returns the process ID via the slot, or 0 if not loaded.
-// This is a convenience for logging/API — process ownership is on the Slot.
-func (s *Session) PID() int {
-	// Callers that need the PID should go through the slot directly.
-	// This method exists for backward compat in persistence/API code.
-	return 0 // will be replaced by slot lookup in handlers
-}
-
 // Verbosity levels for session serialization (SPEC: Session Object table).
 const (
 	VerbosityFlat   = "flat"
@@ -107,7 +89,7 @@ const (
 func (s *Session) ToMsg(verbosity string, slotPID int) map[string]any {
 	m := map[string]any{
 		"sessionId": s.ID,
-		"status":    s.ExternalStatus(),
+		"status":    s.Status,
 	}
 
 	if verbosity == VerbosityFull {

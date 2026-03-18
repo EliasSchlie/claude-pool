@@ -25,7 +25,7 @@ func (m *Manager) handleOffload(id any, req api.Msg) api.Msg {
 
 	if s.Status != StatusIdle {
 		log.Printf("[offload] session %s: rejected, status=%s (need idle)", s.ID, s.Status)
-		return api.ErrorResponse(id, "can only offload idle sessions (current: "+s.ExternalStatus()+")")
+		return api.ErrorResponse(id, "can only offload idle sessions (current: "+s.Status+")")
 	}
 
 	if s.Pinned {
@@ -265,7 +265,7 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 
 		return api.Response(id, "ok", api.Msg{
 			"sessionId": s.ID,
-			"status":    s.ExternalStatus(),
+			"status":    s.Status,
 		})
 	}
 
@@ -301,7 +301,7 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 
 	return api.Response(id, "ok", api.Msg{
 		"sessionId": s.ID,
-		"status":    s.ExternalStatus(),
+		"status":    s.Status,
 	})
 }
 

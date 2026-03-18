@@ -186,7 +186,7 @@ func (m *Manager) buildHealthResponse(id any) api.Msg {
 
 	// Count session states
 	for _, s := range m.sessions {
-		sessions[s.ExternalStatus()]++
+		sessions[s.Status]++
 	}
 
 	health := api.Msg{

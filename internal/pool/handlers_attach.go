@@ -120,7 +120,7 @@ func (m *Manager) handlePtyResize(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "session not found: "+sessionID)
 	}
 	if !s.IsLive() {
-		return api.ErrorResponse(id, "session is not live (status: "+s.ExternalStatus()+")")
+		return api.ErrorResponse(id, "session is not live (status: "+s.Status+")")
 	}
 
 	sl := m.slotForSession(s)

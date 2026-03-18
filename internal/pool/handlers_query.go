@@ -69,7 +69,7 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 		if s.Status == StatusArchived && !showArchived {
 			continue
 		}
-		if statusFilter != nil && !statusFilter[s.ExternalStatus()] {
+		if statusFilter != nil && !statusFilter[s.Status] {
 			continue
 		}
 

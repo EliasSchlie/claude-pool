@@ -809,7 +809,7 @@ func (m *Manager) claimSlotForQueued(sl *Slot, queued *Session) {
 	if queued.Status != StatusQueued {
 		m.broadcastEvent(api.Msg{
 			"type": "event", "event": "status",
-			"sessionId": queued.ID, "status": queued.ExternalStatus(), "prevStatus": StatusQueued,
+			"sessionId": queued.ID, "status": queued.Status, "prevStatus": StatusQueued,
 		})
 	}
 	m.savePoolState()

@@ -56,13 +56,13 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 
 		m.broadcastEvent(api.Msg{
 			"type": "event", "event": "created",
-			"sessionId": s.ID, "status": s.ExternalStatus(), "parent": s.ParentID,
+			"sessionId": s.ID, "status": s.Status, "parent": s.ParentID,
 		})
 		m.savePoolState()
 		m.mu.Unlock()
 		return api.Response(id, "started", api.Msg{
 			"sessionId": s.ID,
-			"status":    s.ExternalStatus(),
+			"status":    s.Status,
 		})
 	}
 
@@ -72,7 +72,7 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 	m.queue = append(m.queue, s)
 	m.broadcastEvent(api.Msg{
 		"type": "event", "event": "created",
-		"sessionId": s.ID, "status": s.ExternalStatus(), "parent": s.ParentID,
+		"sessionId": s.ID, "status": s.Status, "parent": s.ParentID,
 	})
 
 	m.tryDequeueWithEviction(s, "")
@@ -80,7 +80,7 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 
 	resp := api.Response(id, "started", api.Msg{
 		"sessionId": s.ID,
-		"status":    s.ExternalStatus(),
+		"status":    s.Status,
 	})
 	m.mu.Unlock()
 	return resp
@@ -103,7 +103,7 @@ func (m *Manager) handleStartPromptless(id any, s *Session) api.Msg {
 
 		m.broadcastEvent(api.Msg{
 			"type": "event", "event": "created",
-			"sessionId": s.ID, "status": s.ExternalStatus(), "parent": s.ParentID,
+			"sessionId": s.ID, "status": s.Status, "parent": s.ParentID,
 		})
 		m.savePoolState()
 
@@ -124,7 +124,7 @@ func (m *Manager) handleStartPromptless(id any, s *Session) api.Msg {
 	m.queue = append(m.queue, s)
 	m.broadcastEvent(api.Msg{
 		"type": "event", "event": "created",
-		"sessionId": s.ID, "status": s.ExternalStatus(), "parent": s.ParentID,
+		"sessionId": s.ID, "status": s.Status, "parent": s.ParentID,
 	})
 	m.tryDequeueWithEviction(s, "")
 	m.savePoolState()
@@ -138,7 +138,7 @@ func (m *Manager) handleStartPromptless(id any, s *Session) api.Msg {
 	m.mu.Unlock()
 	return api.Response(id, "started", api.Msg{
 		"sessionId": s.ID,
-		"status":    s.ExternalStatus(),
+		"status":    s.Status,
 	})
 }
 
@@ -181,7 +181,7 @@ func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 		m.mu.Unlock()
 		return api.Response(id, "started", api.Msg{
 			"sessionId": s.ID,
-			"status":    s.ExternalStatus(),
+			"status":    s.Status,
 		})
 
 	case StatusOffloaded, StatusError:
@@ -196,7 +196,7 @@ func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 		m.mu.Unlock()
 		return api.Response(id, "started", api.Msg{
 			"sessionId": s.ID,
-			"status":    s.ExternalStatus(),
+			"status":    s.Status,
 		})
 
 	case StatusProcessing:
@@ -249,7 +249,7 @@ func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 		m.mu.Unlock()
 		return api.Response(id, "started", api.Msg{
 			"sessionId": s.ID,
-			"status":    s.ExternalStatus(),
+			"status":    s.Status,
 		})
 
 	case StatusArchived:
@@ -258,7 +258,7 @@ func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 
 	default:
 		m.mu.Unlock()
-		return api.ErrorResponse(id, "cannot followup in state: "+s.ExternalStatus())
+		return api.ErrorResponse(id, "cannot followup in state: "+s.Status)
 	}
 }
 
@@ -398,7 +398,7 @@ func (m *Manager) handleStop(id any, req api.Msg) api.Msg {
 
 	case StatusIdle:
 		m.mu.Unlock()
-		return api.ErrorResponse(id, "session is not processing or queued (status: "+s.ExternalStatus()+")")
+		return api.ErrorResponse(id, "session is not processing or queued (status: "+s.Status+")")
 
 	case StatusQueued:
 		log.Printf("[stop] session %s: removing from queue", s.ID)
@@ -410,7 +410,7 @@ func (m *Manager) handleStop(id any, req api.Msg) api.Msg {
 
 	default:
 		m.mu.Unlock()
-		return api.ErrorResponse(id, "cannot stop session in state: "+s.ExternalStatus())
+		return api.ErrorResponse(id, "cannot stop session in state: "+s.Status)
 	}
 }
 
