@@ -187,7 +187,7 @@ func (m *Manager) broadcastStatus(s *Session, prevStatus string) {
 		"type":       "event",
 		"event":      "status",
 		"sessionId":  s.ID,
-		"status":     s.Status,
+		"status":     s.ExternalStatus(),
 		"prevStatus": prevStatus,
 	})
 }
