@@ -157,6 +157,7 @@ func (m *Manager) handleDebugSlots(id any) api.Msg {
 		}
 		if s != nil {
 			slot["status"] = s.Status
+			slot["slotState"] = s.SlotState()
 			slot["claudeUUID"] = s.ClaudeUUID
 		}
 		slots = append(slots, slot)

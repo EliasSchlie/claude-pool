@@ -98,6 +98,33 @@ func (s *Session) ExternalStatus() string {
 	return s.Status
 }
 
+// SlotState returns the SPEC slot state for a live session.
+// Returns "" if the session doesn't occupy a slot.
+// SPEC: Slot States table — fresh, spawning, resuming, clearing, idle, processing, crashed.
+func (s *Session) SlotState() string {
+	if !s.IsLive() {
+		return ""
+	}
+	switch {
+	case s.PreWarmed && s.Status == StatusFresh && s.Recycled:
+		return "clearing"
+	case s.PreWarmed && s.Status == StatusFresh:
+		return "spawning"
+	case s.PreWarmed && s.Status == StatusIdle:
+		return "fresh"
+	case s.Status == StatusFresh && s.PendingResume != "":
+		return "resuming"
+	case s.Status == StatusFresh:
+		return "clearing"
+	case s.Status == StatusIdle:
+		return "idle"
+	case s.Status == StatusProcessing:
+		return "processing"
+	default:
+		return ""
+	}
+}
+
 // ToMsg converts a session to a protocol message.
 // Verbosity levels for session serialization (SPEC: Session Object table).
 const (

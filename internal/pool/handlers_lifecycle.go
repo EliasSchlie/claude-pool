@@ -25,7 +25,7 @@ func (m *Manager) handleOffload(id any, req api.Msg) api.Msg {
 
 	if s.Status != StatusIdle {
 		log.Printf("[offload] session %s: rejected, status=%s (need idle)", s.ID, s.Status)
-		return api.ErrorResponse(id, "can only offload idle sessions (current: "+s.Status+")")
+		return api.ErrorResponse(id, "can only offload idle sessions (current: "+s.ExternalStatus()+")")
 	}
 
 	if s.Pinned {
@@ -284,7 +284,7 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 
 		return api.Response(id, "ok", api.Msg{
 			"sessionId": s.ID,
-			"status":    s.Status,
+			"status":    s.ExternalStatus(),
 		})
 	}
 
@@ -301,11 +301,9 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 	s.Pinned = true
 	s.PinExpiry = time.Now().Add(time.Duration(duration) * time.Second)
 
-	responseStatus := s.Status
 	if s.Status == StatusOffloaded || s.Status == StatusError {
 		prevStatus := s.Status
 		s.Status = StatusQueued
-		responseStatus = StatusQueued
 		m.queue = append([]*Session{s}, m.queue...)
 		m.broadcastStatus(s, prevStatus)
 		m.tryDequeueWithEviction(s, s.ID)
@@ -322,7 +320,7 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 
 	return api.Response(id, "ok", api.Msg{
 		"sessionId": s.ID,
-		"status":    responseStatus,
+		"status":    s.ExternalStatus(),
 	})
 }
 
