@@ -56,7 +56,6 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 	log.Printf("[init] initializing pool: size=%d noRestore=%v", size, noRestore)
 
 	m.initialized = true
-	m.poolSize = size
 
 	if err := m.deployHooks(); err != nil {
 		m.initialized = false
@@ -125,6 +124,7 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 			m.mu.Unlock()
 			// Wait for first slot to become ready
 			deadline := time.After(60 * time.Second)
+		waitLoop:
 			for {
 				m.mu.Lock()
 				if sl.State == SlotFresh || sl.State == SlotIdle {
@@ -135,7 +135,8 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 				m.mu.Unlock()
 				select {
 				case <-deadline:
-					break
+					log.Printf("[init] first slot timed out waiting for ready")
+					break waitLoop
 				case <-ch:
 				}
 			}
@@ -215,16 +216,6 @@ func (m *Manager) handleDestroy(id any, req api.Msg) api.Msg {
 
 	log.Printf("[destroy] destroying pool: killing %d slots", len(m.slots))
 	for _, sl := range m.slots {
-		if sl.Pipe != nil {
-			sl.Pipe.Close()
-			sl.Pipe = nil
-		}
-		if sl.Process != nil {
-			log.Printf("[destroy] killing slot %d (pid=%d session=%s)", sl.Index, sl.PID(), sl.SessionID)
-			sl.Process.Kill()
-			sl.Process.Close()
-			sl.Process = nil
-		}
 		if s := m.sessions[sl.SessionID]; s != nil {
 			if s.IsLive() {
 				s.Status = StatusOffloaded
@@ -233,6 +224,8 @@ func (m *Manager) handleDestroy(id any, req api.Msg) api.Msg {
 			s.PendingInput = ""
 		}
 		sl.SessionID = ""
+		log.Printf("[destroy] killing slot %d (pid=%d)", sl.Index, sl.PID())
+		sl.cleanup(m)
 		sl.State = SlotCrashed
 	}
 

@@ -35,10 +35,6 @@ type Slot struct {
 	// (/clear → /update-plugins → /clear). Popped one at a time as each
 	// step completes (detected by the typing poller).
 	ClearQueue []string
-
-	// PendingInput is detected at the slot level by the typing poller,
-	// then surfaced to the session.
-	PendingInput string
 }
 
 // IsOccupied returns true if a session is loaded in this slot.
@@ -55,9 +51,20 @@ func (sl *Slot) IsLive() bool {
 	return false
 }
 
-// IsFresh returns true if the slot is ready for immediate use.
-func (sl *Slot) IsFresh() bool {
-	return sl.State == SlotFresh
+// cleanup closes the pipe, stops the terminal, and kills the process.
+// Must be called with m.mu held.
+func (sl *Slot) cleanup(m *Manager) {
+	if sl.Pipe != nil {
+		sl.Pipe.Close()
+		sl.Pipe = nil
+	}
+	m.stopSlotTerm(sl)
+	if sl.Process != nil {
+		sl.Process.Kill()
+		sl.Process.Close()
+		sl.Process = nil
+	}
+	sl.ClearQueue = nil
 }
 
 // PID returns the process ID or 0 if no process.

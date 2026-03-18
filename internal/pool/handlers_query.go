@@ -32,7 +32,7 @@ func (m *Manager) handleInfo(id any, req api.Msg) api.Msg {
 		}
 	}
 
-	msg := s.ToMsgWithChildren(m.sessions, verbosityFromReq(req, VerbosityFull), m.pidLookup())
+	msg := s.ToMsgWithChildren(m.sessions, verbosityFromReq(req, VerbosityFull), m.sessionPID)
 	return api.Response(id, "session", api.Msg{"session": msg})
 }
 
@@ -63,7 +63,7 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "pool not initialized")
 	}
 
-	pidFn := m.pidLookup()
+	pidFn := m.sessionPID
 	results := make([]any, 0)
 	for _, s := range m.sessions {
 		if s.Status == StatusArchived && !showArchived {

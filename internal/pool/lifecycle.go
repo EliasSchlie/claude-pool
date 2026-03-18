@@ -136,7 +136,6 @@ func (m *Manager) unbindSession(sl *Slot) {
 	}
 	log.Printf("[unbind] session %s ← slot %d", sl.SessionID, sl.Index)
 	sl.SessionID = ""
-	sl.PendingInput = ""
 }
 
 // clearSlot initiates the multi-step clear workflow on a slot.
@@ -160,7 +159,7 @@ func (m *Manager) clearSlot(sl *Slot) {
 	sl.State = SlotClearing
 
 	m.clearIdleSignals(sl.PID())
-	m.deliverSlotPrompt(sl, "/clear", 200*time.Millisecond)
+	m.deliverPrompt(sl, "/clear")
 }
 
 // --- Offload & Archive ---
@@ -294,7 +293,7 @@ func (m *Manager) watchProcessDone(sl *Slot) {
 			m.broadcastStatus(s, prevStatus)
 		}
 
-		// Clean up slot
+		// Clean up slot — don't kill process (already dead)
 		if sl.Pipe != nil {
 			sl.Pipe.Close()
 			sl.Pipe = nil
@@ -436,7 +435,7 @@ func (m *Manager) transitionSlotToIdle(sl *Slot) {
 		next := sl.ClearQueue[0]
 		sl.ClearQueue = sl.ClearQueue[1:]
 		log.Printf("[idle] slot %d: clear queue step %q (%d remaining)", sl.Index, next, len(sl.ClearQueue))
-		m.deliverSlotPrompt(sl, next, 200*time.Millisecond)
+		m.deliverPrompt(sl, next)
 		return
 	}
 
@@ -444,7 +443,6 @@ func (m *Manager) transitionSlotToIdle(sl *Slot) {
 	if sl.State == SlotClearing {
 		log.Printf("[idle] slot %d: clearing → fresh (pid=%d)", sl.Index, sl.PID())
 		sl.State = SlotFresh
-		sl.PendingInput = ""
 
 		// Serve queued sessions from this fresh slot
 		m.serveQueueFromSlot(sl)
@@ -455,7 +453,6 @@ func (m *Manager) transitionSlotToIdle(sl *Slot) {
 	if s == nil {
 		// No session — mark slot fresh
 		sl.State = SlotFresh
-		sl.PendingInput = ""
 		return
 	}
 
@@ -469,7 +466,7 @@ func (m *Manager) transitionSlotToIdle(sl *Slot) {
 
 		log.Printf("[idle] slot %d session %s: delivering /resume %s", sl.Index, s.ID, uuid)
 		m.broadcastStatus(s, prevStatus)
-		m.deliverSlotPrompt(sl, "/resume "+uuid, 200*time.Millisecond)
+		m.deliverPrompt(sl, "/resume "+uuid)
 		return
 	}
 
@@ -485,7 +482,7 @@ func (m *Manager) transitionSlotToIdle(sl *Slot) {
 		s.LastUsedAt = time.Now()
 		log.Printf("[idle] slot %d session %s: delivering pending prompt (%d chars)", sl.Index, s.ID, len(prompt))
 		m.broadcastStatus(s, prevStatus)
-		m.deliverSlotPrompt(sl, prompt, 200*time.Millisecond)
+		m.deliverPrompt(sl, prompt)
 		return
 	}
 
@@ -510,6 +507,11 @@ func (m *Manager) transitionSlotToIdle(sl *Slot) {
 }
 
 // --- Prompt delivery ---
+
+// deliverPrompt sends a prompt to a slot's terminal with the default 200ms settle delay.
+func (m *Manager) deliverPrompt(sl *Slot, prompt string) {
+	m.deliverSlotPrompt(sl, prompt, 200*time.Millisecond)
+}
 
 // deliverSlotPrompt sends a prompt to a slot's terminal asynchronously.
 func (m *Manager) deliverSlotPrompt(sl *Slot, prompt string, settleDelay time.Duration) {
@@ -626,8 +628,11 @@ func (m *Manager) stopProcessingSession(sid string, timeout time.Duration) {
 	if s := m.sessions[sid]; s != nil {
 		s.ClearPending()
 	}
-	if sl := m.slotBySessionID(sid); sl != nil && sl.Process != nil {
-		sl.Process.WriteString("\x03")
+	// Re-resolve slot (may have changed after releasing lock)
+	if s2 := m.sessions[sid]; s2 != nil {
+		if sl2 := m.slotForSession(s2); sl2 != nil && sl2.Process != nil {
+			sl2.Process.WriteString("\x03")
+		}
 	}
 	m.mu.Unlock()
 
@@ -786,7 +791,7 @@ func (m *Manager) claimSlotForQueued(sl *Slot, queued *Session) {
 			queued.Status = StatusProcessing
 			sl.State = SlotResuming
 			log.Printf("[claim] slot %d session %s: delivering /resume %s", sl.Index, queued.ID, uuid)
-			m.deliverSlotPrompt(sl, "/resume "+uuid, 200*time.Millisecond)
+			m.deliverPrompt(sl, "/resume "+uuid)
 		} else if queued.PendingPrompt != "" {
 			queued.Status = StatusProcessing
 			sl.State = SlotProcessing
@@ -794,7 +799,7 @@ func (m *Manager) claimSlotForQueued(sl *Slot, queued *Session) {
 			queued.PendingPrompt = ""
 			queued.PendingForce = false
 			log.Printf("[claim] slot %d session %s: delivering prompt (%d chars)", sl.Index, queued.ID, len(prompt))
-			m.deliverSlotPrompt(sl, prompt, 200*time.Millisecond)
+			m.deliverPrompt(sl, prompt)
 		} else {
 			queued.Status = StatusIdle
 			sl.State = SlotIdle
@@ -853,11 +858,16 @@ func (m *Manager) tryReplaceDeadSlots() {
 	if !m.initialized {
 		return
 	}
+	respawned := false
 	for _, sl := range m.slots {
 		if sl.State == SlotCrashed {
 			log.Printf("[replace] respawning slot %d", sl.Index)
 			m.spawnSlot(sl, "")
+			respawned = true
 		}
+	}
+	if respawned {
+		m.savePoolState()
 	}
 }
 
@@ -891,18 +901,7 @@ func (m *Manager) tryKillTokens() {
 func (m *Manager) killSlot(sl *Slot) {
 	log.Printf("[kill] slot %d: killing pid %d", sl.Index, sl.PID())
 
-	if sl.Pipe != nil {
-		sl.Pipe.Close()
-		sl.Pipe = nil
-	}
-	m.stopSlotTerm(sl)
-	if sl.Process != nil {
-		sl.Process.Kill()
-		sl.Process.Close()
-		sl.Process = nil
-	}
-
-	// If a session was loaded, mark it offloaded
+	// Unbind session before cleanup
 	if s := m.sessions[sl.SessionID]; s != nil {
 		prevStatus := s.Status
 		s.Status = StatusOffloaded
@@ -911,6 +910,8 @@ func (m *Manager) killSlot(sl *Slot) {
 		m.broadcastStatus(s, prevStatus)
 	}
 	sl.SessionID = ""
+
+	sl.cleanup(m)
 	sl.State = SlotCrashed
 	sl.ClearQueue = nil
 

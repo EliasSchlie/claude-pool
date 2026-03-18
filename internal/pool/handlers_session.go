@@ -44,7 +44,7 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 			sl.State = SlotProcessing
 			s.LastUsedAt = time.Now()
 			m.clearIdleSignals(sl.PID())
-			m.deliverSlotPrompt(sl, prompt, 200*time.Millisecond)
+			m.deliverPrompt(sl, prompt)
 			s.PendingPrompt = ""
 		} else {
 			// Slot still clearing — queue prompt for delivery when ready
@@ -175,7 +175,7 @@ func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 		s.Status = StatusProcessing
 		sl.State = SlotProcessing
 		s.LastUsedAt = time.Now()
-		m.deliverSlotPrompt(sl, prompt, 200*time.Millisecond)
+		m.deliverPrompt(sl, prompt)
 		m.broadcastStatus(s, StatusIdle)
 		m.savePoolState()
 		m.mu.Unlock()
@@ -231,7 +231,7 @@ func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 		s.Status = StatusProcessing
 		sl.State = SlotProcessing
 		s.LastUsedAt = time.Now()
-		m.deliverSlotPrompt(sl, prompt, 200*time.Millisecond)
+		m.deliverPrompt(sl, prompt)
 		m.broadcastStatus(s, StatusIdle)
 		m.mu.Unlock()
 

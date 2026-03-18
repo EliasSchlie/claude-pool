@@ -202,12 +202,13 @@ func (m *Manager) pollBufferInput() {
 
 		switch sl.State {
 		case SlotIdle:
+			s := m.sessions[sl.SessionID]
+
 			// Content changing → processing started
 			if !contentStable && !sl.Term.contentChangedAt.IsZero() {
 				log.Printf("[typing] slot %d: content changing (idle→processing)", sl.Index)
 				sl.State = SlotProcessing
-				sl.PendingInput = ""
-				if s := m.sessions[sl.SessionID]; s != nil {
+				if s != nil {
 					s.Status = StatusProcessing
 					s.PendingInput = ""
 					m.broadcastStatus(s, StatusIdle)
@@ -216,21 +217,18 @@ func (m *Manager) pollBufferInput() {
 				continue
 			}
 
-			// Pending input detection — surface to session
-			if sl.PendingInput != input {
-				prev := sl.PendingInput
-				sl.PendingInput = input
-				if s := m.sessions[sl.SessionID]; s != nil {
-					s.PendingInput = input
-					if input != "" || prev != "" {
-						s.LastUsedAt = time.Now()
-					}
-					log.Printf("[typing] slot %d session %s: pendingInput %q → %q", sl.Index, s.ID, prev, input)
-					m.broadcastEvent(api.Msg{
-						"type": "event", "event": "updated",
-						"sessionId": s.ID, "changes": api.Msg{"pendingInput": s.PendingInput},
-					})
+			// Pending input detection
+			if s != nil && s.PendingInput != input {
+				prev := s.PendingInput
+				s.PendingInput = input
+				if input != "" || prev != "" {
+					s.LastUsedAt = time.Now()
 				}
+				log.Printf("[typing] slot %d session %s: pendingInput %q → %q", sl.Index, s.ID, prev, input)
+				m.broadcastEvent(api.Msg{
+					"type": "event", "event": "updated",
+					"sessionId": s.ID, "changes": api.Msg{"pendingInput": s.PendingInput},
+				})
 			}
 
 		case SlotProcessing, SlotClearing, SlotResuming:

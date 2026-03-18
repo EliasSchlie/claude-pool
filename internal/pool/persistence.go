@@ -42,7 +42,7 @@ func (m *Manager) saveOffloadMeta(s *Session) {
 
 func (m *Manager) savePoolState() {
 	state := map[string]any{
-		"size": float64(m.poolSize),
+		"size": float64(len(m.slots)),
 	}
 
 	sessions := make([]map[string]any, 0)

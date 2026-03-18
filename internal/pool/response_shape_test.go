@@ -136,7 +136,6 @@ func TestToMsgFullIncludesAllFields(t *testing.T) {
 func TestBuildHealthResponseWithLockHeld(t *testing.T) {
 	m := newTestManager(t)
 	m.initialized = true
-	m.poolSize = 2
 	m.slots = []*Slot{
 		{Index: 0, State: SlotIdle, SessionID: "a"},
 		{Index: 1, State: SlotFresh},

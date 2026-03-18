@@ -35,7 +35,6 @@ type Manager struct {
 
 	mu               sync.Mutex
 	initialized      bool
-	poolSize         int
 	slots            []*Slot             // indexed by slot index, len = pool size
 	sessions         map[string]*Session // all sessions (loaded + offloaded + archived)
 	bufferPollSignal chan struct{}       // signals typing poller to re-check immediately
@@ -80,14 +79,8 @@ func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, sl := range m.slots {
-		if sl.Pipe != nil {
-			sl.Pipe.Close()
-		}
-		if sl.Process != nil {
-			log.Printf("[shutdown] killing slot %d (PID %d, session=%s)", sl.Index, sl.PID(), sl.SessionID)
-			sl.Process.Kill()
-			sl.Process.Close()
-		}
+		log.Printf("[shutdown] killing slot %d (PID %d, session=%s)", sl.Index, sl.PID(), sl.SessionID)
+		sl.cleanup(m)
 	}
 }
 
@@ -175,36 +168,21 @@ func (m *Manager) slotForSession(s *Session) *Slot {
 	return sl
 }
 
-// slotBySessionID returns the slot hosting a session by ID, or nil.
+// sessionPID returns the PID for a session, or 0. O(1) via SlotIndex.
 // Must be called with m.mu held.
-func (m *Manager) slotBySessionID(sessionID string) *Slot {
-	for _, sl := range m.slots {
-		if sl.SessionID == sessionID {
-			return sl
-		}
+func (m *Manager) sessionPID(sid string) int {
+	s := m.sessions[sid]
+	if s == nil {
+		return 0
 	}
-	return nil
-}
-
-// sessionPID returns the PID for a session (via its slot), or 0.
-// Must be called with m.mu held.
-func (m *Manager) sessionPID(sessionID string) int {
-	if sl := m.slotBySessionID(sessionID); sl != nil {
+	if sl := m.slotForSession(s); sl != nil {
 		return sl.PID()
 	}
 	return 0
 }
 
-// pidLookup returns a function that looks up PIDs for sessions.
-// Must be called with m.mu held. The returned function also requires m.mu.
-func (m *Manager) pidLookup() func(string) int {
-	return func(sid string) int {
-		return m.sessionPID(sid)
-	}
-}
-
 // findFreshSlot returns a fresh slot (ready for use), or nil.
-// Prefers idle-state fresh slots over spawning-state ones.
+// Prefers fresh over clearing (which will become fresh soon).
 // Must be called with m.mu held.
 func (m *Manager) findFreshSlot() *Slot {
 	var candidate *Slot
@@ -218,16 +196,6 @@ func (m *Manager) findFreshSlot() *Slot {
 		}
 	}
 	return candidate
-}
-
-// findSlotByPID returns the slot with the given process PID, or nil.
-func (m *Manager) findSlotByPID(pid int) *Slot {
-	for _, sl := range m.slots {
-		if sl.Process != nil && sl.Process.PID() == pid {
-			return sl
-		}
-	}
-	return nil
 }
 
 // --- Broadcasting ---

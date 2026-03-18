@@ -471,7 +471,6 @@ func (m *Manager) handleResize(id any, req api.Msg) api.Msg {
 	}
 
 	oldSize := len(m.slots)
-	m.poolSize = target
 	log.Printf("[resize] pool size: %d → %d", oldSize, target)
 
 	if _, err := m.config.Update(map[string]any{"size": target}); err != nil {
