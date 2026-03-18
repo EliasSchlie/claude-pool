@@ -21,6 +21,7 @@ These files require **explicit user permission** before any modification:
 - **Build:** `make build` (compiles binaries to `bin/`)
 - **Install:** `make install` (build + symlink to `~/.local/bin/`)
 - **Deploy plugin:** `./deploy-plugin.sh` (rebuilds binaries, bumps version, copies to cache, then `/reload-plugins`)
+- **Restart pool:** `claude-pool-cli destroy --confirm && claude-pool-cli init --size N` (needed after code/hook changes)
 - **Plugin test:** `claude --plugin-dir .` (loads skill + hooks for one session only)
 - **Standalone install:** `./claude-pool install` (fallback — writes directly to `~/.claude/`)
 - ⚠️ Don't use both plugin AND standalone install — hooks fire twice. Run `claude-pool uninstall` before switching to plugin.
@@ -29,7 +30,7 @@ These files require **explicit user permission** before any modification:
 
 - `.claude-plugin/` — Plugin manifest
 - `skills/claude-pool/` — Plugin skill
-- `hooks/` — Plugin hooks (hooks.json + hook-runner.sh + pid-registry.sh for parent-child tracking)
+- `hooks/` — Plugin hooks (SessionStart lifecycle signals + PreToolUse PID registry)
 - `cmd/claude-pool/` — Daemon entry point + install/uninstall commands
 - `cmd/claude-pool-cli/` — CLI entry point (thin router, resolves pool from registry)
 - `internal/` — Daemon packages (pool, pty, api, attach, discovery, paths, hookfiles)
@@ -60,6 +61,15 @@ Claude Pool manages pools of Claude sessions: spawn, offload, restore, prompt, w
 
 When a bug is found in production that wasn't caught by integration tests, figure out which existing flow should have caught it and add a `t.Run` step at the right point in the sequence. If it doesn't fit naturally into any existing flow (different pool config needed, flow would get too long, fundamentally different scenario), propose a new flow file to the user. See [tests/integration/CLAUDE.md](tests/integration/CLAUDE.md) for test structure and philosophy.
 
+## Idle Detection
+
+Processing state is detected by screen content monitoring (`internal/pool/typing.go`), not hooks:
+- **Content above prompt separator changing** → processing
+- **Content stable 3s** → idle (calls `transitionToIdle()` directly)
+- **PTY silent 3s** → idle fallback (no-output edge case)
+
+`watchIdleSignal` only handles `session-start`/`session-clear` triggers for the fresh→idle transition. All other signal triggers are ignored. Don't add new hooks for idle detection — extend `pollBufferInput` instead.
+
 ## Go
 
-Module: `github.com/EliasSchlie/claude-pool` — Go 1.23, single dependency (`creack/pty`).
+Module: `github.com/EliasSchlie/claude-pool` — Go 1.23, deps: `creack/pty`, `x/term`.
