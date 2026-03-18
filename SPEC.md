@@ -248,10 +248,11 @@ The main skill should not mention `set` or debug commands.
 
 ## UI-specific API features
 
-These are API-only — not exposed in the CLI. Needed by user interfaces (e.g. Open Cockpit) that render live terminal output.
+Available via both the CLI and the API. The CLI provides a terminal-friendly experience; the API provides the raw building blocks for UIs.
 
-**attach** — Get a temporary Unix socket for raw PTY I/O. Connect to it for live terminal streaming: bytes written = keystrokes, bytes read = terminal output. Multiple clients can attach simultaneously. The pipe closes when the session is offloaded or dies. Only works on live sessions (idle, processing). All other API commands continue to work normally on attached sessions.
+**attach** — Connect to a session's PTY for live terminal I/O. Bytes written = keystrokes, bytes read = terminal output. Multiple clients can attach simultaneously. The pipe closes when the session is offloaded or dies. Only works on live sessions (idle, processing). All other API commands continue to work normally on attached sessions.
   Response includes current PTY dimensions (`cols`, `rows`) so the client can create its viewport at matching size before writing the replay buffer (prevents reflow garbling in TUI terminals).
+  CLI: `claude-pool-cli attach --session <id>`. Sets terminal to raw mode, syncs dimensions via `pty-resize`, handles window resize (SIGWINCH). Disconnect with `~.` (tilde-dot on a fresh line, like SSH). `~~` sends a literal `~`.
 
 **pty-resize** — Set a session's PTY dimensions. Triggers SIGWINCH on the underlying process.
   `sessionId` (required), `cols` (required), `rows` (required).

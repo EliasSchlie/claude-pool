@@ -9,13 +9,18 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // conn is a persistent socket connection used for the entire CLI invocation.
@@ -160,6 +165,20 @@ func main() {
 	// init is special — starts the daemon, then sends init command
 	if cmd == "init" {
 		if err := doInit(pool, cmdArgs, jsonMode); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// attach takes over the terminal — handle before normal dispatch
+	if cmd == "attach" {
+		sock, err := socketPath(pool)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := doAttach(sock, cmdArgs); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
@@ -916,6 +935,203 @@ func doDebugLogs(c *conn, args []string, jsonMode bool) error {
 		}
 	}
 	return doSimple(c, msg, jsonMode)
+}
+
+// doAttach connects to a session's PTY and pipes stdin/stdout bidirectionally.
+// Sets terminal to raw mode, handles SIGWINCH for resize, and restores on exit.
+// Disconnect with ~. (tilde-dot on a fresh line, like SSH). ~~ sends a literal ~.
+func doAttach(apiSock string, args []string) error {
+	var sessionID string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--session" {
+			i++
+			if i < len(args) {
+				sessionID = args[i]
+			}
+		}
+	}
+	if sessionID == "" {
+		return fmt.Errorf("--session is required")
+	}
+
+	// Send attach request via API
+	c, err := dial(apiSock)
+	if err != nil {
+		return err
+	}
+	resp, err := c.send(map[string]any{"type": "attach", "sessionId": sessionID})
+	c.close()
+	if err != nil {
+		return err
+	}
+	if err := checkError(resp); err != nil {
+		return err
+	}
+	attachSock, _ := resp["socketPath"].(string)
+	if attachSock == "" {
+		return fmt.Errorf("no socketPath in attach response")
+	}
+
+	// Connect to the attach pipe
+	pipeConn, err := net.Dial("unix", attachSock)
+	if err != nil {
+		return fmt.Errorf("connect to attach pipe: %w", err)
+	}
+	defer pipeConn.Close()
+
+	// Set terminal to raw mode
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return fmt.Errorf("stdin is not a terminal")
+	}
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return fmt.Errorf("make raw: %w", err)
+	}
+	restore := func() { term.Restore(fd, oldState) }
+	defer restore()
+
+	// Restore terminal on SIGINT/SIGTERM (otherwise raw mode persists)
+	termSigCh := make(chan os.Signal, 1)
+	signal.Notify(termSigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(termSigCh)
+	go func() {
+		if sig, ok := <-termSigCh; ok {
+			restore()
+			// Re-raise to get the default behavior (exit with signal status)
+			signal.Reset(sig)
+			syscall.Kill(syscall.Getpid(), sig.(syscall.Signal))
+		}
+	}()
+
+	// Send initial resize to match local terminal size
+	sendResize := func() {
+		w, h, err := term.GetSize(fd)
+		if err != nil {
+			return
+		}
+		rc, err := dial(apiSock)
+		if err != nil {
+			return
+		}
+		rc.send(map[string]any{
+			"type":      "pty-resize",
+			"sessionId": sessionID,
+			"cols":      w,
+			"rows":      h,
+		})
+		rc.close()
+	}
+	sendResize()
+
+	// Handle SIGWINCH → pty-resize
+	winchCh := make(chan os.Signal, 1)
+	signal.Notify(winchCh, syscall.SIGWINCH)
+	go func() {
+		for range winchCh {
+			sendResize()
+		}
+	}()
+	defer func() {
+		signal.Stop(winchCh)
+		close(winchCh)
+	}()
+
+	// Bidirectional pipe: stdin → socket, socket → stdout
+	done := make(chan struct{}, 2)
+
+	// Socket → stdout
+	go func() {
+		io.Copy(os.Stdout, pipeConn)
+		done <- struct{}{}
+	}()
+
+	// Stdin → socket with ~. escape sequence detection (like SSH).
+	// ~. on a fresh line (after Enter/start) disconnects cleanly.
+	go func() {
+		const (
+			stateNormal   = 0
+			stateAfterNL  = 1 // just saw \r or \n, or at start
+			stateAfterEsc = 2 // saw ~ after newline
+		)
+		state := stateAfterNL // start as if after newline
+		buf := make([]byte, 4096)
+		for {
+			n, readErr := os.Stdin.Read(buf)
+			writeStart := 0 // batch contiguous bytes for a single Write
+
+			for i := 0; i < n; i++ {
+				b := buf[i]
+				switch state {
+				case stateNormal:
+					if b == '\r' || b == '\n' {
+						state = stateAfterNL
+					}
+				case stateAfterNL:
+					if b == '~' {
+						// Flush bytes before the held ~
+						if i > writeStart {
+							if _, err := pipeConn.Write(buf[writeStart:i]); err != nil {
+								done <- struct{}{}
+								return
+							}
+						}
+						state = stateAfterEsc
+						writeStart = i + 1 // skip the ~ for now
+						continue
+					}
+					if b == '\r' || b == '\n' {
+						state = stateAfterNL
+					} else {
+						state = stateNormal
+					}
+				case stateAfterEsc:
+					if b == '.' {
+						// ~. escape — disconnect
+						done <- struct{}{}
+						return
+					}
+					// Not an escape — flush the held ~
+					if _, err := pipeConn.Write([]byte{'~'}); err != nil {
+						done <- struct{}{}
+						return
+					}
+					writeStart = i // include this byte in next batch
+					if b == '\r' || b == '\n' {
+						state = stateAfterNL
+					} else if b == '~' {
+						// ~~ → sent one ~, hold this new one
+						writeStart = i + 1
+						continue
+					} else {
+						state = stateNormal
+					}
+				}
+			}
+
+			// Flush remaining batch
+			if writeStart < n && state != stateAfterEsc {
+				if _, err := pipeConn.Write(buf[writeStart:n]); err != nil {
+					done <- struct{}{}
+					return
+				}
+			}
+
+			if readErr != nil {
+				// Flush held ~ on EOF
+				if state == stateAfterEsc {
+					pipeConn.Write([]byte{'~'})
+				}
+				done <- struct{}{}
+				return
+			}
+		}
+	}()
+
+	// Wait for either direction to finish
+	<-done
+	fmt.Fprintf(os.Stderr, "\r\nConnection closed.\r\n")
+	return nil
 }
 
 func doSessionCmd(c *conn, cmdType string, args []string, jsonMode bool) error {
