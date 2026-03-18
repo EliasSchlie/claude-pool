@@ -182,24 +182,8 @@ func (m *Manager) buildHealthResponse(id any) api.Msg {
 		sessions[s.ExternalStatus()]++
 
 		// Count slot states (only live sessions occupy slots)
-		if !s.IsLive() {
-			continue
-		}
-		switch {
-		case s.PreWarmed && s.Status == StatusFresh && s.Recycled:
-			slots["clearing"]++
-		case s.PreWarmed && s.Status == StatusFresh:
-			slots["spawning"]++
-		case s.PreWarmed && s.Status == StatusIdle:
-			slots["fresh"]++
-		case s.Status == StatusFresh && s.PendingResume != "":
-			slots["resuming"]++
-		case s.Status == StatusFresh:
-			slots["clearing"]++
-		case s.Status == StatusIdle:
-			slots["idle"]++
-		case s.Status == StatusProcessing:
-			slots["processing"]++
+		if slotState := s.SlotState(); slotState != "" {
+			slots[slotState]++
 		}
 	}
 
