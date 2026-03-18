@@ -4,7 +4,7 @@ Managed pool of Claude Code sessions — daemon and socket API. Written in Go.
 
 ## Status
 
-Early development — designing from requirements, referencing Open Cockpit (`~/projects/open-cockpit/`) for patterns. Not a 1:1 copy.
+Active development. Go daemon + CLI, distributed as a Claude Code plugin.
 
 ## ⚠️ Read First
 
@@ -29,12 +29,13 @@ These files require **explicit user permission** before any modification:
 
 - `.claude-plugin/` — Plugin manifest
 - `skills/claude-pool/` — Plugin skill
-- `hooks/` — Plugin hooks (hooks.json + hook-runner.sh)
+- `hooks/` — Plugin hooks (hooks.json + hook-runner.sh + pid-registry.sh for parent-child tracking)
 - `cmd/claude-pool/` — Daemon entry point + install/uninstall commands
+- `cmd/claude-pool-cli/` — CLI entry point (thin router, resolves pool from registry)
 - `internal/` — Daemon packages (pool, pty, api, attach, discovery, paths, hookfiles)
 - `tests/integration/` — Integration tests (real Claude sessions, `--model haiku`)
 - `tests/manual/` — Manual testing directory (own `.claude/` hooks, independent per worktree)
-- `schema/` — JSON Schema (must match SPEC.md)
+- `schema/` — JSON Schema (`protocol.json` — must match SPEC.md, validated by tests)
 - `docs/` — Documentation
 
 Key docs:
@@ -59,6 +60,6 @@ Claude Pool manages pools of Claude sessions: spawn, offload, restore, prompt, w
 
 When a bug is found in production that wasn't caught by integration tests, figure out which existing flow should have caught it and add a `t.Run` step at the right point in the sequence. If it doesn't fit naturally into any existing flow (different pool config needed, flow would get too long, fundamentally different scenario), propose a new flow file to the user. See [tests/integration/CLAUDE.md](tests/integration/CLAUDE.md) for test structure and philosophy.
 
-## Origin
+## Go
 
-Designed from requirements, not copied from Open Cockpit. Open Cockpit code is a reference for patterns and edge cases.
+Module: `github.com/EliasSchlie/claude-pool` — Go 1.23, single dependency (`creack/pty`).
