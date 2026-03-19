@@ -665,3 +665,88 @@ func TestExtractLastSection(t *testing.T) {
 		}
 	})
 }
+
+func TestTailLines(t *testing.T) {
+	t.Run("fewer than n lines", func(t *testing.T) {
+		got := tailLines("a\nb\nc", 10)
+		if got != "a\nb\nc" {
+			t.Fatalf("expected full content, got %q", got)
+		}
+	})
+	t.Run("exactly n lines", func(t *testing.T) {
+		got := tailLines("a\nb\nc", 3)
+		if got != "a\nb\nc" {
+			t.Fatalf("expected full content, got %q", got)
+		}
+	})
+	t.Run("more than n lines", func(t *testing.T) {
+		got := tailLines("a\nb\nc\nd\ne", 2)
+		if got != "d\ne" {
+			t.Fatalf("expected last 2 lines, got %q", got)
+		}
+	})
+	t.Run("trailing newline stripped", func(t *testing.T) {
+		got := tailLines("a\nb\nc\n", 2)
+		if got != "b\nc" {
+			t.Fatalf("expected last 2 lines without trailing empty, got %q", got)
+		}
+	})
+	t.Run("empty string", func(t *testing.T) {
+		got := tailLines("", 5)
+		if got != "" {
+			t.Fatalf("expected empty, got %q", got)
+		}
+	})
+}
+
+func TestStripANSI(t *testing.T) {
+	t.Run("basic SGR codes", func(t *testing.T) {
+		got := stripANSI("\x1b[31mred\x1b[0m")
+		if got != "red" {
+			t.Fatalf("expected 'red', got %q", got)
+		}
+	})
+	t.Run("private mode sequences", func(t *testing.T) {
+		got := stripANSI("\x1b[?2004htext\x1b[?2004l")
+		if got != "text" {
+			t.Fatalf("expected 'text', got %q", got)
+		}
+	})
+	t.Run("device attribute sequences", func(t *testing.T) {
+		got := stripANSI("\x1b[>0qtext")
+		if got != "text" {
+			t.Fatalf("expected 'text', got %q", got)
+		}
+	})
+	t.Run("OSC sequences with BEL", func(t *testing.T) {
+		got := stripANSI("\x1b]0;window title\x07text")
+		if got != "text" {
+			t.Fatalf("expected 'text', got %q", got)
+		}
+	})
+	t.Run("OSC sequences with ST", func(t *testing.T) {
+		got := stripANSI("\x1b]0;window title\x1b\\text")
+		if got != "text" {
+			t.Fatalf("expected 'text', got %q", got)
+		}
+	})
+	t.Run("charset designation", func(t *testing.T) {
+		got := stripANSI("\x1b(Btext\x1b)0")
+		if got != "text" {
+			t.Fatalf("expected 'text', got %q", got)
+		}
+	})
+	t.Run("mixed real terminal output", func(t *testing.T) {
+		input := "\x1b[?2004h\x1b[?1004h\x1b[?25l\x1b[>0q\x1b[?2026hHello World\x1b[?2026l"
+		got := stripANSI(input)
+		if got != "Hello World" {
+			t.Fatalf("expected 'Hello World', got %q", got)
+		}
+	})
+	t.Run("tilde escape preserved", func(t *testing.T) {
+		got := stripANSI("~.text")
+		if got != "~.text" {
+			t.Fatalf("expected '~.text', got %q", got)
+		}
+	})
+}
