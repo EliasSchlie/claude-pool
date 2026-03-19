@@ -100,6 +100,26 @@ Sessions spawned from within a pool session automatically track their parent. `l
 | `error` | Repeatedly failed to load |
 | `archived` | Done, hidden from `ls` |
 
+## Collaborating with the User
+
+When you want the user to see a session's live terminal output or interact with it directly, tell them to attach:
+
+```bash
+claude-pool-cli attach --session <id>
+```
+
+This gives them a live, bidirectional PTY connection to the Claude session — they see the terminal output in real-time and can type into it. `Ctrl+]` detaches without killing the session.
+
+**Common patterns:**
+- You start a session → user attaches to watch progress live
+- A session needs manual input → user attaches to provide it
+- You want to show the user intermediate results → tell them to attach
+
+**Notes:**
+- Attach connects to the session's PTY pipe — it's a raw terminal, not filtered output
+- The session auto-resizes to match the attaching terminal
+- Works best from a real terminal (Terminal.app, iTerm)
+
 ## Troubleshooting
 
 For eviction tuning (`set` priority/pin) and debug commands (`debug slots`, `debug logs`, etc.), see [debug.md](debug.md).
