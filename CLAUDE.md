@@ -19,6 +19,8 @@ These files require **explicit user permission** before any modification:
 ## Quick Reference
 
 - **Build:** `make build` (compiles binaries to `bin/`)
+- **Unit tests:** `go test ./internal/...`
+- **Integration tests:** `go test ./tests/integration/ -v -timeout 10m` (real Claude sessions, costs tokens)
 - **Install:** `make install` (build + symlink to `~/.local/bin/`)
 - **Deploy plugin:** `./deploy-plugin.sh` (rebuilds binaries, bumps version, copies to cache, then `/reload-plugins`)
 - **Restart pool:** `claude-pool-cli destroy --confirm && claude-pool-cli init --size N` (needed after code/hook changes)
@@ -41,8 +43,8 @@ These files require **explicit user permission** before any modification:
 - `hooks/` — Plugin hooks (SessionStart lifecycle signals + PreToolUse PID registry)
 - `cmd/claude-pool/` — Daemon entry point + install/uninstall commands
 - `cmd/claude-pool-cli/` — CLI entry point (thin router, resolves pool from registry)
-- `internal/pool/` — Core: `slot.go`, `session.go`, `manager.go`, `lifecycle.go`, `typing.go`, handlers split by domain (`handlers_session.go`, `handlers_pool.go`, `handlers_query.go`, `handlers_lifecycle.go`, `handlers_attach.go`), `capture.go`, `persistence.go`
-- `internal/` — Other packages: pty, api, attach, discovery, paths, hookfiles
+- `internal/pool/` — Core: `slot.go`, `session.go`, `manager.go`, `lifecycle.go`, `typing.go`, `config.go`, `capture.go`, `persistence.go`, `attach.go`, handlers split by domain (`handlers_session.go`, `handlers_pool.go`, `handlers_query.go`, `handlers_lifecycle.go`, `handlers_attach.go`)
+- `internal/` — Other packages: api, hookfiles, paths, pty
 - `tests/integration/` — Integration tests (real Claude sessions, `--model haiku`)
 - `tests/manual/` — Manual testing directory (own `.claude/` hooks, independent per worktree)
 - `schema/` — JSON Schema (`protocol.json` — must match SPEC.md, validated by tests)
