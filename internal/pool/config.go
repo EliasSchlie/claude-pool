@@ -31,8 +31,8 @@ func (c Config) KeepFreshVal() int {
 	return 1
 }
 
-// MarshalJSON merges typed fields with Extra into a single flat object.
-func (c Config) MarshalJSON() ([]byte, error) {
+// ToMap returns the config as a flat map (typed fields + extras merged).
+func (c Config) ToMap() map[string]any {
 	m := make(map[string]any)
 	for k, v := range c.Extra {
 		m[k] = v
@@ -49,7 +49,12 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	if c.KeepFresh != nil {
 		m["keepFresh"] = *c.KeepFresh
 	}
-	return json.Marshal(m)
+	return m
+}
+
+// MarshalJSON merges typed fields with Extra into a single flat object.
+func (c Config) MarshalJSON() ([]byte, error) {
+	return json.Marshal(c.ToMap())
 }
 
 // UnmarshalJSON reads typed fields and puts the rest into Extra.

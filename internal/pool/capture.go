@@ -457,9 +457,17 @@ func extractTextContent(msg map[string]any) string {
 
 // extractLastSection returns the last 50 lines of a buffer string.
 func extractLastSection(buf string) string {
-	lines := strings.Split(buf, "\n")
-	if len(lines) > 50 {
-		lines = lines[len(lines)-50:]
+	return tailLines(buf, 50)
+}
+
+// tailLines returns the last n lines of s.
+func tailLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
 }

@@ -234,19 +234,10 @@ func (m *Manager) broadcastEvent(event api.Msg) {
 // --- Utilities ---
 
 func configToMsg(cfg Config) api.Msg {
-	m := api.Msg{
-		"size":      float64(cfg.Size),
-		"keepFresh": float64(cfg.KeepFreshVal()),
-	}
-	if cfg.Flags != "" {
-		m["flags"] = cfg.Flags
-	}
-	if cfg.Dir != "" {
-		m["dir"] = cfg.Dir
-	}
-	for k, v := range cfg.Extra {
-		m[k] = v
-	}
+	m := cfg.ToMap()
+	// Ensure size and keepFresh are always present (even if zero-value)
+	m["size"] = float64(cfg.Size)
+	m["keepFresh"] = float64(cfg.KeepFreshVal())
 	return m
 }
 
