@@ -1006,12 +1006,18 @@ func doAttach(apiSock string, args []string) error {
 		}
 	}()
 
-	// Send initial resize to match local terminal size
+	// Send resize to match local terminal size.
+	// Tracks last sent size to prevent resize loops in nested PTY environments.
+	var lastW, lastH int
 	sendResize := func() {
 		w, h, err := term.GetSize(fd)
 		if err != nil {
 			return
 		}
+		if w == lastW && h == lastH {
+			return
+		}
+		lastW, lastH = w, h
 		rc, err := dial(apiSock)
 		if err != nil {
 			return
