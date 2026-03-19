@@ -710,38 +710,6 @@ func (m *Manager) waitForSessionIdleResponse(id any, sid string, timeout time.Du
 	}
 }
 
-// waitForSessionReady waits until a session becomes idle or processing.
-// Must be called WITHOUT m.mu held.
-func (m *Manager) waitForSessionReady(id any, sid string, timeout time.Duration) api.Msg {
-	deadline := time.After(timeout)
-
-	m.mu.Lock()
-	for {
-		s := m.sessions[sid]
-		if s == nil {
-			m.mu.Unlock()
-			return api.ErrorResponse(id, "session died before ready")
-		}
-		status := s.Status
-		if status == StatusProcessing || status == StatusIdle {
-			m.mu.Unlock()
-			return api.Response(id, "started", api.Msg{
-				"sessionId": sid,
-				"status":    status,
-			})
-		}
-		ch := m.statusNotify
-		m.mu.Unlock()
-
-		select {
-		case <-deadline:
-			return api.ErrorResponse(id, "session failed to become ready")
-		case <-ch:
-			m.mu.Lock()
-		}
-	}
-}
-
 // --- Queue management ---
 
 func (m *Manager) tryDrainQueue() {
