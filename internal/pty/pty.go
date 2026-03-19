@@ -48,9 +48,10 @@ func Spawn(opts SpawnOpts) (*Process, error) {
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = opts.Cwd
 
-	// Build environment with login shell PATH (ensures Homebrew etc. are available
-	// even when daemon is launched from non-login context like Electron or launchd)
-	env := buildEnvWithLoginPATH()
+	// Build environment from login shell (env -i) — clean base without daemon vars.
+	// Ensures spawned sessions get the same env as a fresh terminal, even when
+	// the daemon is launched from a non-login context like Electron or launchd.
+	env := buildSpawnEnv()
 
 	// Strip vars that would cause issues in child sessions
 	filtered := env[:0]
