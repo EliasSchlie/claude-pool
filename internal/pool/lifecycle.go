@@ -677,6 +677,39 @@ func (m *Manager) waitForSessionIdle(sid string, timeout time.Duration) {
 	}
 }
 
+// waitForSessionIdleResponse waits until a session reaches StatusIdle,
+// returning error responses on timeout or session death. Unlike the void
+// waitForSessionIdle, this returns a proper api.Msg for the caller.
+// Used by promptless starts where the only acceptable outcome is idle.
+func (m *Manager) waitForSessionIdleResponse(id any, sid string, timeout time.Duration) api.Msg {
+	deadline := time.After(timeout)
+
+	m.mu.Lock()
+	for {
+		s := m.sessions[sid]
+		if s == nil {
+			m.mu.Unlock()
+			return api.ErrorResponse(id, "session died before ready")
+		}
+		if s.Status == StatusIdle {
+			m.mu.Unlock()
+			return api.Response(id, "started", api.Msg{
+				"sessionId": sid,
+				"status":    StatusIdle,
+			})
+		}
+		ch := m.statusNotify
+		m.mu.Unlock()
+
+		select {
+		case <-deadline:
+			return api.ErrorResponse(id, "session failed to become idle")
+		case <-ch:
+			m.mu.Lock()
+		}
+	}
+}
+
 // waitForSessionReady waits until a session becomes idle or processing.
 // Must be called WITHOUT m.mu held.
 func (m *Manager) waitForSessionReady(id any, sid string, timeout time.Duration) api.Msg {

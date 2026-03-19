@@ -124,11 +124,7 @@ func (m *Manager) handleStartPromptless(id any, s *Session) api.Msg {
 	if s.Status != StatusQueued {
 		sid := s.ID
 		m.mu.Unlock()
-		m.waitForSessionIdle(sid, 60*time.Second)
-		return api.Response(id, "started", api.Msg{
-			"sessionId": sid,
-			"status":    StatusIdle,
-		})
+		return m.waitForSessionIdleResponse(id, sid, 60*time.Second)
 	}
 
 	m.mu.Unlock()
