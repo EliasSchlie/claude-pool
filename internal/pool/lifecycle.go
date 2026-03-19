@@ -261,7 +261,6 @@ func (m *Manager) archiveDescendants(parentID string) {
 
 // watchProcessDone monitors when a slot's process exits.
 func (m *Manager) watchProcessDone(sl *Slot) {
-	slotIdx := sl.Index
 	proc := sl.Process
 	go func() {
 		<-proc.Done()
@@ -269,17 +268,13 @@ func (m *Manager) watchProcessDone(sl *Slot) {
 		if proc.ExitCode() >= 0 {
 			exitCode = proc.ExitCode()
 		}
-		log.Printf("process exited: slot=%d pid=%d exit=%d", slotIdx, proc.PID(), exitCode)
+		log.Printf("process exited: pid=%d exit=%d", proc.PID(), exitCode)
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
-		if slotIdx >= len(m.slots) {
-			return
-		}
-		sl := m.slots[slotIdx]
-		// Stale watcher — slot has a different process now
-		if sl.Process != proc {
-			return
+		sl := m.findSlotByProcess(proc)
+		if sl == nil {
+			return // slot was killed or process replaced
 		}
 
 		// If a session is loaded, mark it offloaded
@@ -288,7 +283,7 @@ func (m *Manager) watchProcessDone(sl *Slot) {
 			s.Status = StatusOffloaded
 			s.PendingInput = ""
 			s.SlotIndex = -1
-			log.Printf("[process-exit] slot %d session %s: %s → offloaded (process died)", slotIdx, s.ID, prevStatus)
+			log.Printf("[process-exit] slot %d session %s: %s → offloaded (process died)", sl.Index, s.ID, prevStatus)
 			m.broadcastStatus(s, prevStatus)
 		}
 
@@ -309,7 +304,6 @@ func (m *Manager) watchProcessDone(sl *Slot) {
 }
 
 func (m *Manager) watchIdleSignal(sl *Slot) {
-	slotIdx := sl.Index
 	m.mu.Lock()
 	proc := sl.Process
 	if proc == nil {
@@ -332,17 +326,8 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 			return
 		case <-ticker.C:
 			m.mu.Lock()
-			if slotIdx >= len(m.slots) {
-				m.mu.Unlock()
-				return
-			}
-			sl := m.slots[slotIdx]
-			// Stale: slot has a different process
-			if sl.Process != proc {
-				m.mu.Unlock()
-				return
-			}
-			if !sl.IsLive() {
+			sl := m.findSlotByProcess(proc)
+			if sl == nil || !sl.IsLive() {
 				m.mu.Unlock()
 				return
 			}
@@ -357,19 +342,19 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 						if claudeUUID != "" {
 							m.mu.Lock()
 							if s := m.sessions[sessionID]; s != nil && s.ClaudeUUID == "" {
-								log.Printf("[idle-watch] slot %d session %s: discovered claude UUID %s", slotIdx, sessionID, claudeUUID)
+								log.Printf("[idle-watch] pid=%d session %s: discovered claude UUID %s", pid, sessionID, claudeUUID)
 								s.ClaudeUUID = claudeUUID
 							}
 							m.mu.Unlock()
 						}
 					}
 					m.mu.Lock()
-					// Re-check slot is still valid after releasing lock
-					if slotIdx >= len(m.slots) || m.slots[slotIdx].Process != proc {
+					// Re-find slot after releasing lock
+					sl = m.findSlotByProcess(proc)
+					if sl == nil {
 						m.mu.Unlock()
 						return
 					}
-					sl = m.slots[slotIdx]
 				}
 			}
 
@@ -391,7 +376,7 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 				continue
 			}
 			lastSignalTS = ts
-			log.Printf("[idle-watch] slot %d: new signal (pid=%d): %s", slotIdx, pid, strings.TrimSpace(string(data)))
+			log.Printf("[idle-watch] slot %d: new signal (pid=%d): %s", sl.Index, pid, strings.TrimSpace(string(data)))
 
 			// Extract cwd and transcript from signal
 			if s := m.sessions[sl.SessionID]; s != nil {
@@ -534,7 +519,7 @@ func (m *Manager) deliverSlotPrompt(sl *Slot, prompt string, settleDelay time.Du
 		return
 	}
 
-	slotIdx := sl.Index
+	pid := proc.PID()
 	done := m.done
 	ch := make(chan struct{})
 	sl.Delivering = ch
@@ -542,8 +527,8 @@ func (m *Manager) deliverSlotPrompt(sl *Slot, prompt string, settleDelay time.Du
 		defer func() {
 			close(ch)
 			m.mu.Lock()
-			if slotIdx < len(m.slots) && m.slots[slotIdx].Delivering == ch {
-				m.slots[slotIdx].Delivering = nil
+			if sl := m.findSlotByProcess(proc); sl != nil && sl.Delivering == ch {
+				sl.Delivering = nil
 			}
 			m.mu.Unlock()
 		}()
@@ -555,43 +540,37 @@ func (m *Manager) deliverSlotPrompt(sl *Slot, prompt string, settleDelay time.Du
 		}
 
 		if err := proc.WriteString("\x1b"); err != nil {
-			log.Printf("[deliver] slot %d: write error (esc): %v", slotIdx, err)
+			log.Printf("[deliver] pid=%d: write error (esc): %v", pid, err)
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 		if err := proc.WriteString("\x15"); err != nil {
-			log.Printf("[deliver] slot %d: write error (ctrl-u): %v", slotIdx, err)
+			log.Printf("[deliver] pid=%d: write error (ctrl-u): %v", pid, err)
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 		if err := proc.WriteString(prompt); err != nil {
-			log.Printf("[deliver] slot %d: write error (prompt): %v", slotIdx, err)
+			log.Printf("[deliver] pid=%d: write error (prompt): %v", pid, err)
 			return
 		}
 
 		if !strings.HasPrefix(prompt, "/") {
 			if !waitForBufferContent(proc, prompt, 200*time.Millisecond) {
-				log.Printf("[deliver] slot %d: prompt not echoed in buffer, sending Enter", slotIdx)
+				log.Printf("[deliver] pid=%d: prompt not echoed in buffer, sending Enter", pid)
 			}
 		}
 
 		if err := proc.WriteString("\r"); err != nil {
-			log.Printf("[deliver] slot %d: write error (enter): %v", slotIdx, err)
+			log.Printf("[deliver] pid=%d: write error (enter): %v", pid, err)
 			return
 		}
-		log.Printf("[deliver] slot %d: prompt delivered (%d chars)", slotIdx, len(prompt))
+		log.Printf("[deliver] pid=%d: prompt delivered (%d chars)", pid, len(prompt))
 	}()
 }
 
-// awaitSlotDelivery waits for any in-flight prompt delivery on a slot.
+// awaitDelivery waits for a delivery channel to complete, if non-nil.
 // Must be called WITHOUT m.mu held.
-func (m *Manager) awaitSlotDelivery(slotIdx int) {
-	m.mu.Lock()
-	var ch chan struct{}
-	if slotIdx < len(m.slots) {
-		ch = m.slots[slotIdx].Delivering
-	}
-	m.mu.Unlock()
+func awaitDelivery(ch chan struct{}) {
 	if ch != nil {
 		<-ch
 	}
@@ -630,10 +609,10 @@ func (m *Manager) stopProcessingSession(sid string, timeout time.Duration) {
 		return
 	}
 	sl := m.slotForSession(s)
-	if sl != nil {
-		slotIdx := sl.Index
+	if sl != nil && sl.Delivering != nil {
+		ch := sl.Delivering
 		m.mu.Unlock()
-		m.awaitSlotDelivery(slotIdx)
+		awaitDelivery(ch)
 		m.mu.Lock()
 	}
 
@@ -999,8 +978,8 @@ func (m *Manager) clearIdleSignals(pid int) {
 
 // autoAcceptTrust auto-accepts the workspace trust prompt if Claude asks.
 func (m *Manager) autoAcceptTrust(sl *Slot) {
-	slotIdx := sl.Index
 	proc := sl.Process
+	pid := proc.PID()
 	go func() {
 		deadline := time.After(30 * time.Second)
 		ticker := time.NewTicker(500 * time.Millisecond)
@@ -1009,7 +988,7 @@ func (m *Manager) autoAcceptTrust(sl *Slot) {
 		for {
 			select {
 			case <-deadline:
-				log.Printf("[trust] slot %d pid=%d: trust handler timed out (30s)", slotIdx, proc.PID())
+				log.Printf("[trust] pid=%d: trust handler timed out (30s)", pid)
 				return
 			case <-m.done:
 				return
@@ -1020,12 +999,12 @@ func (m *Manager) autoAcceptTrust(sl *Slot) {
 				raw := string(proc.Buffer())
 				buf := strings.ToLower(stripANSI(raw))
 				if strings.Contains(buf, "yes,") && strings.Contains(buf, "trust") {
-					log.Printf("[trust] slot %d pid=%d: detected trust prompt, accepting", slotIdx, proc.PID())
+					log.Printf("[trust] pid=%d: detected trust prompt, accepting", pid)
 					time.Sleep(1 * time.Second)
 					proc.WriteString("\r")
 					time.Sleep(500 * time.Millisecond)
 					proc.WriteString("\r")
-					log.Printf("[trust] slot %d pid=%d: sent Enter (x2)", slotIdx, proc.PID())
+					log.Printf("[trust] pid=%d: sent Enter (x2)", pid)
 					return
 				}
 			}
