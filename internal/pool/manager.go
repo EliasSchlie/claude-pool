@@ -211,6 +211,17 @@ func (m *Manager) findFreshSlot() *Slot {
 	return candidate
 }
 
+// findTrulyFreshSlot returns a SlotFresh slot only (no clearing candidates).
+// Used by promptless start which requires an immediately ready slot.
+func (m *Manager) findTrulyFreshSlot() *Slot {
+	for _, sl := range m.slots {
+		if sl.State == SlotFresh && !sl.IsOccupied() {
+			return sl
+		}
+	}
+	return nil
+}
+
 // --- Broadcasting ---
 
 func (m *Manager) broadcastStatus(s *Session, prevStatus string) {

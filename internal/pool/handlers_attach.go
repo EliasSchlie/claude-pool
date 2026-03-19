@@ -193,6 +193,10 @@ func (m *Manager) handleDebugCapture(id any, req api.Msg) api.Msg {
 }
 
 func (m *Manager) handleDebugLogs(id any, req api.Msg) api.Msg {
+	if follow, _ := req["follow"].(bool); follow {
+		return api.ErrorResponse(id, "follow mode not yet implemented")
+	}
+
 	lines := 50
 	if n, ok := req["lines"].(float64); ok && n > 0 {
 		lines = int(n)
