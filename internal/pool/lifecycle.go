@@ -193,6 +193,8 @@ func (m *Manager) offloadSession(s *Session) {
 }
 
 // archiveSessionLocked archives a session. Must be called with m.mu held.
+// Callers must stop processing sessions first (via stopProcessingSession
+// outside the lock).
 func (m *Manager) archiveSessionLocked(s *Session) {
 	if s.IsLoaded() {
 		log.Printf("[archive] session %s: offloading loaded session (status=%s)", s.ID, s.Status)
@@ -792,9 +794,7 @@ func (m *Manager) claimSlotForQueued(sl *Slot, queued *Session) {
 
 	if sl.State == SlotFresh || sl.State == SlotIdle {
 		// Slot is ready — deliver immediately
-		if sl.State == SlotIdle {
-			m.clearIdleSignals(sl.PID())
-		}
+		m.clearIdleSignals(sl.PID())
 
 		if queued.PendingResume != "" {
 			uuid := queued.PendingResume

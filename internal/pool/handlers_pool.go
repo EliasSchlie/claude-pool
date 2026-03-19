@@ -176,6 +176,8 @@ func (m *Manager) handleHealth(id any) api.Msg {
 	return m.buildHealthResponse(id)
 }
 
+// buildHealthResponse constructs the health/pool response.
+// Must be called with m.mu held.
 func (m *Manager) buildHealthResponse(id any) api.Msg {
 	slots := map[string]float64{
 		"fresh": 0, "spawning": 0, "resuming": 0, "clearing": 0,
