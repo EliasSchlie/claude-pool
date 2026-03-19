@@ -3,6 +3,7 @@ package pool
 import (
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/EliasSchlie/claude-pool/internal/api"
 )
@@ -192,7 +193,66 @@ func (m *Manager) handleDebugCapture(id any, req api.Msg) api.Msg {
 }
 
 func (m *Manager) handleDebugLogs(id any, req api.Msg) api.Msg {
-	return api.Response(id, "result", api.Msg{
-		"content": "logs are written to daemon stderr (use --follow with process output)",
-	})
+	if follow, _ := req["follow"].(bool); follow {
+		return api.ErrorResponse(id, "follow mode not yet implemented")
+	}
+
+	lines := 50
+	if n, ok := req["lines"].(float64); ok && n > 0 {
+		lines = int(n)
+	}
+
+	logPath := m.paths.DaemonLog()
+	content, err := readTail(logPath, lines)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return api.Response(id, "result", api.Msg{"content": ""})
+		}
+		return api.ErrorResponse(id, "failed to read daemon.log: "+err.Error())
+	}
+	return api.Response(id, "result", api.Msg{"content": content})
+}
+
+// readTail reads the last n lines from a file by seeking from the end.
+func readTail(path string, n int) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	size := stat.Size()
+	if size == 0 {
+		return "", nil
+	}
+
+	// Read from end in chunks to find enough newlines
+	const chunkSize = 8192
+	buf := make([]byte, 0, chunkSize)
+	offset := size
+	newlines := 0
+
+	for offset > 0 && newlines <= n {
+		readSize := int64(chunkSize)
+		if readSize > offset {
+			readSize = offset
+		}
+		offset -= readSize
+		chunk := make([]byte, readSize)
+		if _, err := f.ReadAt(chunk, offset); err != nil {
+			return "", err
+		}
+		buf = append(chunk, buf...)
+		for _, b := range chunk {
+			if b == '\n' {
+				newlines++
+			}
+		}
+	}
+
+	return tailLines(string(buf), n), nil
 }

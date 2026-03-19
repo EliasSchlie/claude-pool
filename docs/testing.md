@@ -30,12 +30,6 @@ socket connection opened after CLI init.
 
 See [tests/integration/CLAUDE.md](../tests/integration/CLAUDE.md) for philosophy, file listing, and guidelines.
 
-### CLI Smoke Tests (`tests/cli/`)
-
-Test the CLI → daemon path: arg parsing, env var propagation (`CLAUDE_POOL_SESSION_ID`), output formatting, exit codes. Invoke the `claude-pool` CLI binary as a subprocess. Not a re-test of pool logic.
-
-See [tests/cli/CLAUDE.md](../tests/cli/CLAUDE.md) for philosophy and file listing.
-
 ## Test Pool Config
 
 Integration tests use `--model haiku` to minimize API costs, passed via `--flags` on init:
@@ -62,9 +56,6 @@ go test ./internal/... -v
 
 # Integration tests only
 go test ./tests/integration/ -v -timeout 10m
-
-# CLI smoke tests only
-go test ./tests/cli/ -v -timeout 10m
 
 # Single flow
 go test ./tests/integration/ -v -run TestSession -timeout 5m

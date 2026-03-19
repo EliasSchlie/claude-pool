@@ -211,6 +211,17 @@ func (m *Manager) findFreshSlot() *Slot {
 	return candidate
 }
 
+// findTrulyFreshSlot returns a SlotFresh slot only (no clearing candidates).
+// Used by promptless start which requires an immediately ready slot.
+func (m *Manager) findTrulyFreshSlot() *Slot {
+	for _, sl := range m.slots {
+		if sl.State == SlotFresh && !sl.IsOccupied() {
+			return sl
+		}
+	}
+	return nil
+}
+
 // --- Broadcasting ---
 
 func (m *Manager) broadcastStatus(s *Session, prevStatus string) {
@@ -234,16 +245,10 @@ func (m *Manager) broadcastEvent(event api.Msg) {
 // --- Utilities ---
 
 func configToMsg(cfg Config) api.Msg {
-	m := api.Msg{
-		"size":      float64(cfg.Size),
-		"keepFresh": float64(cfg.KeepFreshVal()),
-	}
-	if cfg.Flags != "" {
-		m["flags"] = cfg.Flags
-	}
-	if cfg.Dir != "" {
-		m["dir"] = cfg.Dir
-	}
+	m := cfg.ToMap()
+	// Ensure size and keepFresh are always present (even if zero-value)
+	m["size"] = float64(cfg.Size)
+	m["keepFresh"] = float64(cfg.KeepFreshVal())
 	return m
 }
 

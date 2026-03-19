@@ -91,29 +91,19 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 func (m *Manager) handleStartPromptless(id any, s *Session) api.Msg {
 	m.mu.Lock()
 
-	if sl := m.findFreshSlot(); sl != nil {
+	// Promptless start requires a truly fresh slot (SPEC: "a fresh slot is claimed").
+	// Clearing slots are not fresh yet — fall through to queue if none available.
+	if sl := m.findTrulyFreshSlot(); sl != nil {
 		m.bindSession(sl, s)
-
-		if sl.State == SlotFresh {
-			s.Status = StatusIdle
-			sl.State = SlotIdle
-			m.clearIdleSignals(sl.PID())
-		} else {
-			// Slot still clearing — will transition to idle when ready
-			s.Status = StatusProcessing
-		}
+		s.Status = StatusIdle
+		sl.State = SlotIdle
+		m.clearIdleSignals(sl.PID())
 
 		m.broadcastEvent(api.Msg{
 			"type": "event", "event": "created",
 			"sessionId": s.ID, "status": s.Status, "parent": s.ParentID,
 		})
 		m.savePoolState()
-
-		if s.Status != StatusIdle {
-			sid := s.ID
-			m.mu.Unlock()
-			return m.waitForSessionReady(id, sid, 60*time.Second)
-		}
 		m.mu.Unlock()
 		return api.Response(id, "started", api.Msg{
 			"sessionId": s.ID,
@@ -134,7 +124,7 @@ func (m *Manager) handleStartPromptless(id any, s *Session) api.Msg {
 	if s.Status != StatusQueued {
 		sid := s.ID
 		m.mu.Unlock()
-		return m.waitForSessionReady(id, sid, 60*time.Second)
+		return m.waitForSessionIdleResponse(id, sid, 60*time.Second)
 	}
 
 	m.mu.Unlock()
