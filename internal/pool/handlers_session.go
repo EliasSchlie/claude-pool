@@ -51,7 +51,6 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 			log.Printf("[start] session %s: slot %d still %s, queuing prompt", s.ID, sl.Index, sl.State)
 			s.Status = StatusProcessing
 			s.PendingPrompt = prompt
-			s.PendingForce = true
 		}
 
 		m.broadcastEvent(api.Msg{

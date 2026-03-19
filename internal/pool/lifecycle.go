@@ -89,9 +89,10 @@ func (m *Manager) spawnSlot(sl *Slot) {
 			s.SpawnAttempts++
 			if s.SpawnAttempts >= maxSpawnAttempts {
 				log.Printf("[spawn] slot %d session %s: %d consecutive failures, marking error", sl.Index, s.ID, s.SpawnAttempts)
+				prevStatus := s.Status
 				m.unbindSession(sl)
 				s.Status = StatusError
-				m.broadcastStatus(s, StatusQueued)
+				m.broadcastStatus(s, prevStatus)
 			}
 		}
 		return
@@ -451,8 +452,10 @@ func (m *Manager) transitionSlotToIdle(sl *Slot) {
 
 	s := m.sessions[sl.SessionID]
 	if s == nil {
-		// No session — mark slot fresh
+		// No session — mark slot fresh and wake any waiters (e.g., init waitLoop)
 		sl.State = SlotFresh
+		close(m.statusNotify)
+		m.statusNotify = make(chan struct{})
 		return
 	}
 
@@ -475,7 +478,6 @@ func (m *Manager) transitionSlotToIdle(sl *Slot) {
 		prompt := s.PendingPrompt
 		prevStatus := s.Status
 		s.PendingPrompt = ""
-		s.PendingForce = false
 		s.Status = StatusProcessing
 		sl.State = SlotProcessing
 
@@ -806,7 +808,6 @@ func (m *Manager) claimSlotForQueued(sl *Slot, queued *Session) {
 			sl.State = SlotProcessing
 			prompt := queued.PendingPrompt
 			queued.PendingPrompt = ""
-			queued.PendingForce = false
 			log.Printf("[claim] slot %d session %s: delivering prompt (%d chars)", sl.Index, queued.ID, len(prompt))
 			m.deliverPrompt(sl, prompt)
 		} else {

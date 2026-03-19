@@ -50,7 +50,6 @@ type Session struct {
 
 	// Internal: pending prompt for queued sessions
 	PendingPrompt string
-	PendingForce  bool
 	PendingResume string // Claude UUID to /resume before delivering PendingPrompt
 
 	// Internal: spawn retry tracking
@@ -64,7 +63,6 @@ type Session struct {
 // Used by stop to ensure idle transitions don't deliver stale prompts.
 func (s *Session) ClearPending() {
 	s.PendingPrompt = ""
-	s.PendingForce = false
 	s.PendingResume = ""
 }
 
