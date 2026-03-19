@@ -19,7 +19,11 @@ claude-pool daemon
 ## Components
 
 ### Pool Manager
-Core business logic. Manages pool.json, session allocation, queueing, offloading, session restoration. All state mutations go through a mutex to prevent races. External interface uses internal session IDs — slot indices are an implementation detail.
+Core business logic. Two primary types:
+- **Slot** — physical resource (process + PTY + terminal emulator). Count = pool size. States: spawning, fresh, clearing, resuming, idle, processing, crashed. Owns the process and all I/O.
+- **Session** — logical identity (ID, parent, metadata, lifecycle). Loaded into slots via `bindSession`/`unbindSession`.
+
+Manager holds `[]*Slot` and `map[string]*Session`. All state mutations go through a mutex. External interface uses internal session IDs — slot indices are an implementation detail.
 
 ### Pool Directory
 Each pool is a self-contained directory. The daemon takes `--pool-dir <path>` to specify where to operate. Named pools default to `~/.claude-pool/<name>/`. The pool directory contains config, state, logs, socket, hook scripts, and a `.claude/` folder with hooks that sessions inherit automatically.
@@ -34,7 +38,11 @@ Listens on `~/.claude-pool/<name>/api.sock`. Accepts newline-delimited JSON. Rou
 When a client requests `attach`, creates a temporary Unix socket for raw PTY I/O. The pipe closes when the session is offloaded or dies. Multiple clients can attach to the same session simultaneously (broadcast).
 
 ### Session Discovery
-Detects session state (idle, processing) by monitoring screen content above the prompt separator. Content changing = processing, content stable 3s = idle, PTY silent 3s = idle fallback. Process death is detected here — session transitions to offloaded, slot gets recycled.
+Two complementary systems detect slot state transitions:
+1. **Screen content monitoring** (`pollBufferInput`) — runs on slots. Content changing = processing, content stable 1s = idle, PTY silent 1s = idle fallback. Also detects pending input and surfaces it to the hosted session.
+2. **Hook signal watcher** (`watchIdleSignal`) — handles `session-start`/`session-clear` triggers for spawning/clearing → ready transitions. All other triggers ignored.
+
+Process death detected by `watchProcessDone` — session transitions to offloaded, slot marked crashed and auto-recycled.
 
 ### Reconciliation Loop
 Runs every 30s. Recycles error slots, kills orphaned processes, maintains pool health.
@@ -86,9 +94,10 @@ Full protocol support including subscribe (persistent event stream) works over t
 - Newline-delimited JSON protocol over Unix sockets. Socket permissions `0600` (owner-only).
 - Offloaded sessions stored as `meta.json` (JSONL transcripts are the persistent record).
 - Default flags: `--dangerously-skip-permissions`.
-- Pending input detection: polls terminal buffer for un-submitted text (consecutive-miss threshold).
-- Lock discipline: hold mutex only for in-memory state mutations. Never across I/O, process spawning, or network calls.
+- Pending input detection: polls slot terminal buffer for un-submitted text, surfaced to hosted session.
+- Lock discipline: single mutex guards all state. Held across some I/O and process spawning for simplicity at the expected scale (single user, small pools).
 - Slot states are internal — consumers never see them (invariant #5). Slot errors are recycled automatically.
+- Clear workflow: `clearSlot()` runs `/clear` → `/update-plugins` → `/clear` via `ClearQueue`. Each step delivered when previous completes (1s idle threshold).
 
 ## Hooks
 

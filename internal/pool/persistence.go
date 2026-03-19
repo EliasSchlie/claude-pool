@@ -42,7 +42,7 @@ func (m *Manager) saveOffloadMeta(s *Session) {
 
 func (m *Manager) savePoolState() {
 	state := map[string]any{
-		"size": float64(m.poolSize),
+		"size": float64(len(m.slots)),
 	}
 
 	sessions := make([]map[string]any, 0)
@@ -109,7 +109,7 @@ func (m *Manager) loadPoolState() (live, offloaded []*Session) {
 		}
 
 		switch status {
-		case StatusIdle, StatusProcessing, StatusFresh:
+		case StatusIdle, StatusProcessing, "fresh":
 			live = append(live, s)
 		case StatusOffloaded:
 			offloaded = append(offloaded, s)
@@ -142,6 +142,7 @@ func (m *Manager) sessionFromMap(sm map[string]any) *Session {
 		Flags:      strVal(sm, "flags"),
 		Pinned:     boolVal(sm, "pinned"),
 		Metadata:   metadataFromMap(sm),
+		SlotIndex:  -1, // not loaded until bindSession
 	}
 
 	if t := strVal(sm, "createdAt"); t != "" {

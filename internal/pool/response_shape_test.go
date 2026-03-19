@@ -6,7 +6,6 @@ import (
 
 	"github.com/EliasSchlie/claude-pool/internal/api"
 	"github.com/EliasSchlie/claude-pool/internal/paths"
-	ptyPkg "github.com/EliasSchlie/claude-pool/internal/pty"
 )
 
 // ============================================================
@@ -25,16 +24,16 @@ func TestToMsgFlatOmitsFullFields(t *testing.T) {
 	s := &Session{
 		ID:         "test123",
 		Status:     StatusIdle,
+		SlotIndex:  0,
 		ClaudeUUID: "uuid-abc",
 		ParentID:   "parent-xyz",
 		Cwd:        "/some/path",
 		SpawnCwd:   "/spawn/path",
 		CreatedAt:  time.Now(),
-		PID:        9999,
 		Metadata:   SessionMetadata{Name: "test"},
 	}
 
-	msg := s.ToMsg(VerbosityFlat)
+	msg := s.ToMsg(VerbosityFlat, 9999)
 
 	// flat MUST have sessionId and status
 	if _, ok := msg["sessionId"]; !ok {
@@ -63,7 +62,7 @@ func TestToMsgFlatConditionalFields(t *testing.T) {
 			Priority: 0,
 			Pinned:   false,
 		}
-		msg := s.ToMsg(VerbosityFlat)
+		msg := s.ToMsg(VerbosityFlat, 0)
 
 		if _, ok := msg["priority"]; ok {
 			t.Error("flat: priority=0 (default) should be omitted")
@@ -80,11 +79,12 @@ func TestToMsgFlatConditionalFields(t *testing.T) {
 		s := &Session{
 			ID:           "test123",
 			Status:       StatusIdle,
+			SlotIndex:    0,
 			Priority:     5,
 			Pinned:       true,
 			PendingInput: "some text",
 		}
-		msg := s.ToMsg(VerbosityFlat)
+		msg := s.ToMsg(VerbosityFlat, 0)
 
 		if _, ok := msg["priority"]; !ok {
 			t.Error("flat: priority=5 (non-default) should be included")
@@ -105,18 +105,18 @@ func TestToMsgFullIncludesAllFields(t *testing.T) {
 	s := &Session{
 		ID:         "test123",
 		Status:     StatusIdle,
+		SlotIndex:  0,
 		ClaudeUUID: "uuid-abc",
 		ParentID:   "parent-xyz",
 		Cwd:        "/some/path",
 		SpawnCwd:   "/spawn/path",
 		CreatedAt:  time.Now(),
-		PID:        9999,
 		Priority:   0,
 		Pinned:     false,
 		Metadata:   SessionMetadata{Name: "test"},
 	}
 
-	msg := s.ToMsg(VerbosityFull)
+	msg := s.ToMsg(VerbosityFull, 9999)
 
 	requiredFields := []string{
 		"sessionId", "status", "priority", "pinned",
@@ -136,9 +136,12 @@ func TestToMsgFullIncludesAllFields(t *testing.T) {
 func TestBuildHealthResponseWithLockHeld(t *testing.T) {
 	m := newTestManager(t)
 	m.initialized = true
-	m.poolSize = 2
+	m.slots = []*Slot{
+		{Index: 0, State: SlotIdle, SessionID: "a"},
+		{Index: 1, State: SlotFresh},
+	}
 
-	m.sessions["a"] = &Session{ID: "a", Status: StatusIdle, CreatedAt: time.Now(), PID: 123}
+	m.sessions["a"] = &Session{ID: "a", Status: StatusIdle, SlotIndex: 0, CreatedAt: time.Now()}
 	m.sessions["b"] = &Session{ID: "b", Status: StatusOffloaded, CreatedAt: time.Now()}
 
 	done := make(chan api.Msg, 1)
@@ -157,7 +160,6 @@ func TestBuildHealthResponseWithLockHeld(t *testing.T) {
 		if numVal(health, "size") != 2 {
 			t.Errorf("expected size 2, got %v", health["size"])
 		}
-		// SPEC: Pool Object has slots (count object) and sessions (count object)
 		if _, ok := health["slots"]; !ok {
 			t.Error("missing slots")
 		}
@@ -189,9 +191,6 @@ func newTestManager(t *testing.T) *Manager {
 		poolName: "test",
 		config:   NewConfigManager(p.ConfigJSON()),
 		sessions: make(map[string]*Session),
-		procs:    make(map[string]*ptyPkg.Process),
-		pidToSID: make(map[int]string),
-		pipes:    make(map[string]*attachPipe),
 		done:     make(chan struct{}),
 	}
 }

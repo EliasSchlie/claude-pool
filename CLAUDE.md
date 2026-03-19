@@ -19,6 +19,8 @@ These files require **explicit user permission** before any modification:
 ## Quick Reference
 
 - **Build:** `make build` (compiles binaries to `bin/`)
+- **Unit tests:** `go test ./internal/...`
+- **Integration tests:** `go test ./tests/integration/ -v -timeout 10m` (real Claude sessions, costs tokens)
 - **Install:** `make install` (build + symlink to `~/.local/bin/`)
 - **Deploy plugin:** `./deploy-plugin.sh` (rebuilds binaries, bumps version, copies to cache, then `/reload-plugins`)
 - **Restart pool:** `claude-pool-cli destroy --confirm && claude-pool-cli init --size N` (needed after code/hook changes)
@@ -28,13 +30,21 @@ These files require **explicit user permission** before any modification:
 
 ## Architecture
 
+### Core model
+
+- **Slot** (`slot.go`) — physical resource: process + PTY + terminal emulator. Count = pool size. States: spawning, fresh, clearing, resuming, idle, processing, crashed. Owns `Process`, `Term`, `Pipe`, `ClearQueue`.
+- **Session** (`session.go`) — logical identity: ID, parent, metadata, priority, pinned. Loaded into slots via `bindSession`/`unbindSession`. States: queued, idle, processing, offloaded, error, archived.
+- **Manager** (`manager.go`) — holds `[]*Slot` and `map[string]*Session`. Single mutex.
+
+### File layout
+
 - `.claude-plugin/` — Plugin manifest
 - `skills/claude-pool/` — Plugin skill
 - `hooks/` — Plugin hooks (SessionStart lifecycle signals + PreToolUse PID registry)
 - `cmd/claude-pool/` — Daemon entry point + install/uninstall commands
 - `cmd/claude-pool-cli/` — CLI entry point (thin router, resolves pool from registry)
-- `internal/pool/` — Pool manager, handlers split by domain: `handlers.go` (helpers), `handlers_session.go` (start/followup/wait/stop/capture), `handlers_pool.go` (init/health/config/destroy), `handlers_query.go` (info/ls/subscribe), `handlers_lifecycle.go` (archive/pin/set/resize), `handlers_attach.go` (attach/debug)
-- `internal/` — Other packages: pty, api, attach, discovery, paths, hookfiles
+- `internal/pool/` — Core: `slot.go`, `session.go`, `manager.go`, `lifecycle.go`, `typing.go`, `config.go`, `capture.go`, `persistence.go`, `attach.go`, handlers split by domain (`handlers_session.go`, `handlers_pool.go`, `handlers_query.go`, `handlers_lifecycle.go`, `handlers_attach.go`)
+- `internal/` — Other packages: api, hookfiles, paths, pty
 - `tests/integration/` — Integration tests (real Claude sessions, `--model haiku`)
 - `tests/manual/` — Manual testing directory (own `.claude/` hooks, independent per worktree)
 - `schema/` — JSON Schema (`protocol.json` — must match SPEC.md, validated by tests)
@@ -64,12 +74,23 @@ When a bug is found in production that wasn't caught by integration tests, figur
 
 ## Idle Detection
 
-Processing state is detected by screen content monitoring (`internal/pool/typing.go`), not hooks:
-- **Content above prompt separator changing** → processing
-- **Content stable 3s** → idle (calls `transitionToIdle()` directly)
-- **PTY silent 3s** → idle fallback (no-output edge case)
+Two complementary systems detect slot state transitions:
 
-`watchIdleSignal` only handles `session-start`/`session-clear` triggers for the fresh→idle transition. All other signal triggers are ignored. Don't add new hooks for idle detection — extend `pollBufferInput` instead.
+1. **Screen content monitoring** (`typing.go` → `pollBufferInput`, runs on **slots**):
+   - Content above prompt changing → slot processing
+   - Content stable 1s → slot idle (calls `transitionSlotToIdle()`)
+   - PTY silent 1s → slot idle (fallback)
+   - Pending input detection → surfaced to session via `session.PendingInput`
+
+2. **Hook signal watcher** (`lifecycle.go` → `watchIdleSignal`):
+   - Handles `session-start`/`session-clear` triggers only (spawning/clearing → ready)
+   - All other signal triggers ignored
+
+Don't add new hooks for idle detection — extend `pollBufferInput` instead.
+
+### Clear workflow
+
+`clearSlot()` runs: `/clear` → `/update-plugins` → `/clear`. Each step is delivered when the previous completes (detected by `pollBufferInput`). The slot stays in `SlotClearing` until the queue drains, then becomes `SlotFresh`.
 
 ## Go
 
