@@ -156,6 +156,9 @@ func (m *Manager) clearSlot(sl *Slot) {
 	sl.State = SlotClearing
 
 	m.clearIdleSignals(sl.PID())
+	if sl.Term != nil {
+		sl.Term.resetIdleTracking()
+	}
 	m.deliverPrompt(sl, "/clear")
 }
 
@@ -332,9 +335,12 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 				return
 			}
 
-			// Check for Claude UUID from PID mapping
+			// Check for Claude UUID from PID mapping.
+			// Only discover UUID when the slot is processing or idle — during
+			// clearing/spawning/resuming, /clear generates intermediate UUIDs
+			// that don't correspond to the session's actual transcript.
 			sessionID := sl.SessionID
-			if sessionID != "" {
+			if sessionID != "" && (sl.State == SlotProcessing || sl.State == SlotIdle) {
 				if s := m.sessions[sessionID]; s != nil && s.ClaudeUUID == "" {
 					m.mu.Unlock()
 					if data, err := os.ReadFile(pidMapPath); err == nil {
@@ -378,7 +384,8 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 			lastSignalTS = ts
 			log.Printf("[idle-watch] slot %d: new signal (pid=%d): %s", sl.Index, pid, strings.TrimSpace(string(data)))
 
-			// Extract cwd and transcript from signal
+			// Extract cwd and transcript from signal.
+			// Only set UUID when processing/idle — clearing generates intermediate UUIDs.
 			if s := m.sessions[sl.SessionID]; s != nil {
 				if cwd, ok := sig["cwd"].(string); ok && cwd != "" && s.Cwd != cwd {
 					s.Cwd = cwd
@@ -387,10 +394,12 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 						"sessionId": s.ID, "changes": api.Msg{"cwd": cwd},
 					})
 				}
-				if transcript, ok := sig["transcript"].(string); ok && transcript != "" && s.ClaudeUUID == "" {
-					base := filepath.Base(transcript)
-					if uuid := strings.TrimSuffix(base, ".jsonl"); uuid != base {
-						s.ClaudeUUID = uuid
+				if (sl.State == SlotProcessing || sl.State == SlotIdle) && s.ClaudeUUID == "" {
+					if transcript, ok := sig["transcript"].(string); ok && transcript != "" {
+						base := filepath.Base(transcript)
+						if uuid := strings.TrimSuffix(base, ".jsonl"); uuid != base {
+							s.ClaudeUUID = uuid
+						}
 					}
 				}
 			}
@@ -456,6 +465,9 @@ func (m *Manager) transitionSlotToIdle(sl *Slot) {
 
 		log.Printf("[idle] slot %d session %s: delivering /resume %s", sl.Index, s.ID, uuid)
 		m.broadcastStatus(s, prevStatus)
+		if sl.Term != nil {
+			sl.Term.resetIdleTracking()
+		}
 		m.deliverPrompt(sl, "/resume "+uuid)
 		return
 	}
@@ -471,6 +483,9 @@ func (m *Manager) transitionSlotToIdle(sl *Slot) {
 		s.LastUsedAt = time.Now()
 		log.Printf("[idle] slot %d session %s: delivering pending prompt (%d chars)", sl.Index, s.ID, len(prompt))
 		m.broadcastStatus(s, prevStatus)
+		if sl.Term != nil {
+			sl.Term.resetIdleTracking()
+		}
 		m.deliverPrompt(sl, prompt)
 		return
 	}
@@ -780,6 +795,9 @@ func (m *Manager) claimSlotForQueued(sl *Slot, queued *Session) {
 	if sl.State == SlotFresh || sl.State == SlotIdle {
 		// Slot is ready — deliver immediately
 		m.clearIdleSignals(sl.PID())
+		if sl.Term != nil {
+			sl.Term.resetIdleTracking()
+		}
 
 		if queued.PendingResume != "" {
 			uuid := queued.PendingResume

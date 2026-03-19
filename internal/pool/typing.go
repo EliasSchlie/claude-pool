@@ -41,6 +41,17 @@ type sessionTerm struct {
 	lastIdleTransitionAt   time.Time // prevents duplicate idle transitions for same stable period
 }
 
+// resetIdleTracking invalidates stale idle detection state.
+// Must be called when a slot transitions to an active state (processing,
+// resuming, clearing) to prevent false idle transitions from stale content
+// timestamps. Must be called with the manager mutex held (not st.mu —
+// pollBufferInput reads these fields under the manager lock).
+func (st *sessionTerm) resetIdleTracking() {
+	st.contentChangedAt = time.Time{}
+	st.lastIdleTransitionAt = time.Time{}
+	st.lastOutputTime = time.Now()
+}
+
 func newSessionTerm(proc *ptyPkg.Process, cols, rows int) *sessionTerm {
 	if cols <= 0 {
 		cols = 80
