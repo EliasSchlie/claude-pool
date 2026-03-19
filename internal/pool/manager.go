@@ -21,6 +21,7 @@ import (
 
 	"github.com/EliasSchlie/claude-pool/internal/api"
 	"github.com/EliasSchlie/claude-pool/internal/paths"
+	ptyPkg "github.com/EliasSchlie/claude-pool/internal/pty"
 )
 
 // Manager is the core pool business logic. All state mutations go through its mutex.
@@ -179,6 +180,18 @@ func (m *Manager) sessionPID(sid string) int {
 		return sl.PID()
 	}
 	return 0
+}
+
+// findSlotByProcess returns the slot currently owning the given process, or nil.
+// Used by watcher goroutines to re-locate their slot after potential re-indexing.
+// Must be called with m.mu held.
+func (m *Manager) findSlotByProcess(proc *ptyPkg.Process) *Slot {
+	for _, sl := range m.slots {
+		if sl.Process == proc {
+			return sl
+		}
+	}
+	return nil
 }
 
 // findFreshSlot returns a fresh slot (ready for use), or nil.
