@@ -48,8 +48,11 @@ func Spawn(opts SpawnOpts) (*Process, error) {
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = opts.Cwd
 
-	// Build environment — strip vars that would cause issues in child sessions
-	env := os.Environ()
+	// Build environment with login shell PATH (ensures Homebrew etc. are available
+	// even when daemon is launched from non-login context like Electron or launchd)
+	env := buildEnvWithLoginPATH()
+
+	// Strip vars that would cause issues in child sessions
 	filtered := env[:0]
 	for _, e := range env {
 		if strings.HasPrefix(e, "CLAUDECODE=") || // Prevents "nested session" error
