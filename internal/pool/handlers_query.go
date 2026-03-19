@@ -79,12 +79,14 @@ func (m *Manager) handleLs(id any, req api.Msg) api.Msg {
 			}
 		}
 
-		// SPEC: dedup children from top-level listing
-		if callerId == "" && !all && statusFilter == nil && !showArchived {
-			if s.ParentID != "" {
-				if m.findParentSession(s) != nil {
-					continue
-				}
+		// SPEC: "if a session appears as a child of another session,
+		// it's not repeated as a separate entry."
+		// In tree mode, always dedup. In flat mode, dedup when showing all
+		// sessions (no caller filter) without explicit status/archived filters.
+		dedup := tree || (callerId == "" && !all && statusFilter == nil && !showArchived)
+		if dedup && s.ParentID != "" {
+			if m.findParentSession(s) != nil {
+				continue
 			}
 		}
 
