@@ -44,6 +44,9 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 			sl.State = SlotProcessing
 			s.LastUsedAt = time.Now()
 			m.clearIdleSignals(sl.PID())
+			if sl.Term != nil {
+				sl.Term.resetIdleTracking()
+			}
 			m.deliverPrompt(sl, prompt)
 			s.PendingPrompt = ""
 		} else {
@@ -174,6 +177,9 @@ func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 		s.Status = StatusProcessing
 		sl.State = SlotProcessing
 		s.LastUsedAt = time.Now()
+		if sl.Term != nil {
+			sl.Term.resetIdleTracking()
+		}
 		m.deliverPrompt(sl, prompt)
 		m.broadcastStatus(s, StatusIdle)
 		m.savePoolState()
