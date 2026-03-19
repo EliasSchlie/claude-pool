@@ -244,6 +244,9 @@ func configToMsg(cfg Config) api.Msg {
 	if cfg.Dir != "" {
 		m["dir"] = cfg.Dir
 	}
+	for k, v := range cfg.Extra {
+		m[k] = v
+	}
 	return m
 }
 

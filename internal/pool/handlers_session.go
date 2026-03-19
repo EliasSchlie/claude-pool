@@ -99,8 +99,8 @@ func (m *Manager) handleStartPromptless(id any, s *Session) api.Msg {
 			sl.State = SlotIdle
 			m.clearIdleSignals(sl.PID())
 		} else {
-			// Slot still clearing — will transition to idle when ready
-			s.Status = StatusProcessing
+			// Slot still clearing — session is waiting, not processing (no prompt sent)
+			s.Status = StatusQueued
 		}
 
 		m.broadcastEvent(api.Msg{

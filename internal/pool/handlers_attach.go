@@ -3,6 +3,8 @@ package pool
 import (
 	"fmt"
 	"log"
+	"os"
+	"strings"
 
 	"github.com/EliasSchlie/claude-pool/internal/api"
 )
@@ -192,7 +194,27 @@ func (m *Manager) handleDebugCapture(id any, req api.Msg) api.Msg {
 }
 
 func (m *Manager) handleDebugLogs(id any, req api.Msg) api.Msg {
-	return api.Response(id, "result", api.Msg{
-		"content": "logs are written to daemon stderr (use --follow with process output)",
-	})
+	lines := 50
+	if n, ok := req["lines"].(float64); ok && n > 0 {
+		lines = int(n)
+	}
+
+	logPath := m.paths.DaemonLog()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return api.Response(id, "result", api.Msg{"content": ""})
+		}
+		return api.ErrorResponse(id, "failed to read daemon.log: "+err.Error())
+	}
+
+	all := strings.Split(string(data), "\n")
+	// Remove trailing empty line from split
+	if len(all) > 0 && all[len(all)-1] == "" {
+		all = all[:len(all)-1]
+	}
+	if len(all) > lines {
+		all = all[len(all)-lines:]
+	}
+	return api.Response(id, "result", api.Msg{"content": strings.Join(all, "\n")})
 }
