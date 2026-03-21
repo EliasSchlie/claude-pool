@@ -1224,25 +1224,29 @@ func doPools(jsonMode bool) error {
 // SPEC: "defaults to that session's Claude Code UUID."
 //
 // Uses the PID registry: a PreToolUse Bash hook writes each Claude session's
-// PID → UUID to ~/.claude-pool/pid-registry/. The CLI's process tree is:
-//
-//	Claude process (PID X) → bash shell (PID Y) → claude-pool-cli (this process)
-//
-// So the caller's Claude PID is this process's grandparent.
+// PID → UUID to ~/.claude-pool/pid-registry/. Walks up the process tree
+// looking for any ancestor in the registry, since the depth between
+// claude-pool-cli and the Claude process varies (subshells, Open Cockpit,
+// wrapper scripts, etc.).
 func callerSessionID() string {
-	grandparent, err := parentPID(os.Getppid())
-	if err != nil {
-		return ""
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".claude-pool", "pid-registry", strconv.Itoa(grandparent)))
-	if err != nil {
-		return ""
+	regDir := filepath.Join(home, ".claude-pool", "pid-registry")
+
+	pid := os.Getppid()
+	for i := 0; i < 8 && pid > 1; i++ {
+		data, err := os.ReadFile(filepath.Join(regDir, strconv.Itoa(pid)))
+		if err == nil {
+			return strings.TrimSpace(string(data))
+		}
+		pid, err = parentPID(pid)
+		if err != nil {
+			return ""
+		}
 	}
-	return strings.TrimSpace(string(data))
+	return ""
 }
 
 // parentPID returns the parent PID of the given process.
