@@ -7,36 +7,6 @@ import (
 	"github.com/EliasSchlie/claude-pool/internal/api"
 )
 
-// --- Offload ---
-
-func (m *Manager) handleOffload(id any, req api.Msg) api.Msg {
-	sessionID, _ := req["sessionId"].(string)
-	if sessionID == "" {
-		return api.ErrorResponse(id, "sessionId is required")
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	s := m.resolveSession(sessionID)
-	if s == nil {
-		return api.ErrorResponse(id, "session not found: "+sessionID)
-	}
-
-	if s.Status != StatusIdle {
-		log.Printf("[offload] session %s: rejected, status=%s (need idle)", s.ID, s.Status)
-		return api.ErrorResponse(id, "can only offload idle sessions (current: "+s.Status+")")
-	}
-
-	if s.Pinned {
-		log.Printf("[offload] session %s: auto-unpinning before offload", s.ID)
-	}
-	log.Printf("[offload] session %s: offloading (slot=%d claude=%s)", s.ID, s.SlotIndex, s.ClaudeUUID)
-	m.offloadSession(s)
-	m.savePoolState()
-	return api.OkResponse(id)
-}
-
 // --- Archive ---
 
 func (m *Manager) handleArchive(id any, req api.Msg) api.Msg {

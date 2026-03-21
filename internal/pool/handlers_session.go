@@ -139,7 +139,6 @@ func (m *Manager) handleStartPromptless(id any, s *Session) api.Msg {
 func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 	sessionID, _ := req["sessionId"].(string)
 	prompt, _ := req["prompt"].(string)
-	force, _ := req["force"].(bool)
 
 	if sessionID == "" || prompt == "" {
 		return api.ErrorResponse(id, "sessionId and prompt are required")
@@ -154,7 +153,7 @@ func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 		return api.ErrorResponse(id, "session not found: "+sessionID)
 	}
 
-	log.Printf("[followup] session %s: status=%s force=%v prompt=%d chars", s.ID, s.Status, force, len(prompt))
+	log.Printf("[followup] session %s: status=%s prompt=%d chars", s.ID, s.Status, len(prompt))
 
 	switch s.Status {
 	case StatusIdle:
@@ -194,58 +193,9 @@ func (m *Manager) handleFollowup(id any, req api.Msg) api.Msg {
 			"status":    s.Status,
 		})
 
-	case StatusProcessing:
-		if !force {
-			m.mu.Unlock()
-			return api.ErrorResponse(id, "session is processing; use force: true to override")
-		}
-		sl := m.slotForSession(s)
-		if sl == nil {
-			m.mu.Unlock()
-			return api.ErrorResponse(id, "session has no slot")
-		}
-		log.Printf("[followup] session %s: force-interrupting, sending Ctrl-C (pid=%d)", s.ID, sl.PID())
-		s.LastUsedAt = time.Now()
-		sid := s.ID
-		m.savePoolState()
+	case StatusProcessing, StatusQueued:
 		m.mu.Unlock()
-
-		m.stopProcessingSession(sid, 30*time.Second)
-
-		m.mu.Lock()
-		s = m.sessions[sid]
-		if s == nil || !s.IsLoaded() {
-			m.mu.Unlock()
-			return api.ErrorResponse(id, "session died during force followup")
-		}
-		sl = m.slotForSession(s)
-		if sl == nil {
-			m.mu.Unlock()
-			return api.ErrorResponse(id, "session lost its slot during force followup")
-		}
-		s.Status = StatusProcessing
-		sl.State = SlotProcessing
-		s.LastUsedAt = time.Now()
-		m.deliverPrompt(sl, prompt)
-		m.broadcastStatus(s, StatusIdle)
-		m.mu.Unlock()
-
-		return api.Response(id, "started", api.Msg{
-			"sessionId": sid,
-			"status":    StatusProcessing,
-		})
-
-	case StatusQueued:
-		if !force {
-			m.mu.Unlock()
-			return api.ErrorResponse(id, "session is queued; use force: true to replace prompt")
-		}
-		s.PendingPrompt = prompt
-		m.mu.Unlock()
-		return api.Response(id, "started", api.Msg{
-			"sessionId": s.ID,
-			"status":    s.Status,
-		})
+		return api.ErrorResponse(id, "session is "+s.Status+"; stop first")
 
 	case StatusArchived:
 		m.mu.Unlock()

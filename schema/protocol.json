@@ -355,15 +355,14 @@
     },
 
     "followup": {
-      "description": "Send prompt to session. Auto-resumes if offloaded (queues for loading). Errors if queued/processing unless force. Errors if error unless force (resets retry counter). Errors if archived.",
+      "description": "Send prompt to session. Auto-resumes if offloaded/error (queues for loading). Errors if processing (stop first). Errors if queued (stop first). Errors if archived (unarchive first).",
       "request": {
         "type": "object",
         "properties": {
           "type": { "const": "followup" },
           "id": { "type": "integer" },
           "sessionId": { "$ref": "#/$defs/sessionId" },
-          "prompt": { "type": "string" },
-          "force": { "type": "boolean", "default": false }
+          "prompt": { "type": "string" }
         },
         "required": ["type", "sessionId", "prompt"]
       },
@@ -448,27 +447,6 @@
           "data": { "type": "string" }
         },
         "required": ["type", "sessionId", "data"]
-      },
-      "response": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "ok" },
-          "id": { "type": "integer" }
-        },
-        "required": ["type"]
-      }
-    },
-
-    "offload": {
-      "description": "Manually offload idle session. Frees slot, saves metadata. Errors if busy. Unpins if pinned.",
-      "request": {
-        "type": "object",
-        "properties": {
-          "type": { "const": "offload" },
-          "id": { "type": "integer" },
-          "sessionId": { "$ref": "#/$defs/sessionId" }
-        },
-        "required": ["type", "sessionId"]
       },
       "response": {
         "type": "object",

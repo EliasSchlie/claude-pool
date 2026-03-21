@@ -59,7 +59,7 @@ type Session struct {
 	Flags string // flags used to spawn this session
 }
 
-// ClearPending cancels all pending work (prompt, force, resume).
+// ClearPending cancels all pending work (prompt, resume).
 // Used by stop to ensure idle transitions don't deliver stale prompts.
 func (s *Session) ClearPending() {
 	s.PendingPrompt = ""
