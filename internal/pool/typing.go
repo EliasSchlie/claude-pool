@@ -186,7 +186,7 @@ func (m *Manager) pollBufferInput() {
 	}
 	m.mu.Unlock()
 
-	const idleThreshold = 1 * time.Second
+	const idleThreshold = 2 * time.Second
 
 	for _, item := range toPoll {
 		content := contentAbovePrompt(item.rendered)
