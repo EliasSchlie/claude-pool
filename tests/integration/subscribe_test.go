@@ -142,9 +142,7 @@ func TestSubscribe(t *testing.T) {
 	t.Run("filter by events", func(t *testing.T) {
 		sub := sc.subscribe(Msg{"events": []string{"status"}})
 
-		sc.send(Msg{"type": "offload", "sessionId": s2})
-		p.waitForStatus(s2, "offloaded", 10*time.Second)
-
+		// s2 will be auto-evicted (LRU) when s3 claims a slot
 		r := p.runJSON("start", "--prompt", "respond with exactly: eventfilter")
 		s3 := strVal(r, "sessionId")
 
@@ -357,9 +355,7 @@ func TestSubscribe(t *testing.T) {
 	t.Run("archived and unarchived events", func(t *testing.T) {
 		sub := sc.subscribe(Msg{"events": []string{"archived", "unarchived"}})
 
-		sc.send(Msg{"type": "offload", "sessionId": s2})
-		p.waitForStatus(s2, "offloaded", 10*time.Second)
-
+		// archive offloads idle sessions automatically (spec: "If loaded → offloaded first")
 		sc.send(Msg{"type": "archive", "sessionId": s2})
 		ev, ok := sub.nextWithin(10 * time.Second)
 		if !ok {
