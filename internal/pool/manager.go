@@ -116,8 +116,6 @@ func (m *Manager) Handle(conn net.Conn, req api.Msg) api.Msg {
 		return m.handleInfo(id, req)
 	case "ls":
 		return m.handleLs(id, req)
-	case "offload":
-		return m.handleOffload(id, req)
 	case "archive":
 		return m.handleArchive(id, req)
 	case "unarchive":
