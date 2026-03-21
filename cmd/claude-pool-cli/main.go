@@ -267,15 +267,10 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 
 	sock := filepath.Join(dir, "api.sock")
 
-	// Check if daemon is already running. If so, skip spawn and just send
-	// the init command — handles the case where daemon survived a restart
-	// or was started manually but never received init.
+	// Try connecting to an existing daemon. If it's already running,
+	// skip spawn and just send init (handles manual start or survived restart).
 	initSuccess := false
-	daemonAlreadyRunning := false
-	if c, err := net.DialTimeout("unix", sock, time.Second); err == nil {
-		c.Close()
-		daemonAlreadyRunning = true
-	}
+	existingConn, _ := dial(sock)
 
 	// Parse args for config updates and init message
 	var size int
@@ -355,7 +350,7 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 		return fmt.Errorf("cannot write config: %w", err)
 	}
 
-	if !daemonAlreadyRunning {
+	if existingConn == nil {
 		// Start daemon (detached — must not inherit CLI's stdio pipes).
 		// Daemon handles its own logging to daemon.log. Don't pipe its
 		// stdout/stderr anywhere — the CLI must not hold open file descriptors
@@ -377,23 +372,23 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 
 		// Wait for socket to appear
 		deadline := time.Now().Add(10 * time.Second)
+		var statErr error
 		for time.Now().Before(deadline) {
-			if _, err := os.Stat(sock); err == nil {
+			if _, statErr = os.Stat(sock); statErr == nil {
 				break
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
-		if _, err := os.Stat(sock); err != nil {
+		if statErr != nil {
 			return fmt.Errorf("daemon socket never appeared at %s", sock)
 		}
-	}
 
-	// Connect and send init
-	c, err := dial(sock)
-	if err != nil {
-		return fmt.Errorf("cannot connect to daemon: %w", err)
+		existingConn, err = dial(sock)
+		if err != nil {
+			return fmt.Errorf("cannot connect to daemon: %w", err)
+		}
 	}
-	defer c.close()
+	defer existingConn.close()
 
 	initMsg := map[string]any{"type": "init"}
 	if size > 0 {
@@ -403,7 +398,7 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 		initMsg["noRestore"] = true
 	}
 
-	resp, err := c.send(initMsg)
+	resp, err := existingConn.send(initMsg)
 	if err != nil {
 		return err
 	}
