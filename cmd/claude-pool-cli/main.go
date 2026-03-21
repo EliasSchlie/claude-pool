@@ -112,16 +112,29 @@ func registryPath() (string, error) {
 }
 
 // daemonBin returns the daemon binary path.
-// Respects CLAUDE_POOL_DAEMON env var, defaults to "claude-pool" in PATH.
+// Resolution order:
+//  1. CLAUDE_POOL_DAEMON env var (explicit override)
+//  2. "claude-pool" in PATH
+//  3. Sibling of the CLI binary (same directory as claude-pool-cli)
 func daemonBin() (string, error) {
 	if v := os.Getenv("CLAUDE_POOL_DAEMON"); v != "" {
 		return v, nil
 	}
-	path, err := exec.LookPath("claude-pool")
-	if err != nil {
-		return "", fmt.Errorf("daemon binary not found (set CLAUDE_POOL_DAEMON or add claude-pool to PATH)")
+	if path, err := exec.LookPath("claude-pool"); err == nil {
+		return path, nil
 	}
-	return path, nil
+	// Sibling discovery: daemon binary next to this CLI binary.
+	// Handles symlinks (make install) and direct bin/ usage.
+	if self, err := os.Executable(); err == nil {
+		resolved, err := filepath.EvalSymlinks(self)
+		if err == nil {
+			sibling := filepath.Join(filepath.Dir(resolved), "claude-pool")
+			if info, err := os.Stat(sibling); err == nil && !info.IsDir() {
+				return sibling, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("daemon binary not found (set CLAUDE_POOL_DAEMON or add claude-pool to PATH)")
 }
 
 func main() {
@@ -254,10 +267,14 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 
 	sock := filepath.Join(dir, "api.sock")
 
-	// Check if already running
+	// Check if daemon is already running. If so, skip spawn and just send
+	// the init command — handles the case where daemon survived a restart
+	// or was started manually but never received init.
+	initSuccess := false
+	daemonAlreadyRunning := false
 	if c, err := net.DialTimeout("unix", sock, time.Second); err == nil {
 		c.Close()
-		return fmt.Errorf("pool %q is already running", poolName)
+		daemonAlreadyRunning = true
 	}
 
 	// Parse args for config updates and init message
@@ -338,36 +355,37 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 		return fmt.Errorf("cannot write config: %w", err)
 	}
 
-	// Start daemon (detached — must not inherit CLI's stdio pipes).
-	// Daemon handles its own logging to daemon.log. Don't pipe its
-	// stdout/stderr anywhere — the CLI must not hold open file descriptors
-	// to the daemon (otherwise cmd.Run() in tests blocks until daemon exits).
-	daemon := exec.Command(bin, "--pool-dir", dir)
-	daemon.Stdout = nil
-	daemon.Stderr = nil
-	daemon.Stdin = nil
-	if err := daemon.Start(); err != nil {
-		return fmt.Errorf("cannot start daemon: %w", err)
-	}
-
-	// Kill daemon on any subsequent failure — cleared on success.
-	killDaemon := true
-	defer func() {
-		if killDaemon {
-			daemon.Process.Kill()
+	if !daemonAlreadyRunning {
+		// Start daemon (detached — must not inherit CLI's stdio pipes).
+		// Daemon handles its own logging to daemon.log. Don't pipe its
+		// stdout/stderr anywhere — the CLI must not hold open file descriptors
+		// to the daemon (otherwise cmd.Run() in tests blocks until daemon exits).
+		daemon := exec.Command(bin, "--pool-dir", dir)
+		daemon.Stdout = nil
+		daemon.Stderr = nil
+		daemon.Stdin = nil
+		if err := daemon.Start(); err != nil {
+			return fmt.Errorf("cannot start daemon: %w", err)
 		}
-	}()
 
-	// Wait for socket to appear
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(sock); err == nil {
-			break
+		// Kill daemon on any subsequent failure — cleared on success.
+		defer func() {
+			if !initSuccess {
+				daemon.Process.Kill()
+			}
+		}()
+
+		// Wait for socket to appear
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(sock); err == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if _, err := os.Stat(sock); err != nil {
-		return fmt.Errorf("daemon socket never appeared at %s", sock)
+		if _, err := os.Stat(sock); err != nil {
+			return fmt.Errorf("daemon socket never appeared at %s", sock)
+		}
 	}
 
 	// Connect and send init
@@ -393,7 +411,7 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 		return err
 	}
 
-	killDaemon = false // success — don't kill on exit
+	initSuccess = true // success — don't kill daemon on exit
 
 	// Register pool
 	if err := registerPool(poolName, sock); err != nil {
