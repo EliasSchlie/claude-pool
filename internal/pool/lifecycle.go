@@ -110,7 +110,11 @@ func (m *Manager) spawnSlot(sl *Slot) {
 	log.Printf("[spawn] slot %d: spawned pid=%d (session=%s)", sl.Index, sl.PID(), sl.SessionID)
 
 	m.watchProcessDone(sl)
-	m.autoAcceptTrust(sl)
+	// Skip trust handler when permissions are already bypassed — the trust
+	// prompt never appears, so the handler just wastes 30s timing out.
+	if !strings.Contains(flags, "--dangerously-skip-permissions") {
+		m.autoAcceptTrust(sl)
+	}
 	go m.watchIdleSignal(sl)
 }
 
