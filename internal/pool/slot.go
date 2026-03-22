@@ -35,6 +35,12 @@ type Slot struct {
 	// (/clear → /update-plugins → /clear). Popped one at a time as each
 	// step completes (detected by the typing poller).
 	ClearQueue []string
+
+	// LastClaudeUUID tracks the most recent Claude session UUID seen on this
+	// slot (from session-start signals). Updated by watchIdleSignal even when
+	// no pool session is bound. Adopted by bindSession when a session claims
+	// the slot.
+	LastClaudeUUID string
 }
 
 // IsOccupied returns true if a session is loaded in this slot.
