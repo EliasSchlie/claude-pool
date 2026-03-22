@@ -78,8 +78,8 @@ Two complementary systems detect slot state transitions:
 
 1. **Screen content monitoring** (`typing.go` → `pollBufferInput`, runs on **slots**):
    - Content above prompt changing → slot processing
-   - Content stable 2s → slot idle (calls `transitionSlotToIdle()`)
-   - PTY silent 2s → slot idle (fallback)
+   - Content stable 3s → slot idle (calls `transitionSlotToIdle()`)
+   - PTY silent 3s → slot idle (fallback)
    - Pending input detection → surfaced to session via `session.PendingInput`
 
 2. **Hook signal watcher** (`lifecycle.go` → `watchIdleSignal`):
