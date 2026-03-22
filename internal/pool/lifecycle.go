@@ -383,10 +383,12 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 
 			trigger, _ := sig["trigger"].(string)
 
-			// Track UUID on the slot from session-start signals.
-			// This runs even when no session is bound, so the UUID is
-			// available when a session is later bound via bindSession.
-			if trigger == "session-start" {
+			// Track UUID on the slot from session-start and session-clear
+			// signals. Both carry the current transcript UUID. The clear
+			// workflow fires session-clear (not session-start) for each
+			// step, so we must track both to ensure LastClaudeUUID is set
+			// when bindSession runs.
+			if trigger == "session-start" || trigger == "session-clear" {
 				if transcript, ok := sig["transcript"].(string); ok && transcript != "" {
 					base := filepath.Base(transcript)
 					if uuid := strings.TrimSuffix(base, ".jsonl"); uuid != base {
