@@ -61,7 +61,11 @@ func (m *Manager) spawnSlot(sl *Slot) {
 	flags := cfg.Flags
 	cwd := cfg.Dir
 	if cwd == "" {
-		cwd = m.paths.Root
+		if home, err := os.UserHomeDir(); err == nil {
+			cwd = home
+		} else {
+			cwd = m.paths.Root
+		}
 	}
 	log.Printf("[spawn] slot %d: flags=%q cwd=%s", sl.Index, flags, cwd)
 
