@@ -24,8 +24,9 @@ session_id=$(echo "$input" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\
 # $PPID is the Claude process that spawned this hook
 echo "$session_id" > "$REGISTRY_DIR/$PPID"
 
-# Write to pool-local session-pids — authoritative UUID for the session's
-# actual work (unlike SessionStart which fires during /clear with intermediate UUIDs).
+# Write to pool-local session-pids. Serves as fallback UUID source when
+# SessionStart hooks don't fire (concurrent spawn race). Cleared by the
+# daemon on slot clear, so stale UUIDs don't persist across sessions.
 if [ -n "${CLAUDE_POOL_DIR:-}" ]; then
     [ -d "$CLAUDE_POOL_DIR/session-pids" ] || mkdir -p "$CLAUDE_POOL_DIR/session-pids"
     echo "$session_id" > "$CLAUDE_POOL_DIR/session-pids/$PPID"
