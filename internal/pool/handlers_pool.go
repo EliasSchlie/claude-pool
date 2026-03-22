@@ -75,7 +75,7 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 		liveSessions, offloadedSessions = m.loadPoolState()
 	}
 
-	// Restore live sessions into slots
+	// Bind sessions to slots (but don't spawn yet).
 	restored := 0
 	log.Printf("[init] restoring state: %d live, %d offloaded sessions from pool.json", len(liveSessions), len(offloadedSessions))
 	for _, s := range liveSessions {
@@ -93,11 +93,9 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 			s.PendingResume = s.ClaudeUUID
 		}
 		log.Printf("[init] restoring live session %s into slot %d (resume=%v)", s.ID, sl.Index, s.PendingResume != "")
-		m.spawnSlot(sl)
 		restored++
 	}
 
-	// Restore offloaded sessions into remaining slots
 	for _, s := range offloadedSessions {
 		if restored >= size {
 			log.Printf("[init] session %s exceeds pool size, keeping offloaded", s.ID)
@@ -113,44 +111,45 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 			s.PendingResume = s.ClaudeUUID
 		}
 		log.Printf("[init] restoring offloaded session %s into slot %d (resume=%v)", s.ID, sl.Index, s.PendingResume != "")
-		m.spawnSlot(sl)
 		restored++
 	}
 
-	// Fill remaining slots with fresh processes.
-	// Spawn the first one and wait for it to become idle before spawning the
-	// rest — ensures workspace trust prompt is accepted and cached.
 	remaining := size - restored
 	if remaining > 0 {
 		log.Printf("[init] spawning %d fresh slots", remaining)
-		sl := m.slots[restored]
-		m.spawnSlot(sl)
+	}
 
-		if remaining > 1 {
-			m.mu.Unlock()
-			// Wait for first slot to become ready
-			deadline := time.After(60 * time.Second)
-		waitLoop:
-			for {
-				m.mu.Lock()
-				if sl.State == SlotFresh || sl.State == SlotIdle {
-					m.mu.Unlock()
-					break
-				}
-				ch := m.statusNotify
-				m.mu.Unlock()
-				select {
-				case <-deadline:
-					log.Printf("[init] first slot timed out waiting for ready")
-					break waitLoop
-				case <-ch:
-				}
-			}
+	// Spawn slot 0 first and wait for it to become ready before spawning
+	// the rest. This ensures the first Claude process initializes its
+	// plugin cache, accepts the workspace trust prompt, etc. without
+	// racing against other instances. Without this, concurrent Claude
+	// startups cause plugin hooks to fail for most sessions.
+	m.spawnSlot(m.slots[0])
+
+	if size > 1 {
+		m.mu.Unlock()
+		deadline := time.After(60 * time.Second)
+	waitLoop:
+		for {
 			m.mu.Lock()
-			log.Printf("[init] first slot ready, spawning %d more", remaining-1)
+			sl := m.slots[0]
+			if sl.State == SlotFresh || sl.State == SlotIdle {
+				m.mu.Unlock()
+				break
+			}
+			ch := m.statusNotify
+			m.mu.Unlock()
+			select {
+			case <-deadline:
+				log.Printf("[init] first slot timed out waiting for ready")
+				break waitLoop
+			case <-ch:
+			}
 		}
+		m.mu.Lock()
+		log.Printf("[init] first slot ready, spawning %d more", size-1)
 
-		for i := restored + 1; i < size; i++ {
+		for i := 1; i < size; i++ {
 			m.spawnSlot(m.slots[i])
 		}
 	}
