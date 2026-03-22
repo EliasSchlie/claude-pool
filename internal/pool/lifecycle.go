@@ -17,6 +17,9 @@ import (
 func (m *Manager) newSession(parentID string) *Session {
 	now := time.Now()
 	cwd := m.paths.Root
+	if home, err := os.UserHomeDir(); err == nil {
+		cwd = home
+	}
 	if cfg, err := m.config.Load(); err != nil {
 		log.Printf("[session] config load error (using defaults): %v", err)
 	} else if cfg.Dir != "" {
