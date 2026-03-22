@@ -353,9 +353,11 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 			}
 
 			// Check for Claude UUID from PID mapping.
-			// Only discover UUID when the slot is processing or idle — during
-			// clearing/spawning/resuming, /clear generates intermediate UUIDs
-			// that don't correspond to the session's actual transcript.
+			// State-gated (processing/idle only): the PID map file persists
+			// across /clear and may contain a stale UUID from the previous
+			// session. The transcript-based discovery below uses a trigger
+			// gate instead (session-start only), which is safe in any state
+			// because session-start signals always carry the current UUID.
 			sessionID := sl.SessionID
 			if sessionID != "" && (sl.State == SlotProcessing || sl.State == SlotIdle) {
 				if s := m.sessions[sessionID]; s != nil && s.ClaudeUUID == "" {
