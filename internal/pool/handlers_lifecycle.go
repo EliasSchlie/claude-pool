@@ -149,10 +149,12 @@ func (m *Manager) handleSet(id any, req api.Msg) api.Msg {
 			if s.Status == StatusOffloaded || s.Status == StatusError {
 				prevStatus := s.Status
 				s.Status = StatusQueued
-				m.queue = append([]*Session{s}, m.queue...)
+				m.queue = append(m.queue, s)
 				m.broadcastStatus(s, prevStatus)
 				m.tryDequeueWithEviction(s, s.ID)
 			}
+			// Queued sessions: no reorder needed — popHighestPriority
+			// handles pinned priority at dequeue time.
 
 			m.broadcastEvent(api.Msg{
 				"type": "event", "event": "updated",
@@ -224,9 +226,9 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 				s.Status = StatusProcessing
 			}
 		} else {
-			log.Printf("[pin] session %s: no slots available, queuing at front", s.ID)
+			log.Printf("[pin] session %s: no slots available, queuing (pinned = highest priority)", s.ID)
 			s.Status = StatusQueued
-			m.queue = append([]*Session{s}, m.queue...)
+			m.queue = append(m.queue, s)
 		}
 
 		s.Pinned = true
@@ -255,13 +257,12 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 	if s.Status == StatusOffloaded || s.Status == StatusError {
 		prevStatus := s.Status
 		s.Status = StatusQueued
-		m.queue = append([]*Session{s}, m.queue...)
+		m.queue = append(m.queue, s)
 		m.broadcastStatus(s, prevStatus)
 		m.tryDequeueWithEviction(s, s.ID)
-	} else if s.Status == StatusQueued {
-		m.removeFromQueue(s)
-		m.queue = append([]*Session{s}, m.queue...)
 	}
+	// Queued sessions: no manual reorder needed — popHighestPriority
+	// handles pinned priority at dequeue time.
 
 	m.broadcastEvent(api.Msg{
 		"type": "event", "event": "updated",

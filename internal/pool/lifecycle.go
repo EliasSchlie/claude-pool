@@ -754,6 +754,31 @@ func (m *Manager) removeFromQueue(s *Session) {
 	}
 }
 
+// popHighestPriority removes and returns the highest-priority session from
+// the queue. Within the same priority, FIFO order is preserved (the session
+// that was queued first wins). Pinned sessions are treated as highest priority.
+func (m *Manager) popHighestPriority() *Session {
+	if len(m.queue) == 0 {
+		return nil
+	}
+	bestIdx := 0
+	for i, s := range m.queue {
+		best := m.queue[bestIdx]
+		// Pinned always wins over non-pinned
+		if s.Pinned && !best.Pinned {
+			bestIdx = i
+		} else if !s.Pinned && best.Pinned {
+			// keep best
+		} else if s.Priority > best.Priority {
+			bestIdx = i
+		}
+		// Same priority: keep earlier index (FIFO)
+	}
+	s := m.queue[bestIdx]
+	m.queue = append(m.queue[:bestIdx], m.queue[bestIdx+1:]...)
+	return s
+}
+
 func (m *Manager) tryDequeue() {
 	if len(m.queue) == 0 && m.killTokens == 0 {
 		return
@@ -768,20 +793,18 @@ func (m *Manager) tryDequeue() {
 		if sl == nil {
 			break
 		}
-		queued := m.queue[0]
-		m.queue = m.queue[1:]
+		queued := m.popHighestPriority()
 		m.claimSlotForQueued(sl, queued)
 	}
 }
 
-// serveQueueFromSlot gives a fresh slot to the first queued session.
+// serveQueueFromSlot gives a fresh slot to the highest-priority queued session.
 // Must be called with m.mu held.
 func (m *Manager) serveQueueFromSlot(sl *Slot) {
 	if len(m.queue) == 0 || sl.IsOccupied() {
 		return
 	}
-	queued := m.queue[0]
-	m.queue = m.queue[1:]
+	queued := m.popHighestPriority()
 	m.claimSlotForQueued(sl, queued)
 }
 
