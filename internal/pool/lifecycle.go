@@ -126,7 +126,15 @@ func (m *Manager) bindSession(sl *Slot, s *Session) {
 	sl.SessionID = s.ID
 	s.SlotIndex = sl.Index
 	s.Cwd = sl.cwd()
-	log.Printf("[bind] session %s → slot %d (pid=%d)", s.ID, sl.Index, sl.PID())
+	// Adopt the slot's last-seen Claude UUID. This captures the UUID from
+	// session-start signals that fired before the session was bound (e.g.,
+	// during spawn or clear workflows).
+	if sl.LastClaudeUUID != "" && s.ClaudeUUID == "" {
+		s.ClaudeUUID = sl.LastClaudeUUID
+		log.Printf("[bind] session %s → slot %d (pid=%d) adopted UUID %s", s.ID, sl.Index, sl.PID(), s.ClaudeUUID)
+	} else {
+		log.Printf("[bind] session %s → slot %d (pid=%d)", s.ID, sl.Index, sl.PID())
+	}
 }
 
 // unbindSession removes a session from its slot. Must be called with m.mu held.
@@ -155,9 +163,11 @@ func (m *Manager) clearSlot(sl *Slot) {
 		sl.Pipe = nil
 	}
 
-	// Remove stale PID→UUID mapping so the idle signal watcher doesn't
-	// read the old session's UUID before /clear writes the new one.
+	// Remove stale PID→UUID mapping and reset slot UUID tracking.
+	// The clear workflow will generate new session-start signals with
+	// fresh UUIDs that replace these.
 	os.Remove(m.paths.SessionPID(sl.PID()))
+	sl.LastClaudeUUID = ""
 
 	sl.ClearQueue = []string{"/update-plugins", "/clear"}
 	sl.State = SlotClearing
@@ -373,6 +383,18 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 
 			trigger, _ := sig["trigger"].(string)
 
+			// Track UUID on the slot from session-start signals.
+			// This runs even when no session is bound, so the UUID is
+			// available when a session is later bound via bindSession.
+			if trigger == "session-start" {
+				if transcript, ok := sig["transcript"].(string); ok && transcript != "" {
+					base := filepath.Base(transcript)
+					if uuid := strings.TrimSuffix(base, ".jsonl"); uuid != base {
+						sl.LastClaudeUUID = uuid
+					}
+				}
+			}
+
 			// Extract cwd and transcript from signal.
 			if s := m.sessions[sl.SessionID]; s != nil {
 				if cwd, ok := sig["cwd"].(string); ok && cwd != "" && s.Cwd != cwd {
@@ -382,21 +404,10 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 						"sessionId": s.ID, "changes": api.Msg{"cwd": cwd},
 					})
 				}
-				// Discover UUID from transcript path on session-start signals.
-				// Always update (not just when empty): the clear workflow
-				// generates multiple session-start signals (/clear, /update-plugins,
-				// /clear), and the LAST one is the correct UUID for the session's
-				// work since the prompt is delivered into that Claude session.
-				if trigger == "session-start" {
-					if transcript, ok := sig["transcript"].(string); ok && transcript != "" {
-						base := filepath.Base(transcript)
-						if uuid := strings.TrimSuffix(base, ".jsonl"); uuid != base {
-							if s.ClaudeUUID != uuid {
-								log.Printf("[idle-watch] slot %d session %s: UUID %s → %s", sl.Index, s.ID, s.ClaudeUUID, uuid)
-							}
-							s.ClaudeUUID = uuid
-						}
-					}
+				// Update session UUID from slot's tracked UUID.
+				if sl.LastClaudeUUID != "" && s.ClaudeUUID != sl.LastClaudeUUID {
+					log.Printf("[idle-watch] slot %d session %s: UUID %s → %s", sl.Index, s.ID, s.ClaudeUUID, sl.LastClaudeUUID)
+					s.ClaudeUUID = sl.LastClaudeUUID
 				}
 			}
 
