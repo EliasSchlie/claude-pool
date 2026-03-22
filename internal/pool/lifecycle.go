@@ -397,7 +397,7 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 				}
 			}
 
-			// Extract cwd and transcript from signal.
+			// Extract cwd and update session UUID from signal.
 			if s := m.sessions[sl.SessionID]; s != nil {
 				if cwd, ok := sig["cwd"].(string); ok && cwd != "" && s.Cwd != cwd {
 					s.Cwd = cwd

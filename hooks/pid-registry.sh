@@ -24,6 +24,14 @@ session_id=$(echo "$input" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\
 # $PPID is the Claude process that spawned this hook
 echo "$session_id" > "$REGISTRY_DIR/$PPID"
 
+# Also write to pool-local session-pids if in a pool session.
+# This is the authoritative UUID for the session's actual work
+# (unlike SessionStart which fires during /clear with intermediate UUIDs).
+if [ -n "${CLAUDE_POOL_DIR:-}" ]; then
+    mkdir -p "$CLAUDE_POOL_DIR/session-pids"
+    echo "$session_id" > "$CLAUDE_POOL_DIR/session-pids/$PPID"
+fi
+
 # Clean up stale entries ~1 in 20 invocations (avoid hot-path overhead)
 if (( RANDOM % 20 == 0 )); then
     for f in "$REGISTRY_DIR"/*; do
