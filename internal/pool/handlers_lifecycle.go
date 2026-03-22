@@ -223,7 +223,9 @@ func (m *Manager) handlePin(id any, req api.Msg) api.Msg {
 				s.Status = StatusIdle
 				sl.State = SlotIdle
 			} else {
-				s.Status = StatusProcessing
+				// Slot still clearing — keep queued until transitionSlotToIdle
+				// delivers the work. Same fix as handleStart/claimSlotForQueued.
+				s.Status = StatusQueued
 			}
 		} else {
 			log.Printf("[pin] session %s: no slots available, queuing (pinned = highest priority)", s.ID)
