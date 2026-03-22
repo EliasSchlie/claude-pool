@@ -50,9 +50,10 @@ func (m *Manager) handleStart(id any, req api.Msg) api.Msg {
 			m.deliverPrompt(sl, prompt)
 			s.PendingPrompt = ""
 		} else {
-			// Slot still clearing — queue prompt for delivery when ready
+			// Slot still clearing — queue prompt for delivery when ready.
+			// Keep queued status until transitionSlotToIdle delivers the prompt.
 			log.Printf("[start] session %s: slot %d still %s, queuing prompt", s.ID, sl.Index, sl.State)
-			s.Status = StatusProcessing
+			s.Status = StatusQueued
 			s.PendingPrompt = prompt
 		}
 

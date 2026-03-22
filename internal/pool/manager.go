@@ -201,8 +201,10 @@ func (m *Manager) findFreshSlot() *Slot {
 		if sl.State == SlotFresh && !sl.IsOccupied() {
 			return sl // best case — immediately ready
 		}
-		// Clearing slots will become fresh soon — less preferred but acceptable
-		if sl.State == SlotClearing && candidate == nil {
+		// Clearing slots will become fresh soon — less preferred but acceptable.
+		// Must be unoccupied: a clearing slot already bound to a session is
+		// reserved for that session's pending work.
+		if sl.State == SlotClearing && !sl.IsOccupied() && candidate == nil {
 			candidate = sl
 		}
 	}

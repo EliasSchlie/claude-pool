@@ -370,22 +370,22 @@ func doInit(poolName string, args []string, jsonMode bool) error {
 			}
 		}()
 
-		// Wait for socket to appear
+		// Remove stale socket before polling — the daemon will create a fresh
+		// one via os.Remove + net.Listen. Without this, os.Stat would succeed
+		// on the stale file and we'd try to dial before the daemon is ready.
+		os.Remove(sock)
+
+		// Wait for daemon to accept connections (not just socket file existence).
 		deadline := time.Now().Add(10 * time.Second)
-		var statErr error
 		for time.Now().Before(deadline) {
-			if _, statErr = os.Stat(sock); statErr == nil {
+			if c, err := dial(sock); err == nil {
+				existingConn = c
 				break
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
-		if statErr != nil {
-			return fmt.Errorf("daemon socket never appeared at %s", sock)
-		}
-
-		existingConn, err = dial(sock)
-		if err != nil {
-			return fmt.Errorf("cannot connect to daemon: %w", err)
+		if existingConn == nil {
+			return fmt.Errorf("daemon never became reachable at %s", sock)
 		}
 	}
 	defer existingConn.close()

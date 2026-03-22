@@ -820,9 +820,10 @@ func (m *Manager) claimSlotForQueued(sl *Slot, queued *Session) {
 			log.Printf("[claim] slot %d session %s: claiming slot (promptless)", sl.Index, queued.ID)
 		}
 	} else {
-		// Slot still starting (clearing/spawning) — wait for idle signal
-		queued.Status = StatusProcessing
-		// Status will be corrected when transitionSlotToIdle fires
+		// Slot still starting (clearing/spawning) — keep queued status until
+		// transitionSlotToIdle fires and delivers the actual work.
+		// Don't set StatusProcessing here: the session isn't doing work yet,
+		// and reporting it as "processing" inflates the health count.
 	}
 
 	if queued.Status != StatusQueued {
