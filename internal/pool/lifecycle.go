@@ -364,6 +364,22 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 			// Read signal file
 			data, err := os.ReadFile(signalPath)
 			if err != nil {
+				// Fallback: if no signal file, try session-pids/<PID>.
+				// SessionStart hooks sometimes don't fire when many Claude
+				// sessions spawn simultaneously. The PreToolUse Bash hook
+				// (pid-registry.sh) writes the UUID reliably during processing.
+				if sl.LastClaudeUUID == "" {
+					if pidData, pidErr := os.ReadFile(m.paths.SessionPID(pid)); pidErr == nil {
+						if uuid := strings.TrimSpace(string(pidData)); uuid != "" {
+							sl.LastClaudeUUID = uuid
+							log.Printf("[idle-watch] slot %d: UUID from session-pids (pid=%d): %s", sl.Index, pid, uuid)
+							if s := m.sessions[sl.SessionID]; s != nil && s.ClaudeUUID != uuid {
+								log.Printf("[idle-watch] slot %d session %s: UUID %s → %s (from pid-registry)", sl.Index, s.ID, s.ClaudeUUID, uuid)
+								s.ClaudeUUID = uuid
+							}
+						}
+					}
+				}
 				m.mu.Unlock()
 				continue
 			}
