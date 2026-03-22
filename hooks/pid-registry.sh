@@ -11,7 +11,7 @@
 set -euo pipefail
 
 REGISTRY_DIR="${HOME}/.claude-pool/pid-registry"
-mkdir -p "$REGISTRY_DIR"
+[ -d "$REGISTRY_DIR" ] || mkdir -p "$REGISTRY_DIR"
 
 input=""
 read -t 1 -r input 2>/dev/null || true
@@ -24,11 +24,10 @@ session_id=$(echo "$input" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\
 # $PPID is the Claude process that spawned this hook
 echo "$session_id" > "$REGISTRY_DIR/$PPID"
 
-# Also write to pool-local session-pids if in a pool session.
-# This is the authoritative UUID for the session's actual work
-# (unlike SessionStart which fires during /clear with intermediate UUIDs).
+# Write to pool-local session-pids — authoritative UUID for the session's
+# actual work (unlike SessionStart which fires during /clear with intermediate UUIDs).
 if [ -n "${CLAUDE_POOL_DIR:-}" ]; then
-    mkdir -p "$CLAUDE_POOL_DIR/session-pids"
+    [ -d "$CLAUDE_POOL_DIR/session-pids" ] || mkdir -p "$CLAUDE_POOL_DIR/session-pids"
     echo "$session_id" > "$CLAUDE_POOL_DIR/session-pids/$PPID"
 fi
 

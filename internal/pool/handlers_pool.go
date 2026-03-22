@@ -2,6 +2,7 @@ package pool
 
 import (
 	"log"
+	"os"
 	"time"
 
 	"github.com/EliasSchlie/claude-pool/internal/api"
@@ -234,6 +235,11 @@ func (m *Manager) handleDestroy(id any, req api.Msg) api.Msg {
 			}
 			s.SlotIndex = -1
 			s.PendingInput = ""
+		}
+		// Clean up PID-keyed files before killing the process.
+		if sl.PID() > 0 {
+			os.Remove(m.paths.SessionPID(sl.PID()))
+			os.Remove(m.paths.IdleSignal(sl.PID()))
 		}
 		sl.SessionID = ""
 		log.Printf("[destroy] killing slot %d (pid=%d)", sl.Index, sl.PID())
