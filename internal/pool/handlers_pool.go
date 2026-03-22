@@ -119,6 +119,11 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 		log.Printf("[init] spawning %d fresh slots", remaining)
 	}
 
+	// Start typing poller early — the wait loop below may trigger
+	// keepFresh → clearSlot, which needs the poller to detect clearing
+	// step completions.
+	m.startTypingPoller()
+
 	// Spawn slot 0 first and wait for it to become ready before spawning
 	// the rest. This ensures the first Claude process initializes its
 	// plugin cache, accepts the workspace trust prompt, etc. without
@@ -156,7 +161,7 @@ func (m *Manager) handleInit(id any, req api.Msg) api.Msg {
 
 	log.Printf("[init] pool initialized: %d slots", size)
 	m.savePoolState()
-	m.startTypingPoller()
+	// Typing poller already started above (before wait loop).
 	m.startMaintenanceLoop()
 
 	return m.buildHealthResponse(id)
