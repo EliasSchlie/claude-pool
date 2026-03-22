@@ -61,11 +61,7 @@ func (m *Manager) spawnSlot(sl *Slot) {
 	flags := cfg.Flags
 	cwd := cfg.Dir
 	if cwd == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			cwd = home
-		} else {
-			cwd = m.paths.Root
-		}
+		cwd = m.paths.Root
 	}
 	log.Printf("[spawn] slot %d: flags=%q cwd=%s", sl.Index, flags, cwd)
 
@@ -288,14 +284,22 @@ func (m *Manager) watchProcessDone(sl *Slot) {
 			return // slot was killed or process replaced
 		}
 
-		// If a session is loaded, mark it offloaded
-		if s := m.sessions[sl.SessionID]; s != nil && s.IsLive() {
+		// If a session is loaded, handle it: live sessions go to offloaded,
+		// queued sessions (pre-bound to clearing slots) go back to the queue.
+		if s := m.sessions[sl.SessionID]; s != nil {
 			prevStatus := s.Status
-			s.Status = StatusOffloaded
-			s.PendingInput = ""
-			s.SlotIndex = -1
-			log.Printf("[process-exit] slot %d session %s: %s → offloaded (process died)", sl.Index, s.ID, prevStatus)
-			m.broadcastStatus(s, prevStatus)
+			if s.IsLive() {
+				s.Status = StatusOffloaded
+				s.PendingInput = ""
+				s.SlotIndex = -1
+				log.Printf("[process-exit] slot %d session %s: %s → offloaded (process died)", sl.Index, s.ID, prevStatus)
+				m.broadcastStatus(s, prevStatus)
+			} else if s.Status == StatusQueued {
+				// Session was pre-bound to a clearing slot that died before
+				// delivering the prompt. Unbind and re-queue.
+				log.Printf("[process-exit] slot %d session %s: queued session unbound (process died)", sl.Index, s.ID)
+				m.unbindSession(sl)
+			}
 		}
 
 		// Clean up slot — don't kill process (already dead)
@@ -392,8 +396,9 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 			lastSignalTS = ts
 			log.Printf("[idle-watch] slot %d: new signal (pid=%d): %s", sl.Index, pid, strings.TrimSpace(string(data)))
 
+			trigger, _ := sig["trigger"].(string)
+
 			// Extract cwd and transcript from signal.
-			// Only set UUID when processing/idle — clearing generates intermediate UUIDs.
 			if s := m.sessions[sl.SessionID]; s != nil {
 				if cwd, ok := sig["cwd"].(string); ok && cwd != "" && s.Cwd != cwd {
 					s.Cwd = cwd
@@ -402,7 +407,11 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 						"sessionId": s.ID, "changes": api.Msg{"cwd": cwd},
 					})
 				}
-				if (sl.State == SlotProcessing || sl.State == SlotIdle) && s.ClaudeUUID == "" {
+				// Discover UUID from transcript path. Safe on session-start
+				// signals (which carry the real UUID) in any slot state.
+				// During clearing, only session-clear signals fire with
+				// intermediate UUIDs — skip those.
+				if s.ClaudeUUID == "" && trigger == "session-start" {
 					if transcript, ok := sig["transcript"].(string); ok && transcript != "" {
 						base := filepath.Base(transcript)
 						if uuid := strings.TrimSuffix(base, ".jsonl"); uuid != base {
@@ -414,7 +423,6 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 
 			// watchIdleSignal only handles startup signals (session-start, session-clear).
 			// Processing→idle is handled by content monitoring in pollBufferInput.
-			trigger, _ := sig["trigger"].(string)
 			if trigger != "session-start" && trigger != "session-clear" {
 				m.mu.Unlock()
 				continue
@@ -456,10 +464,11 @@ func (m *Manager) transitionSlotToIdle(sl *Slot) {
 
 	s := m.sessions[sl.SessionID]
 	if s == nil {
-		// No session — mark slot fresh and wake any waiters (e.g., init waitLoop)
+		// No session — mark slot fresh, wake waiters, and serve any queued sessions.
 		sl.State = SlotFresh
 		close(m.statusNotify)
 		m.statusNotify = make(chan struct{})
+		m.serveQueueFromSlot(sl)
 		return
 	}
 
