@@ -61,7 +61,11 @@ func (m *Manager) spawnSlot(sl *Slot) {
 	flags := cfg.Flags
 	cwd := cfg.Dir
 	if cwd == "" {
-		cwd = m.paths.Root
+		if home, err := os.UserHomeDir(); err == nil {
+			cwd = home
+		} else {
+			cwd = m.paths.Root
+		}
 	}
 	log.Printf("[spawn] slot %d: flags=%q cwd=%s", sl.Index, flags, cwd)
 
@@ -110,11 +114,7 @@ func (m *Manager) spawnSlot(sl *Slot) {
 	log.Printf("[spawn] slot %d: spawned pid=%d (session=%s)", sl.Index, sl.PID(), sl.SessionID)
 
 	m.watchProcessDone(sl)
-	// Skip trust handler when permissions are already bypassed — the trust
-	// prompt never appears, so the handler just wastes 30s timing out.
-	if !strings.Contains(flags, "--dangerously-skip-permissions") {
-		m.autoAcceptTrust(sl)
-	}
+	m.autoAcceptTrust(sl)
 	go m.watchIdleSignal(sl)
 }
 
@@ -296,9 +296,11 @@ func (m *Manager) watchProcessDone(sl *Slot) {
 				m.broadcastStatus(s, prevStatus)
 			} else if s.Status == StatusQueued {
 				// Session was pre-bound to a clearing slot that died before
-				// delivering the prompt. Unbind and re-queue.
-				log.Printf("[process-exit] slot %d session %s: queued session unbound (process died)", sl.Index, s.ID)
+				// delivering the prompt. Unbind and re-queue so it gets
+				// picked up by the next available slot.
+				log.Printf("[process-exit] slot %d session %s: queued session re-queued (process died)", sl.Index, s.ID)
 				m.unbindSession(sl)
+				m.queue = append(m.queue, s)
 			}
 		}
 
