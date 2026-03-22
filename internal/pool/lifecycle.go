@@ -17,6 +17,9 @@ import (
 func (m *Manager) newSession(parentID string) *Session {
 	now := time.Now()
 	cwd := m.paths.Root
+	if home, err := os.UserHomeDir(); err == nil {
+		cwd = home
+	}
 	if cfg, err := m.config.Load(); err != nil {
 		log.Printf("[session] config load error (using defaults): %v", err)
 	} else if cfg.Dir != "" {
@@ -61,7 +64,11 @@ func (m *Manager) spawnSlot(sl *Slot) {
 	flags := cfg.Flags
 	cwd := cfg.Dir
 	if cwd == "" {
-		cwd = m.paths.Root
+		if home, err := os.UserHomeDir(); err == nil {
+			cwd = home
+		} else {
+			cwd = m.paths.Root
+		}
 	}
 	log.Printf("[spawn] slot %d: flags=%q cwd=%s", sl.Index, flags, cwd)
 
@@ -280,14 +287,24 @@ func (m *Manager) watchProcessDone(sl *Slot) {
 			return // slot was killed or process replaced
 		}
 
-		// If a session is loaded, mark it offloaded
-		if s := m.sessions[sl.SessionID]; s != nil && s.IsLive() {
+		// If a session is loaded, handle it: live sessions go to offloaded,
+		// queued sessions (pre-bound to clearing slots) go back to the queue.
+		if s := m.sessions[sl.SessionID]; s != nil {
 			prevStatus := s.Status
-			s.Status = StatusOffloaded
-			s.PendingInput = ""
-			s.SlotIndex = -1
-			log.Printf("[process-exit] slot %d session %s: %s → offloaded (process died)", sl.Index, s.ID, prevStatus)
-			m.broadcastStatus(s, prevStatus)
+			if s.IsLive() {
+				s.Status = StatusOffloaded
+				s.PendingInput = ""
+				s.SlotIndex = -1
+				log.Printf("[process-exit] slot %d session %s: %s → offloaded (process died)", sl.Index, s.ID, prevStatus)
+				m.broadcastStatus(s, prevStatus)
+			} else if s.Status == StatusQueued {
+				// Session was pre-bound to a clearing slot that died before
+				// delivering the prompt. Unbind and re-queue so it gets
+				// picked up by the next available slot.
+				log.Printf("[process-exit] slot %d session %s: queued session re-queued (process died)", sl.Index, s.ID)
+				m.unbindSession(sl)
+				m.queue = append(m.queue, s)
+			}
 		}
 
 		// Clean up slot — don't kill process (already dead)
@@ -336,9 +353,11 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 			}
 
 			// Check for Claude UUID from PID mapping.
-			// Only discover UUID when the slot is processing or idle — during
-			// clearing/spawning/resuming, /clear generates intermediate UUIDs
-			// that don't correspond to the session's actual transcript.
+			// State-gated (processing/idle only): the PID map file persists
+			// across /clear and may contain a stale UUID from the previous
+			// session. The transcript-based discovery below uses a trigger
+			// gate instead (session-start only), which is safe in any state
+			// because session-start signals always carry the current UUID.
 			sessionID := sl.SessionID
 			if sessionID != "" && (sl.State == SlotProcessing || sl.State == SlotIdle) {
 				if s := m.sessions[sessionID]; s != nil && s.ClaudeUUID == "" {
@@ -384,8 +403,9 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 			lastSignalTS = ts
 			log.Printf("[idle-watch] slot %d: new signal (pid=%d): %s", sl.Index, pid, strings.TrimSpace(string(data)))
 
+			trigger, _ := sig["trigger"].(string)
+
 			// Extract cwd and transcript from signal.
-			// Only set UUID when processing/idle — clearing generates intermediate UUIDs.
 			if s := m.sessions[sl.SessionID]; s != nil {
 				if cwd, ok := sig["cwd"].(string); ok && cwd != "" && s.Cwd != cwd {
 					s.Cwd = cwd
@@ -394,7 +414,11 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 						"sessionId": s.ID, "changes": api.Msg{"cwd": cwd},
 					})
 				}
-				if (sl.State == SlotProcessing || sl.State == SlotIdle) && s.ClaudeUUID == "" {
+				// Discover UUID from transcript path. Safe on session-start
+				// signals (which carry the real UUID) in any slot state.
+				// During clearing, only session-clear signals fire with
+				// intermediate UUIDs — skip those.
+				if s.ClaudeUUID == "" && trigger == "session-start" {
 					if transcript, ok := sig["transcript"].(string); ok && transcript != "" {
 						base := filepath.Base(transcript)
 						if uuid := strings.TrimSuffix(base, ".jsonl"); uuid != base {
@@ -406,7 +430,6 @@ func (m *Manager) watchIdleSignal(sl *Slot) {
 
 			// watchIdleSignal only handles startup signals (session-start, session-clear).
 			// Processing→idle is handled by content monitoring in pollBufferInput.
-			trigger, _ := sig["trigger"].(string)
 			if trigger != "session-start" && trigger != "session-clear" {
 				m.mu.Unlock()
 				continue
@@ -448,10 +471,11 @@ func (m *Manager) transitionSlotToIdle(sl *Slot) {
 
 	s := m.sessions[sl.SessionID]
 	if s == nil {
-		// No session — mark slot fresh and wake any waiters (e.g., init waitLoop)
+		// No session — mark slot fresh, wake waiters, and serve any queued sessions.
 		sl.State = SlotFresh
 		close(m.statusNotify)
 		m.statusNotify = make(chan struct{})
+		m.serveQueueFromSlot(sl)
 		return
 	}
 
@@ -750,6 +774,31 @@ func (m *Manager) removeFromQueue(s *Session) {
 	}
 }
 
+// popHighestPriority removes and returns the highest-priority session from
+// the queue. Within the same priority, FIFO order is preserved (the session
+// that was queued first wins). Pinned sessions are treated as highest priority.
+func (m *Manager) popHighestPriority() *Session {
+	if len(m.queue) == 0 {
+		return nil
+	}
+	bestIdx := 0
+	for i, s := range m.queue {
+		best := m.queue[bestIdx]
+		// Pinned always wins over non-pinned
+		if s.Pinned && !best.Pinned {
+			bestIdx = i
+		} else if !s.Pinned && best.Pinned {
+			// keep best
+		} else if s.Priority > best.Priority {
+			bestIdx = i
+		}
+		// Same priority: keep earlier index (FIFO)
+	}
+	s := m.queue[bestIdx]
+	m.queue = append(m.queue[:bestIdx], m.queue[bestIdx+1:]...)
+	return s
+}
+
 func (m *Manager) tryDequeue() {
 	if len(m.queue) == 0 && m.killTokens == 0 {
 		return
@@ -764,20 +813,18 @@ func (m *Manager) tryDequeue() {
 		if sl == nil {
 			break
 		}
-		queued := m.queue[0]
-		m.queue = m.queue[1:]
+		queued := m.popHighestPriority()
 		m.claimSlotForQueued(sl, queued)
 	}
 }
 
-// serveQueueFromSlot gives a fresh slot to the first queued session.
+// serveQueueFromSlot gives a fresh slot to the highest-priority queued session.
 // Must be called with m.mu held.
 func (m *Manager) serveQueueFromSlot(sl *Slot) {
 	if len(m.queue) == 0 || sl.IsOccupied() {
 		return
 	}
-	queued := m.queue[0]
-	m.queue = m.queue[1:]
+	queued := m.popHighestPriority()
 	m.claimSlotForQueued(sl, queued)
 }
 
@@ -820,9 +867,10 @@ func (m *Manager) claimSlotForQueued(sl *Slot, queued *Session) {
 			log.Printf("[claim] slot %d session %s: claiming slot (promptless)", sl.Index, queued.ID)
 		}
 	} else {
-		// Slot still starting (clearing/spawning) — wait for idle signal
-		queued.Status = StatusProcessing
-		// Status will be corrected when transitionSlotToIdle fires
+		// Slot still starting (clearing/spawning) — keep queued status until
+		// transitionSlotToIdle fires and delivers the actual work.
+		// Don't set StatusProcessing here: the session isn't doing work yet,
+		// and reporting it as "processing" inflates the health count.
 	}
 
 	if queued.Status != StatusQueued {

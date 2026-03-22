@@ -264,6 +264,10 @@ Available via both the CLI and the API. The CLI provides a terminal-friendly exp
 
 ## Internals
 
+### Queue Order
+
+When multiple sessions are queued, the next slot goes to the highest-priority session. Within the same priority, FIFO order is preserved. Pinned sessions are treated as highest priority regardless of their numeric priority value.
+
 ### Eviction Policy
 
 When a slot is needed and none are free:
