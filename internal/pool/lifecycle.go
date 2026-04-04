@@ -578,10 +578,8 @@ func (m *Manager) deliverSlotPrompt(sl *Slot, prompt string, settleDelay time.Du
 			return
 		}
 
-		if !strings.HasPrefix(prompt, "/") {
-			if !waitForBufferContent(proc, prompt, 200*time.Millisecond) {
-				log.Printf("[deliver] pid=%d: prompt not echoed in buffer, sending Enter", pid)
-			}
+		if !waitForBufferContent(proc, prompt, 200*time.Millisecond) {
+			log.Printf("[deliver] pid=%d: prompt not echoed in buffer, sending Enter", pid)
 		}
 
 		if err := proc.WriteString("\r"); err != nil {
