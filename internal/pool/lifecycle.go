@@ -81,10 +81,24 @@ func (m *Manager) spawnSlot(sl *Slot) {
 		env["CLAUDE_POOL_SESSION_ID"] = sl.SessionID
 	}
 
+	// If the bound session has a PendingResume, pass it as a CLI flag (--resume)
+	// instead of sending /resume via PTY input later. Under concurrent startup,
+	// Claude Code's event loop may be blocked loading modules, causing PTY input
+	// to accumulate in the kernel buffer and arrive as a single read — which makes
+	// Claude treat "/resume <uuid>\r" as a user message instead of a slash command.
+	// The --resume flag is processed at CLI startup, bypassing PTY input entirely.
+	var resumeUUID string
+	if s := m.sessions[sl.SessionID]; s != nil && s.PendingResume != "" {
+		resumeUUID = s.PendingResume
+		s.PendingResume = ""
+		log.Printf("[spawn] slot %d session %s: using --resume %s", sl.Index, s.ID, resumeUUID)
+	}
+
 	opts := ptyPkg.SpawnOpts{
-		Flags: flags,
-		Cwd:   cwd,
-		Env:   env,
+		Flags:  flags,
+		Cwd:    cwd,
+		Env:    env,
+		Resume: resumeUUID,
 	}
 
 	proc, err := ptyPkg.Spawn(opts)
@@ -560,6 +574,7 @@ func (m *Manager) deliverSlotPrompt(sl *Slot, prompt string, settleDelay time.Du
 	}
 
 	pid := proc.PID()
+	term := sl.Term // capture for goroutine — has its own mutex, safe without m.mu
 	done := m.done
 	ch := make(chan struct{})
 	sl.Delivering = ch
@@ -594,10 +609,8 @@ func (m *Manager) deliverSlotPrompt(sl *Slot, prompt string, settleDelay time.Du
 			return
 		}
 
-		if !strings.HasPrefix(prompt, "/") {
-			if !waitForBufferContent(proc, prompt, 200*time.Millisecond) {
-				log.Printf("[deliver] pid=%d: prompt not echoed in buffer, sending Enter", pid)
-			}
+		if !waitForRenderedContent(proc, term, prompt, 2*time.Second) {
+			log.Printf("[deliver] pid=%d: prompt not echoed in buffer, sending Enter", pid)
 		}
 
 		if err := proc.WriteString("\r"); err != nil {
@@ -622,7 +635,11 @@ func (m *Manager) awaitSlotDelivery(slotIdx int) {
 	}
 }
 
-func waitForBufferContent(proc *ptyPkg.Process, text string, timeout time.Duration) bool {
+// waitForRenderedContent polls the terminal's rendered screen (preferred) and raw
+// PTY buffer (fallback) for the given text. The rendered screen strips ANSI escape
+// sequences, which is essential for slash commands — Claude Code's TUI renders input
+// with cursor positioning sequences that break plain substring matching on raw bytes.
+func waitForRenderedContent(proc *ptyPkg.Process, term *sessionTerm, text string, timeout time.Duration) bool {
 	tailSize := len(text) + 500
 	deadline := time.After(timeout)
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -633,6 +650,14 @@ func waitForBufferContent(proc *ptyPkg.Process, text string, timeout time.Durati
 		case <-deadline:
 			return false
 		case <-ticker.C:
+			// Check rendered screen first (ANSI-stripped, matches what the user sees)
+			if term != nil {
+				screen := term.renderedScreen()
+				if strings.Contains(screen, text) {
+					return true
+				}
+			}
+			// Fallback: check raw PTY buffer
 			buf := string(proc.Buffer())
 			tail := buf
 			if len(buf) > tailSize {
