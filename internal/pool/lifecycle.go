@@ -81,10 +81,23 @@ func (m *Manager) spawnSlot(sl *Slot) {
 		env["CLAUDE_POOL_SESSION_ID"] = sl.SessionID
 	}
 
+	// If the bound session has a PendingResume, pass it as a CLI flag (--resume)
+	// instead of sending /resume via PTY input later. During concurrent startup,
+	// Claude Code's stdin handler may not be attached yet — PTY input accumulates
+	// in the kernel buffer and arrives as a single read, making Claude treat
+	// "/resume <uuid>" as a user message instead of a slash command.
+	var resumeUUID string
+	if s := m.sessions[sl.SessionID]; s != nil && s.PendingResume != "" {
+		resumeUUID = s.PendingResume
+		s.PendingResume = ""
+		log.Printf("[spawn] slot %d session %s: using --resume %s", sl.Index, s.ID, resumeUUID)
+	}
+
 	opts := ptyPkg.SpawnOpts{
-		Flags: flags,
-		Cwd:   cwd,
-		Env:   env,
+		Flags:  flags,
+		Cwd:    cwd,
+		Env:    env,
+		Resume: resumeUUID,
 	}
 
 	proc, err := ptyPkg.Spawn(opts)
